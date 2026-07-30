@@ -6,6 +6,7 @@ import 'screens/credential_matrix_screen.dart';
 import 'screens/diagnostics_screen.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const MuxportApp());
 }
 
@@ -55,10 +56,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _screens,
-      ),
+      body: IndexedStack(index: _currentIndex, children: _screens),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) {
@@ -67,22 +65,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           });
         },
         destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.computer),
-            label: 'Hosts',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.forum),
-            label: 'Sessions',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.gavel),
-            label: 'Approvals',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.key),
-            label: 'Accounts',
-          ),
+          NavigationDestination(icon: Icon(Icons.computer), label: 'Hosts'),
+          NavigationDestination(icon: Icon(Icons.forum), label: 'Sessions'),
+          NavigationDestination(icon: Icon(Icons.gavel), label: 'Approvals'),
+          NavigationDestination(icon: Icon(Icons.key), label: 'Accounts'),
           NavigationDestination(
             icon: Icon(Icons.bug_report),
             label: 'Diagnostics',

@@ -388,6 +388,25 @@ made no further progress during a ten-minute attempt or a separate monitored
 retry; it is not claimed as passing. Secure device-identity storage,
 authenticated transport, and the demo UI remain unconnected.
 
+## Native mobile device identity
+
+The phone now has a versioned Ed25519 identity manager backed by
+`flutter_secure_storage`. Android uses an isolated RSA-OAEP/AES-GCM namespace
+with destructive reset disabled and application backup off. iOS uses a
+non-synchronizing, this-device-only Keychain item after first unlock and opts
+into Secure Enclave wrapping with the package's documented fallback.
+
+Creation is read-back verified, concurrent callers share one enrollment, and
+decoded seed buffers are overwritten after use. Locked storage, corrupt
+records, wrong lengths, and read-back mismatches fail closed without plaintext
+fallback or silent identity replacement. The public API exports only the
+public key, its SHA-256 device ID, and signing behavior.
+
+After this slice, `flutter test` passes 29 tests and `flutter analyze` reports
+no issues on Windows. Native Keychain/Keystore behavior and physical-device
+restart tests are still required, and the identity is not yet wired into a
+phone-to-connector transport.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
