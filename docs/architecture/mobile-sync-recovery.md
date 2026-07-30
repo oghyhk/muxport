@@ -34,7 +34,18 @@ acknowledgement remain visibly pending; only the connector's terminal
 ## Current implementation boundary
 
 `apps/mobile/lib/state/mobile_sync_state.dart` implements and tests this pure
-state transition layer and a versioned JSON cache representation. Atomic
-device storage, secure device-identity storage, authenticated transport, and UI
-binding are separate unfinished layers. Until those are connected, the
-existing screens remain explicitly marked as demo data.
+state transition layer. `mobile_cache_store.dart` persists the non-secret host
+list, projections, cursors, recent event IDs, and pending operation IDs under
+the platform application-support directory.
+
+Each save creates a new checksummed generation and flushes it before the
+previous generation can be pruned. Startup selects the newest valid generation
+and falls back across a torn or corrupt newest write. At least two verified
+generations are retained. If every generation is invalid, recovery blocks
+writes and preserves the files instead of replacing them with an empty cache.
+Known secret-shaped fields are rejected as defense in depth; the longer-term
+protocol must replace generic snapshot maps with generated redacted types.
+
+Secure device-identity storage, authenticated transport, and UI binding are
+separate unfinished layers. Until those are connected, the existing screens
+remain explicitly marked as demo data.

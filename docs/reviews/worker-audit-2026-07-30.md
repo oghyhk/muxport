@@ -375,10 +375,18 @@ and source acknowledgement, and become successful only on a terminal connector
 result. Unknown outcomes remain reconciliation-required instead of being
 replayed.
 
-After this slice, `flutter test` passes 16 tests and `flutter analyze` reports
-no issues on Windows. The state machine is not yet connected to atomic device
-storage, authenticated transport, or the demo UI, so those controls remain
-unfinished.
+The application-support cache now uses new, checksummed generation files rather
+than in-place replacement. It flushes and reopens a complete generation before
+pruning, retains the current and previous verified generations, falls back
+across a torn newest write, serializes concurrent saves, and blocks writes
+while all existing generations are corrupt. A defense-in-depth serializer
+rejects common secret-bearing field names.
+
+After this slice, `flutter test` passes 23 tests and `flutter analyze` reports
+no issues on Windows. A debug Android build reached Gradle `assembleDebug` but
+made no further progress during a ten-minute attempt or a separate monitored
+retry; it is not claimed as passing. Secure device-identity storage,
+authenticated transport, and the demo UI remain unconnected.
 
 ## Major work still required
 
