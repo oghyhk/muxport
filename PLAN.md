@@ -12,21 +12,21 @@ The plan is organized as an implementation checklist. A checkbox is complete onl
 
 ## 2. Fixed architectural decisions
 
-- [x] Use **Flutter** for the iOS and Android application.
-- [x] Use **Rust** for the host connector, relay, protocol core, credential vault, runtime supervision, and shared security-sensitive code.
-- [x] Keep OpenCode and Codex running on user-controlled hosts; the mobile app is a control and synchronization client.
-- [x] Integrate OpenCode through its supported HTTP/OpenAPI and SSE interfaces.
-- [x] Integrate Codex through a locally supervised `codex app-server` using its supported stdio JSON-RPC transport.
-- [x] Do not depend on Codex's experimental WebSocket listener for production.
-- [x] Treat OpenCode and Codex integrations as adapters behind one versioned internal interface.
-- [x] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
-- [x] Keep the relay optional and unable to decrypt application payloads.
-- [x] Support a direct path over LAN or a user-managed private network such as Tailscale.
-- [x] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
-- [x] Treat runtime session state on the host as the source of truth.
-- [x] Treat mobile caches and the connector event journal as reconstructible state.
-- [x] Apply account changes to new sessions by default; never silently move an active turn to another identity.
-- [x] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
+- [ ] Use **Flutter** for the iOS and Android application.
+- [ ] Use **Rust** for the host connector, relay, protocol core, credential vault, runtime supervision, and shared security-sensitive code.
+- [ ] Keep OpenCode and Codex running on user-controlled hosts; the mobile app is a control and synchronization client.
+- [ ] Integrate OpenCode through its supported HTTP/OpenAPI and SSE interfaces.
+- [ ] Integrate Codex through a locally supervised `codex app-server` using its supported stdio JSON-RPC transport.
+- [ ] Do not depend on Codex's experimental WebSocket listener for production.
+- [ ] Treat OpenCode and Codex integrations as adapters behind one versioned internal interface.
+- [ ] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
+- [ ] Keep the relay optional and unable to decrypt application payloads.
+- [ ] Support a direct path over LAN or a user-managed private network such as Tailscale.
+- [ ] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
+- [ ] Treat runtime session state on the host as the source of truth.
+- [ ] Treat mobile caches and the connector event journal as reconstructible state.
+- [ ] Apply account changes to new sessions by default; never silently move an active turn to another identity.
+- [ ] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
 
 ## 3. System architecture
 
@@ -740,22 +740,22 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Phase 0 — Decisions, threat model, and feasibility spikes
 
-- [x] Record architecture decisions for Flutter, Rust, protocol, crypto, vault, relay, and plugin isolation.
+- [ ] Record architecture decisions for Flutter, Rust, protocol, crypto, vault, relay, and plugin isolation.
 - [ ] Complete the seven validation spikes in `SPEC.md`.
 - [ ] Add restart/attach experiments for OpenCode TUI and official Codex desktop sessions.
 - [ ] Confirm OpenCode Go error/rate-limit signals and credential activation behavior.
 - [ ] Review relevant provider terms for multi-account and rotation behavior.
-- [x] Produce wireframes for host fleet, session, account matrix, and bulk-switch preview.
+- [ ] Produce wireframes for host fleet, session, account matrix, and bulk-switch preview.
 
 Exit: no unresolved blocker to safe managed-session sync, isolated profiles, or key switching.
 
 ### Phase 1 — Monorepo, protocol, and fake system
 
-- [x] Scaffold repository and CI.
-- [x] Define canonical schemas and generated Rust/Dart packages.
-- [x] Implement fake connector, fake OpenCode/Codex adapters, and deterministic event playback.
-- [x] Build Flutter navigation and screens against fake data.
-- [x] Implement operation ledger, event journal, and state-machine tests.
+- [ ] Scaffold repository and CI.
+- [ ] Define canonical schemas and generated Rust/Dart packages.
+- [ ] Implement fake connector, fake OpenCode/Codex adapters, and deterministic event playback.
+- [ ] Build Flutter navigation and screens against fake data.
+- [ ] Implement operation ledger, event journal, and state-machine tests.
 
 Exit: mobile app can drive a simulated multi-host system through disconnect/reconnect tests.
 
@@ -889,9 +889,9 @@ These choices should be resolved during Phase 0 and recorded as architecture dec
 
 ## 24. Immediate next actions
 
-- [x] Review this plan together and resolve the product decisions in Section 23.
-- [x] Create architecture decision records for accepted choices.
+- [ ] Review this plan together and resolve the product decisions in Section 23.
+- [ ] Create architecture decision records for accepted choices.
 - [ ] Prototype OpenCode SSE recovery and Codex App Server recovery before building UI polish.
 - [ ] Prototype isolated credential profiles and restart them repeatedly before implementing automatic rotation.
-- [x] Build the Flutter app against deterministic fake events while host spikes are underway.
+- [ ] Build the Flutter app against deterministic fake events while host spikes are underway.
 - [ ] Do not begin public relay development until E2EE framing and pairing have passed design review.

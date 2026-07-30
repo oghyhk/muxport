@@ -19,6 +19,14 @@ pub enum JournalError {
     DuplicateEvent(String),
     #[error("Event id must not be empty")]
     EmptyEventId,
+    #[error("Cursor client id must not be empty")]
+    EmptyClientId,
+    #[error("Cursor acknowledgement {acknowledged} is beyond current sequence {current}")]
+    AckBeyondCurrent { acknowledged: u64, current: u64 },
+    #[error("Cursor acknowledgement regressed from {previous} to {attempted}")]
+    AckRegression { previous: u64, attempted: u64 },
+    #[error("Snapshot sequence {snapshot} is beyond current sequence {current}")]
+    InvalidSnapshotBoundary { snapshot: u64, current: u64 },
 }
 
 pub struct EventJournal {
@@ -159,6 +167,12 @@ impl EventJournal {
     }
 
     pub fn save_snapshot(&self, snapshot: &HostSnapshot) -> Result<(), JournalError> {
+        if snapshot.snapshot_sequence > self.current_sequence {
+            return Err(JournalError::InvalidSnapshotBoundary {
+                snapshot: snapshot.snapshot_sequence,
+                current: self.current_sequence,
+            });
+        }
         let mut blob = Vec::new();
         snapshot.encode(&mut blob)?;
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -187,9 +201,31 @@ impl EventJournal {
     }
 
     pub fn record_cursor_ack(&self, client_id: &str, sequence: u64) -> Result<(), JournalError> {
+        if client_id.trim().is_empty() {
+            return Err(JournalError::EmptyClientId);
+        }
+        if sequence > self.current_sequence {
+            return Err(JournalError::AckBeyondCurrent {
+                acknowledged: sequence,
+                current: self.current_sequence,
+            });
+        }
+        if let Some(previous) = self.get_cursor_ack(client_id)? {
+            if sequence < previous {
+                return Err(JournalError::AckRegression {
+                    previous,
+                    attempted: sequence,
+                });
+            }
+        }
+
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
-            "INSERT OR REPLACE INTO cursor_acks (client_id, sequence, updated_at_ms) VALUES (?1, ?2, ?3)",
+            "INSERT INTO cursor_acks (client_id, sequence, updated_at_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(client_id) DO UPDATE SET
+                 sequence = excluded.sequence,
+                 updated_at_ms = excluded.updated_at_ms",
             params![client_id, sequence, now_ms],
         )?;
         Ok(())
@@ -205,10 +241,29 @@ impl EventJournal {
         Ok(Some(seq))
     }
 
-    pub fn compact_before_sequence(&self, before_seq: u64) -> Result<usize, JournalError> {
+    /// Deletes only events covered by a persisted snapshot and acknowledged by
+    /// every client currently represented in the cursor table.
+    pub fn compact_acknowledged_events(&self) -> Result<usize, JournalError> {
+        let minimum_ack: Option<u64> = self.conn.query_row(
+            "SELECT MIN(sequence) FROM cursor_acks",
+            [],
+            |row| row.get(0),
+        )?;
+        let Some(minimum_ack) = minimum_ack else {
+            return Ok(0);
+        };
+        let snapshot_boundary: Option<u64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM snapshots WHERE sequence <= ?1",
+            params![minimum_ack],
+            |row| row.get(0),
+        )?;
+        let Some(snapshot_boundary) = snapshot_boundary else {
+            return Ok(0);
+        };
+
         let deleted = self.conn.execute(
-            "DELETE FROM events WHERE sequence < ?1",
-            params![before_seq],
+            "DELETE FROM events WHERE sequence <= ?1",
+            params![snapshot_boundary],
         )?;
         Ok(deleted)
     }
@@ -321,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_ack_compaction_and_integrity_check_work() {
+    fn compaction_requires_snapshot_coverage_and_all_client_acks() {
         let mut journal = EventJournal::open_in_memory(1).unwrap();
         assert!(journal.verify_integrity().unwrap());
 
@@ -335,14 +390,65 @@ mod tests {
                 .unwrap();
         }
 
-        journal.record_cursor_ack("phone-1", 3).unwrap();
-        assert_eq!(journal.get_cursor_ack("phone-1").unwrap(), Some(3));
+        journal.record_cursor_ack("phone-1", 4).unwrap();
+        journal.record_cursor_ack("phone-2", 3).unwrap();
+        assert_eq!(journal.get_cursor_ack("phone-1").unwrap(), Some(4));
 
-        let deleted = journal.compact_before_sequence(3).unwrap();
-        assert_eq!(deleted, 2);
+        assert_eq!(journal.compact_acknowledged_events().unwrap(), 0);
 
-        let remaining = journal.get_events_after(2, 10).unwrap();
-        assert_eq!(remaining.len(), 3);
-        assert_eq!(remaining[0].0, 3);
+        let snapshot = HostSnapshot {
+            host_id: "host-1".into(),
+            hostname: "test-host".into(),
+            connector_state: 0,
+            runtimes: vec![],
+            credential_profiles: vec![],
+            active_sessions: vec![],
+            snapshot_sequence: 3,
+        };
+        journal.save_snapshot(&snapshot).unwrap();
+        assert_eq!(journal.compact_acknowledged_events().unwrap(), 3);
+
+        let remaining = journal.get_events_after(3, 10).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].0, 4);
+        assert!(matches!(
+            journal.get_events_after(0, 10),
+            Err(JournalError::GapDetected {
+                expected: 1,
+                found: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn cursor_acknowledgements_are_bounded_and_monotonic() {
+        let mut journal = EventJournal::open_in_memory(1).unwrap();
+        journal
+            .append_event(&Event {
+                event_id: "evt-1".into(),
+                timestamp_ms: 1000,
+                inner: None,
+            })
+            .unwrap();
+        journal.record_cursor_ack("phone-1", 1).unwrap();
+
+        assert!(matches!(
+            journal.record_cursor_ack("phone-1", 0),
+            Err(JournalError::AckRegression {
+                previous: 1,
+                attempted: 0
+            })
+        ));
+        assert!(matches!(
+            journal.record_cursor_ack("phone-1", 2),
+            Err(JournalError::AckBeyondCurrent {
+                acknowledged: 2,
+                current: 1
+            })
+        ));
+        assert!(matches!(
+            journal.record_cursor_ack("", 1),
+            Err(JournalError::EmptyClientId)
+        ));
     }
 }

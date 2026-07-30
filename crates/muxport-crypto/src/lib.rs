@@ -22,6 +22,12 @@ pub enum CryptoError {
     ReplayDetected,
     #[error("Encrypted frame sequence exhausted")]
     SequenceExhausted,
+    #[error("Paired device id must not be empty")]
+    InvalidDeviceId,
+    #[error("Paired device public key is not a valid Ed25519 key")]
+    InvalidDevicePublicKey,
+    #[error("Paired device id is already bound to a different or revoked identity")]
+    DeviceIdentityConflict,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -198,8 +204,26 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn register_device(&mut self, record: PairedDeviceRecord) {
+    pub fn register_device(&mut self, record: PairedDeviceRecord) -> Result<(), CryptoError> {
+        if record.device_id.trim().is_empty() {
+            return Err(CryptoError::InvalidDeviceId);
+        }
+        validate_device_public_key(&record.public_key_hex)?;
+
+        if let Some(existing) = self.devices.get_mut(&record.device_id) {
+            if existing.public_key_hex != record.public_key_hex
+                || (existing.is_revoked && !record.is_revoked)
+            {
+                return Err(CryptoError::DeviceIdentityConflict);
+            }
+            existing.device_name = record.device_name;
+            existing.last_seen_at_ms = existing.last_seen_at_ms.max(record.last_seen_at_ms);
+            existing.is_revoked |= record.is_revoked;
+            return Ok(());
+        }
+
         self.devices.insert(record.device_id.clone(), record);
+        Ok(())
     }
 
     pub fn revoke_device(&mut self, device_id: &str) -> bool {
@@ -220,8 +244,26 @@ impl DeviceRegistry {
     }
 
     pub fn list_devices(&self) -> Vec<PairedDeviceRecord> {
-        self.devices.values().cloned().collect()
+        let mut devices = self.devices.values().cloned().collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        devices
     }
+}
+
+fn validate_device_public_key(public_key_hex: &str) -> Result<(), CryptoError> {
+    if public_key_hex.len() != 64 {
+        return Err(CryptoError::InvalidDevicePublicKey);
+    }
+    let mut bytes = [0u8; 32];
+    for (index, chunk) in public_key_hex.as_bytes().chunks_exact(2).enumerate() {
+        let pair =
+            std::str::from_utf8(chunk).map_err(|_| CryptoError::InvalidDevicePublicKey)?;
+        bytes[index] =
+            u8::from_str_radix(pair, 16).map_err(|_| CryptoError::InvalidDevicePublicKey)?;
+    }
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map(|_| ())
+        .map_err(|_| CryptoError::InvalidDevicePublicKey)
 }
 
 #[cfg(test)]
@@ -289,22 +331,63 @@ mod tests {
 
     #[test]
     fn device_registry_pairing_and_revocation() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let public_key_hex = signing_key
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let mut registry = DeviceRegistry::new();
         let dev = PairedDeviceRecord {
             device_id: "phone-abc".into(),
             device_name: "User iPhone".into(),
-            public_key_hex: "0102030405".into(),
+            public_key_hex: public_key_hex.clone(),
             paired_at_ms: 1000,
             last_seen_at_ms: 1000,
             is_revoked: false,
         };
-        registry.register_device(dev);
+        registry.register_device(dev).unwrap();
 
-        assert!(registry.is_authorized("phone-abc", "0102030405"));
+        assert!(registry.is_authorized("phone-abc", &public_key_hex));
         assert!(!registry.is_authorized("phone-abc", "wrongpubkey"));
-        assert!(!registry.is_authorized("unknown-phone", "0102030405"));
+        assert!(!registry.is_authorized("unknown-phone", &public_key_hex));
 
         assert!(registry.revoke_device("phone-abc"));
-        assert!(!registry.is_authorized("phone-abc", "0102030405"));
+        assert!(!registry.is_authorized("phone-abc", &public_key_hex));
+
+        let replacement_key = ed25519_dalek::SigningKey::generate(&mut OsRng)
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(matches!(
+            registry.register_device(PairedDeviceRecord {
+                device_id: "phone-abc".into(),
+                device_name: "Stolen identity".into(),
+                public_key_hex: replacement_key,
+                paired_at_ms: 2000,
+                last_seen_at_ms: 2000,
+                is_revoked: false,
+            }),
+            Err(CryptoError::DeviceIdentityConflict)
+        ));
+    }
+
+    #[test]
+    fn device_registry_rejects_malformed_keys() {
+        let mut registry = DeviceRegistry::new();
+        assert!(matches!(
+            registry.register_device(PairedDeviceRecord {
+                device_id: "phone-invalid".into(),
+                device_name: "Invalid".into(),
+                public_key_hex: "not-a-key".into(),
+                paired_at_ms: 1000,
+                last_seen_at_ms: 1000,
+                is_revoked: false,
+            }),
+            Err(CryptoError::InvalidDevicePublicKey)
+        ));
     }
 }

@@ -84,6 +84,31 @@ account is locked due to a billing issue; both jobs contain zero executed
 steps. This is an account-level CI blocker and is not recorded as a passing or
 failing build.
 
+## Follow-up worker commit `306ceb1`
+
+A later worker commit added useful persistence scaffolding and 24 passing Rust
+tests, but again marked plan items complete before their phase exit conditions
+passed. The 25 new checkmarks were reset.
+
+The follow-up review found and corrected these issues:
+
+- SQLite command-ledger writes discarded database errors and updated memory even
+  when durable reservation failed.
+- Journal cursor acknowledgements could regress or point beyond the event head,
+  and arbitrary compaction could delete events without a covering snapshot.
+- Vault operations returned success for missing or unvalidated staged
+  credentials, persisted non-atomically, and left record metadata outside the
+  authenticated vault envelope.
+- Device registration accepted malformed keys and could replace an existing
+  device identity.
+- The process supervisor counted successful exits as crashes and could replace
+  a live child handle with a duplicate spawn.
+- ADR-0008 presented untested vendor-isolation and compatibility assumptions as
+  accepted facts, while the threat model described controls not yet built.
+
+After correction, `cargo test --locked --workspace --all-targets` passes 31
+tests on the clean Linux verification checkout.
+
 ## Major work still required
 
 - Implement OpenCode SSE normalization, commands, approvals, and credential

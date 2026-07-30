@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::process::{Child, Command};
-use tracing::{info};
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum SupervisorError {
@@ -12,6 +12,8 @@ pub enum SupervisorError {
     CrashLoopDetected(usize),
     #[error("Child process not running")]
     NotRunning,
+    #[error("Child process is already running with PID {0}")]
+    AlreadyRunning(u32),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -63,6 +65,21 @@ impl ProcessSupervisor {
     }
 
     pub async fn spawn(&mut self) -> Result<u32, SupervisorError> {
+        if let Some(child) = self.current_child.as_mut() {
+            match child.try_wait()? {
+                None => {
+                    return Err(SupervisorError::AlreadyRunning(
+                        child.id().unwrap_or_default(),
+                    ));
+                }
+                Some(status) => {
+                    if !status.success() {
+                        self.record_crash();
+                    }
+                    self.current_child = None;
+                }
+            }
+        }
         if self.is_crash_looping() {
             return Err(SupervisorError::CrashLoopDetected(self.crash_history.len()));
         }
@@ -80,7 +97,7 @@ impl ProcessSupervisor {
     pub async fn stop(&mut self) -> Result<(), SupervisorError> {
         if let Some(mut child) = self.current_child.take() {
             info!("Sending kill signal to child process");
-            let _ = child.kill().await;
+            child.kill().await?;
         }
         Ok(())
     }
@@ -91,19 +108,35 @@ impl ProcessSupervisor {
         Duration::from_secs(capped)
     }
 
-    pub async fn check_exit(&mut self) -> Option<std::process::ExitStatus> {
+    pub async fn check_exit(
+        &mut self,
+    ) -> Result<Option<std::process::ExitStatus>, SupervisorError> {
         if let Some(ref mut child) = self.current_child {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.record_crash();
+            match child.try_wait()? {
+                Some(status) => {
+                    if !status.success() {
+                        self.record_crash();
+                    }
                     self.current_child = None;
-                    Some(status)
+                    Ok(Some(status))
                 }
-                _ => None,
+                None => Ok(None),
             }
         } else {
-            None
+            Ok(None)
         }
+    }
+
+    pub async fn wait_for_exit(&mut self) -> Result<std::process::ExitStatus, SupervisorError> {
+        let mut child = self
+            .current_child
+            .take()
+            .ok_or(SupervisorError::NotRunning)?;
+        let status = child.wait().await?;
+        if !status.success() {
+            self.record_crash();
+        }
+        Ok(status)
     }
 }
 
@@ -128,5 +161,36 @@ mod tests {
         assert_eq!(ProcessSupervisor::compute_backoff_delay(1), Duration::from_secs(2));
         assert_eq!(ProcessSupervisor::compute_backoff_delay(2), Duration::from_secs(4));
         assert_eq!(ProcessSupervisor::compute_backoff_delay(10), Duration::from_secs(60));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplicate_spawn_is_rejected_and_requested_stop_is_not_a_crash() {
+        let mut supervisor =
+            ProcessSupervisor::new("sh", vec!["-c".into(), "sleep 30".into()]);
+        let pid = supervisor.spawn().await.unwrap();
+        assert!(pid > 0);
+        assert!(matches!(
+            supervisor.spawn().await,
+            Err(SupervisorError::AlreadyRunning(running_pid)) if running_pid == pid
+        ));
+        supervisor.stop().await.unwrap();
+        assert!(supervisor.crash_history.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_unsuccessful_natural_exit_counts_as_a_crash() {
+        let mut successful =
+            ProcessSupervisor::new("sh", vec!["-c".into(), "exit 0".into()]);
+        successful.spawn().await.unwrap();
+        assert!(successful.wait_for_exit().await.unwrap().success());
+        assert!(successful.crash_history.is_empty());
+
+        let mut failed =
+            ProcessSupervisor::new("sh", vec!["-c".into(), "exit 7".into()]);
+        failed.spawn().await.unwrap();
+        assert!(!failed.wait_for_exit().await.unwrap().success());
+        assert_eq!(failed.crash_history.len(), 1);
     }
 }

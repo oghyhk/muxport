@@ -11,6 +11,14 @@ pub enum CoreError {
     DuplicateCommand(String),
     #[error("Command expired (deadline passed)")]
     CommandExpired,
+    #[error("Idempotency key must not be empty")]
+    EmptyIdempotencyKey,
+    #[error("Command was not reserved before recording a result: {0}")]
+    UnknownCommand(String),
+    #[error("Command ledger contains an invalid operation state: {0}")]
+    InvalidStoredState(i32),
+    #[error("Command ledger database error: {0}")]
+    Sql(#[from] rusqlite::Error),
 }
 
 pub fn validate_connector_transition(from: ConnectorState, to: ConnectorState) -> Result<(), CoreError> {
@@ -120,10 +128,11 @@ impl CommandLedger {
         }
     }
 
-    pub fn open_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, rusqlite::Error> {
+    pub fn open_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, CoreError> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS command_ledger (
                 idempotency_key TEXT PRIMARY KEY,
@@ -142,7 +151,7 @@ impl CommandLedger {
         Ok(ledger)
     }
 
-    fn load_from_db(&mut self) -> Result<(), rusqlite::Error> {
+    fn load_from_db(&mut self) -> Result<(), CoreError> {
         if let Some(ref conn) = self.conn {
             let mut stmt = conn.prepare(
                 "SELECT idempotency_key, state_code, result_json FROM command_ledger",
@@ -151,12 +160,13 @@ impl CommandLedger {
                 let key: String = row.get(0)?;
                 let state_code: i32 = row.get(1)?;
                 let result_json: String = row.get(2)?;
-                let state = RemoteOpState::try_from(state_code).unwrap_or(RemoteOpState::Created);
-                Ok((key, (state, result_json)))
+                Ok((key, state_code, result_json))
             })?;
             for r in rows {
-                let (key, val) = r?;
-                self.executed_commands.insert(key, val);
+                let (key, state_code, result_json) = r?;
+                let state = RemoteOpState::try_from(state_code)
+                    .map_err(|_| CoreError::InvalidStoredState(state_code))?;
+                self.executed_commands.insert(key, (state, result_json));
             }
         }
         Ok(())
@@ -169,6 +179,9 @@ impl CommandLedger {
         idempotency_key: &str,
         deadline_ms: i64,
     ) -> Result<Option<(RemoteOpState, String)>, CoreError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(CoreError::EmptyIdempotencyKey);
+        }
         let now = chrono::Utc::now().timestamp_millis();
         if deadline_ms > 0 && now > deadline_ms {
             return Err(CoreError::CommandExpired);
@@ -177,16 +190,16 @@ impl CommandLedger {
         if let Some(prev) = self.executed_commands.get(idempotency_key) {
             Ok(Some(prev.clone()))
         } else {
+            if let Some(ref conn) = self.conn {
+                conn.execute(
+                    "INSERT INTO command_ledger (idempotency_key, state_code, result_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![idempotency_key, RemoteOpState::Created as i32, "", now],
+                )?;
+            }
             self.executed_commands.insert(
                 idempotency_key.to_owned(),
                 (RemoteOpState::Created, String::new()),
             );
-            if let Some(ref conn) = self.conn {
-                let _ = conn.execute(
-                    "INSERT OR REPLACE INTO command_ledger (idempotency_key, state_code, result_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![idempotency_key, RemoteOpState::Created as i32, "", now],
-                );
-            }
             Ok(None)
         }
     }
@@ -196,16 +209,23 @@ impl CommandLedger {
         idempotency_key: String,
         state: RemoteOpState,
         result_json: String,
-    ) {
+    ) -> Result<(), CoreError> {
+        if !self.executed_commands.contains_key(&idempotency_key) {
+            return Err(CoreError::UnknownCommand(idempotency_key));
+        }
         let now = chrono::Utc::now().timestamp_millis();
         if let Some(ref conn) = self.conn {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO command_ledger (idempotency_key, state_code, result_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            let changed = conn.execute(
+                "UPDATE command_ledger SET state_code = ?2, result_json = ?3, updated_at_ms = ?4 WHERE idempotency_key = ?1",
                 rusqlite::params![&idempotency_key, state as i32, &result_json, now],
-            );
+            )?;
+            if changed != 1 {
+                return Err(CoreError::UnknownCommand(idempotency_key));
+            }
         }
         self.executed_commands
             .insert(idempotency_key, (state, result_json));
+        Ok(())
     }
 }
 
@@ -255,7 +275,8 @@ mod tests {
             "command-1".into(),
             RemoteOpState::Succeeded,
             r#"{"ok":true}"#.into(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             ledger.check_or_record("command-1", 0).unwrap(),
             Some((RemoteOpState::Succeeded, r#"{"ok":true}"#.into()))
@@ -289,7 +310,8 @@ mod tests {
                 "cmd-persisted".into(),
                 RemoteOpState::Succeeded,
                 r#"{"persisted":true}"#.into(),
-            );
+            )
+            .unwrap();
         }
 
         {
@@ -303,5 +325,58 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn sqlite_reservation_failure_is_reported_and_not_cached() {
+        let db_path = std::env::temp_dir().join(format!(
+            "cmd-ledger-failure-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+        ledger
+            .conn
+            .as_ref()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_command_insert
+                 BEFORE INSERT ON command_ledger
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected persistence failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ledger.check_or_record("must-persist", 0),
+            Err(CoreError::Sql(_))
+        ));
+
+        ledger
+            .conn
+            .as_ref()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_command_insert")
+            .unwrap();
+        assert_eq!(ledger.check_or_record("must-persist", 0).unwrap(), None);
+
+        drop(ledger);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn result_requires_a_reserved_command() {
+        let mut ledger = CommandLedger::new();
+        assert!(matches!(
+            ledger.record_result(
+                "never-reserved".into(),
+                RemoteOpState::Succeeded,
+                "{}".into()
+            ),
+            Err(CoreError::UnknownCommand(key)) if key == "never-reserved"
+        ));
     }
 }

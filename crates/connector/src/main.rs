@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtimes: vec![],
         credential_profiles: vec![],
         active_sessions: vec![],
-        snapshot_sequence: 1,
+        snapshot_sequence: journal.current_sequence(),
     };
 
     journal.save_snapshot(&snapshot)?;
