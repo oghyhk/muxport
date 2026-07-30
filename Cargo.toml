@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/muxport-protocol",
+    "crates/muxport-crypto",
+    "crates/adapter-api",
+    "crates/adapter-opencode",
+    "crates/adapter-codex",
+    "crates/process-supervisor",
+    "crates/credential-vault",
+    "crates/event-journal",
+    "crates/connector-core",
+    "crates/connector",
+    "crates/relay",
+    "crates/test-harness",
+    "crates/mobile-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Muxport Contributors <dev@muxport.io>"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "1.0"
+anyhow = "1.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+prost = "0.13"
+prost-types = "0.13"
+tonic = "0.12"
+ring = "0.17"
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+argon2 = "0.5"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-tungstenite = "0.23"

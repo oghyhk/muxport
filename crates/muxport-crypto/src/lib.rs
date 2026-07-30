@@ -1,0 +1,109 @@
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::ChaCha20Poly1305;
+use hkdf::Hkdf;
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use thiserror::Error;
+use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey};
+
+#[derive(Error, Debug)]
+pub enum CryptoError {
+    #[error("Encryption failure")]
+    EncryptionFailed,
+    #[error("Decryption failure or bad tag")]
+    DecryptionFailed,
+    #[error("Invalid key length")]
+    InvalidKeyLength,
+    #[error("Pairing token expired or invalid")]
+    InvalidPairingToken,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct QrPairingPayload {
+    pub host_id: String,
+    pub hostname: String,
+    pub rendezvous_token: String,
+    pub ephemeral_pubkey_hex: String,
+    pub expires_at_ms: i64,
+}
+
+pub struct KeyPair {
+    pub secret: EphemeralSecret,
+    pub public: XPublicKey,
+}
+
+impl KeyPair {
+    pub fn generate() -> Self {
+        let secret = EphemeralSecret::random_from_rng(OsRng);
+        let public = XPublicKey::from(&secret);
+        Self { secret, public }
+    }
+}
+
+pub fn derive_shared_secret(our_secret: EphemeralSecret, their_public: &XPublicKey, info: &[u8]) -> Result<[u8; 32], CryptoError> {
+    let dh_secret = our_secret.diffie_hellman(their_public);
+    let hk = Hkdf::<Sha256>::new(None, dh_secret.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(info, &mut okm).map_err(|_| CryptoError::InvalidKeyLength)?;
+    Ok(okm)
+}
+
+pub fn generate_sas_code(shared_secret: &[u8; 32]) -> String {
+    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+    let mut sas_bytes = [0u8; 4];
+    hk.expand(b"muxport-sas-v1", &mut sas_bytes).unwrap();
+    let num = u32::from_be_bytes(sas_bytes) % 1_000_000;
+    format!("{:06}", num)
+}
+
+pub fn encrypt_frame(key: &[u8; 32], nonce_bytes: &[u8; 12], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let payload = Payload {
+        msg: plaintext,
+        aad,
+    };
+    cipher.encrypt(nonce_bytes.into(), payload).map_err(|_| CryptoError::EncryptionFailed)
+}
+
+pub fn decrypt_frame(key: &[u8; 32], nonce_bytes: &[u8; 12], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let payload = Payload {
+        msg: ciphertext,
+        aad,
+    };
+    cipher.decrypt(nonce_bytes.into(), payload).map_err(|_| CryptoError::DecryptionFailed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ecdh_key_exchange_and_aead() {
+        let alice = KeyPair::generate();
+        let bob = KeyPair::generate();
+
+        let alice_pub = alice.public;
+        let bob_pub = bob.public;
+
+        let alice_shared = derive_shared_secret(alice.secret, &bob_pub, b"muxport-test").unwrap();
+        let bob_shared = derive_shared_secret(bob.secret, &alice_pub, b"muxport-test").unwrap();
+
+        assert_eq!(alice_shared, bob_shared);
+
+        let sas_a = generate_sas_code(&alice_shared);
+        let sas_b = generate_sas_code(&bob_shared);
+        assert_eq!(sas_a, sas_b);
+        assert_eq!(sas_a.len(), 6);
+
+        let nonce = [7u8; 12];
+        let msg = b"hello encrypted world";
+        let aad = b"header_aad_123";
+
+        let ciphertext = encrypt_frame(&alice_shared, &nonce, msg, aad).unwrap();
+        let decrypted = decrypt_frame(&bob_shared, &nonce, &ciphertext, aad).unwrap();
+
+        assert_eq!(msg.to_vec(), decrypted);
+    }
+}

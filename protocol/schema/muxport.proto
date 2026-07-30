@@ -1,0 +1,283 @@
+syntax = "proto3";
+
+package muxport.protocol.v1;
+
+// Connector State Machine
+enum ConnectorState {
+  CONNECTOR_STATE_UNSPECIFIED = 0;
+  CONNECTOR_STATE_STARTING = 1;
+  CONNECTOR_STATE_VAULT_LOCKED = 2;
+  CONNECTOR_STATE_RECOVERING = 3;
+  CONNECTOR_STATE_READY = 4;
+  CONNECTOR_STATE_DEGRADED = 5;
+  CONNECTOR_STATE_FATAL_ERROR = 6;
+}
+
+// Runtime State Machine
+enum RuntimeState {
+  RUNTIME_STATE_UNSPECIFIED = 0;
+  RUNTIME_STATE_UNKNOWN = 1;
+  RUNTIME_STATE_DISCOVERING = 2;
+  RUNTIME_STATE_STARTING = 3;
+  RUNTIME_STATE_SYNCHRONIZING = 4;
+  RUNTIME_STATE_ONLINE_IDLE = 5;
+  RUNTIME_STATE_ONLINE_RUNNING = 6;
+  RUNTIME_STATE_ONLINE_WAITING_APPROVAL = 7;
+  RUNTIME_STATE_DEGRADED = 8;
+  RUNTIME_STATE_STOPPED = 9;
+  RUNTIME_STATE_CRASHED = 10;
+  RUNTIME_STATE_CRASH_LOOP = 11;
+  RUNTIME_STATE_CREDENTIAL_LOCKED = 12;
+}
+
+// Operation State Machine
+enum RemoteOpState {
+  REMOTE_OP_STATE_UNSPECIFIED = 0;
+  REMOTE_OP_STATE_CREATED = 1;
+  REMOTE_OP_STATE_PERSISTED = 2;
+  REMOTE_OP_STATE_DISPATCHED = 3;
+  REMOTE_OP_STATE_SOURCE_ACKNOWLEDGED = 4;
+  REMOTE_OP_STATE_RECONCILED = 5;
+  REMOTE_OP_STATE_SUCCEEDED = 6;
+  REMOTE_OP_STATE_EXPIRED = 7;
+  REMOTE_OP_STATE_CANCELLED = 8;
+  REMOTE_OP_STATE_REJECTED_OFFLINE = 9;
+  REMOTE_OP_STATE_FAILED = 10;
+  REMOTE_OP_STATE_OUTCOME_UNKNOWN = 11;
+  REMOTE_OP_STATE_RECONCILIATION_REQUIRED = 12;
+}
+
+// Credential Status
+enum CredentialStatus {
+  CREDENTIAL_STATUS_UNSPECIFIED = 0;
+  CREDENTIAL_STATUS_STAGED = 1;
+  CREDENTIAL_STATUS_ACTIVE = 2;
+  CREDENTIAL_STATUS_COOLING_DOWN = 3;
+  CREDENTIAL_STATUS_INVALID = 4;
+  CREDENTIAL_STATUS_REVOKED = 5;
+}
+
+// Agent Type
+enum AgentType {
+  AGENT_TYPE_UNSPECIFIED = 0;
+  AGENT_TYPE_OPENCODE = 1;
+  AGENT_TYPE_CODEX = 2;
+}
+
+// Wire Frame Header
+message EnvelopeHeader {
+  uint32 protocol_version = 1;
+  string sender_id = 2;
+  string recipient_id = 3;
+  uint64 boot_epoch = 4;
+  uint64 sequence = 5;
+  int64 timestamp_ms = 6;
+  string idempotency_key = 7;
+}
+
+// Main Frame Envelope
+message MuxportEnvelope {
+  EnvelopeHeader header = 1;
+  oneof payload {
+    Command command = 2;
+    CommandResult command_result = 3;
+    Event event = 4;
+    HostSnapshot snapshot = 5;
+    Ack ack = 6;
+    ErrorPayload error = 7;
+  }
+}
+
+// Commands
+message Command {
+  string command_id = 1;
+  int64 deadline_ms = 2;
+  oneof inner {
+    StartSessionCmd start_session = 3;
+    SendInputCmd send_input = 4;
+    SteerCmd steer = 5;
+    InterruptCmd interrupt = 6;
+    ApproveActionCmd approve_action = 7;
+    ChangeAssignmentCmd change_assignment = 8;
+    RotateCredentialCmd rotate_credential = 9;
+    ProbeHostCmd probe_host = 10;
+  }
+}
+
+message StartSessionCmd {
+  string runtime_id = 1;
+  string project_path = 2;
+  string prompt = 3;
+  string credential_profile_id = 4;
+}
+
+message SendInputCmd {
+  string session_id = 1;
+  string text = 2;
+}
+
+message SteerCmd {
+  string session_id = 1;
+  string instruction = 2;
+}
+
+message InterruptCmd {
+  string session_id = 1;
+  string reason = 2;
+}
+
+message ApproveActionCmd {
+  string approval_id = 1;
+  bool approved = 2;
+  string decision_reason = 3;
+}
+
+message ChangeAssignmentCmd {
+  string target_type = 1; // "runtime" or "project"
+  string target_id = 2;
+  string new_credential_profile_id = 3;
+}
+
+message RotateCredentialCmd {
+  string pool_id = 1;
+  string target_runtime_id = 2;
+  bool force = 3;
+}
+
+message ProbeHostCmd {}
+
+// Command Result
+message CommandResult {
+  string command_id = 1;
+  RemoteOpState state = 2;
+  bool success = 3;
+  string error_message = 4;
+  int64 completed_at_ms = 5;
+  string result_json = 6;
+}
+
+// Events
+message Event {
+  string event_id = 1;
+  int64 timestamp_ms = 2;
+  oneof inner {
+    HostStatusEvent host_status = 3;
+    RuntimeStateEvent runtime_state = 4;
+    SessionUpdatedEvent session_updated = 5;
+    StreamDeltaEvent stream_delta = 6;
+    ApprovalRequestedEvent approval_requested = 7;
+    ApprovalResolvedEvent approval_resolved = 8;
+    CredentialRotatedEvent credential_rotated = 9;
+    AuditLoggedEvent audit_logged = 10;
+  }
+}
+
+message HostStatusEvent {
+  string host_id = 1;
+  ConnectorState state = 2;
+  string version = 3;
+}
+
+message RuntimeStateEvent {
+  string runtime_id = 1;
+  AgentType agent_type = 2;
+  RuntimeState state = 3;
+  string active_profile_id = 4;
+  string details = 5;
+}
+
+message SessionUpdatedEvent {
+  string session_id = 1;
+  string runtime_id = 2;
+  string title = 3;
+  string status = 4;
+  string credential_profile_id = 5;
+  int64 updated_at_ms = 6;
+}
+
+message StreamDeltaEvent {
+  string session_id = 1;
+  string turn_id = 2;
+  string delta_text = 3;
+  bool is_final = 4;
+}
+
+message ApprovalRequestedEvent {
+  string approval_id = 1;
+  string session_id = 2;
+  string action_type = 3; // "command", "edit", "mcp"
+  string description = 4;
+  string payload_json = 5;
+}
+
+message ApprovalResolvedEvent {
+  string approval_id = 1;
+  bool approved = 2;
+  string resolved_by = 3;
+}
+
+message CredentialRotatedEvent {
+  string profile_id = 1;
+  string pool_id = 2;
+  string runtime_id = 3;
+  string reason = 4;
+}
+
+message AuditLoggedEvent {
+  string audit_id = 1;
+  string action = 2;
+  string actor = 3;
+  string target = 4;
+  string outcome = 5;
+}
+
+// Snapshot
+message HostSnapshot {
+  string host_id = 1;
+  string hostname = 2;
+  ConnectorState connector_state = 3;
+  repeated RuntimeInfo runtimes = 4;
+  repeated CredentialProfileInfo credential_profiles = 5;
+  repeated SessionInfo active_sessions = 6;
+  uint64 snapshot_sequence = 7;
+}
+
+message RuntimeInfo {
+  string runtime_id = 1;
+  AgentType agent_type = 2;
+  string name = 3;
+  RuntimeState state = 4;
+  string active_credential_profile_id = 5;
+  repeated string project_paths = 6;
+}
+
+message CredentialProfileInfo {
+  string profile_id = 1;
+  string display_name = 2;
+  string provider = 3;
+  string account_fingerprint = 4;
+  CredentialStatus status = 5;
+  int64 last_validated_at_ms = 6;
+}
+
+message SessionInfo {
+  string session_id = 1;
+  string runtime_id = 2;
+  string project_path = 3;
+  string title = 4;
+  string credential_profile_id = 5;
+  string status = 6;
+}
+
+// Ack
+message Ack {
+  uint64 sequence_acknowledged = 1;
+  uint64 boot_epoch = 2;
+}
+
+// Error Payload
+message ErrorPayload {
+  uint32 code = 1;
+  string message = 2;
+  bool outcome_is_unknown = 3;
+}

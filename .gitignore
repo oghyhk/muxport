@@ -1,0 +1,16 @@
+# Rust build output
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Flutter & Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+
+# OS / Editor
+.DS_Store
+*.swp
+*~

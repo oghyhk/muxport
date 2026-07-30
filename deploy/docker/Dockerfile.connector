@@ -1,0 +1,11 @@
+FROM rust:1.85-slim as builder
+WORKDIR /usr/src/muxport
+RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler
+COPY . .
+RUN cargo build --release -p connector
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/src/muxport/target/release/muxport-connector /usr/local/bin/
+EXPOSE 4096
+ENTRYPOINT ["/usr/local/bin/muxport-connector"]

@@ -1,0 +1,14 @@
+[Unit]
+Description=Muxport Host Connector Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=muxport
+ExecStart=/usr/local/bin/muxport-connector
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
