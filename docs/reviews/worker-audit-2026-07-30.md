@@ -174,14 +174,34 @@ completed `initialize` and `thread/list`. After this slice,
 Linux verification checkout. Rustfmt and clippy remain unavailable there and
 are not claimed.
 
+## Durable multi-runtime daemon integration
+
+The single-source OpenCode loop was replaced by independent OpenCode and Codex
+monitors feeding one bounded update queue and one journal owner. Each runtime
+now performs the snapshot-subscribe-snapshot sequence, periodic authoritative
+reconciliation, degraded-state journaling, and capped reconnect backoff without
+blocking or replacing the other runtime's projection. Shutdown releases blocked
+producers, closes the owned Codex child, leaves external OpenCode ownership
+untouched, and persists a final combined snapshot.
+
+Codex active/completed/error statuses and approval resolution now project into
+the runtime state machine, and tests verify that reconciling one runtime cannot
+remove another runtime's sessions. After this slice,
+`cargo test --locked --workspace --all-targets` passes 55 tests on the clean
+Linux verification checkout.
+
+A two-run daemon smoke test with both sources intentionally unavailable handled
+`SIGINT` cleanly on both runs and restored the combined persisted projection on
+the second run. A separate unavailable-source smoke confirmed that both runtime
+monitors independently emitted degraded updates before the clean shutdown.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
   compatibility fixtures, stage/validate/activate/rollback, and restart tests.
-- Integrate the Codex App Server adapter into the connector's durable
-  multi-runtime mirror, add restart reconciliation and version fixtures, and
-  cover permission-profile/tool/MCP request shapes where the mobile protocol
-  can represent them safely.
+- Add Codex compatibility fixtures across supported CLI versions and cover
+  permission-profile/tool/MCP request shapes where the mobile protocol can
+  represent them safely.
 - Implement durable host identity, authenticated pairing, device revocation,
   transcript-bound key agreement, and key rotation. The current crypto crate is
   only a primitive layer.

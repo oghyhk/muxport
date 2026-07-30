@@ -1,4 +1,6 @@
-use adapter_api::{AgentAdapter, EventStream};
+use adapter_api::{
+    AdapterError, AgentAdapter, EventStream, ProjectInfo, SessionSummary,
+};
 use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{journal_runtime_event, replay_events_after_snapshot, RuntimeMirror};
@@ -7,18 +9,44 @@ use futures::StreamExt;
 use muxport_protocol::{
     event, AgentType, ConnectorState, Event, RuntimeState, RuntimeStateEvent,
 };
+use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-const OPENCODE_RUNTIME_NAME: &str = "OpenCode";
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const DELTAS_PER_SNAPSHOT: usize = 100;
+const SOURCE_UPDATE_CAPACITY: usize = 512;
 
 type DynError = Box<dyn Error + Send + Sync>;
+
+#[derive(Clone)]
+struct RuntimeConfig {
+    runtime_id: String,
+    agent_type: AgentType,
+    runtime_name: &'static str,
+}
+
+enum SourceUpdate {
+    Snapshot {
+        config: RuntimeConfig,
+        projects: Vec<ProjectInfo>,
+        sessions: Vec<SessionSummary>,
+    },
+    Event {
+        config: RuntimeConfig,
+        event: Event,
+    },
+    Degraded {
+        config: RuntimeConfig,
+        details: String,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
@@ -84,138 +112,90 @@ async fn main() -> Result<(), DynError> {
         ),
     };
     // Direct/relay mobile transport is not yet implemented, so the connector
-    // remains degraded even when its local source mirror is healthy.
+    // remains degraded even when all local source mirrors are healthy.
     mirror.set_connector_state(ConnectorState::Degraded);
     mirror.save_snapshot(&journal)?;
 
     let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4096".into());
     let opencode_password = nonempty_env("MUXPORT_OPENCODE_PASSWORD");
-    let runtime_id =
-        nonempty_env("MUXPORT_OPENCODE_RUNTIME_ID").unwrap_or_else(|| "opencode-local".into());
-    let opencode = OpenCodeAdapter::new(opencode_url, opencode_password);
+    let opencode_config = RuntimeConfig {
+        runtime_id: nonempty_env("MUXPORT_OPENCODE_RUNTIME_ID")
+            .unwrap_or_else(|| "opencode-local".into()),
+        agent_type: AgentType::Opencode,
+        runtime_name: "OpenCode",
+    };
+    let opencode: Arc<dyn AgentAdapter> =
+        Arc::new(OpenCodeAdapter::new(opencode_url, opencode_password));
 
     let codex_path = nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
-    let codex = CodexAdapter::new(codex_path);
-    match codex.probe().await {
-        Ok(_) => info!(
-            version = ?codex.observed_version()?,
-            "Codex App Server adapter is available; durable daemon mirroring is pending"
-        ),
-        Err(error) => warn!(%error, "Codex runtime is unavailable"),
+    let codex_config = RuntimeConfig {
+        runtime_id: nonempty_env("MUXPORT_CODEX_RUNTIME_ID")
+            .unwrap_or_else(|| "codex-local".into()),
+        agent_type: AgentType::Codex,
+        runtime_name: "Codex",
+    };
+    let codex: Arc<dyn AgentAdapter> = Arc::new(CodexAdapter::new(codex_path));
+
+    let runtimes = vec![
+        (opencode_config, opencode),
+        (codex_config, codex),
+    ];
+    let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut monitor_tasks = Vec::new();
+    for (config, adapter) in &runtimes {
+        monitor_tasks.push(tokio::spawn(monitor_runtime(
+            Arc::clone(adapter),
+            config.clone(),
+            updates_tx.clone(),
+            shutdown_rx.clone(),
+        )));
     }
-    if let Err(error) = codex.shutdown_gracefully().await {
-        warn!(%error, "Codex probe process did not shut down cleanly");
-    }
+    drop(updates_tx);
 
     warn!(
-        "mobile transport is not implemented; local OpenCode state will be mirrored and journaled"
+        "mobile transport is not implemented; local OpenCode and Codex state will be mirrored and journaled"
     );
 
-    let shutdown = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown);
-    let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
-    let mut degraded_reported = false;
-
-    'connector: loop {
-        let synchronized =
-            synchronize_opencode(&opencode, &runtime_id, &mut mirror, &journal).await;
-        let mut events = match synchronized {
-            Ok(events) => {
-                if let Some(version) = opencode.observed_version()? {
-                    info!(%version, runtime_id = %runtime_id, "OpenCode mirror synchronized");
-                }
-                reconnect_delay = INITIAL_RECONNECT_DELAY;
-                events
+    let mut shutdown = Box::pin(tokio::signal::ctrl_c());
+    let mut deltas_since_snapshot: HashMap<String, usize> = HashMap::new();
+    loop {
+        tokio::select! {
+            result = &mut shutdown => {
+                result?;
+                break;
             }
-            Err(error) => {
-                warn!(%error, runtime_id = %runtime_id, "OpenCode synchronization failed");
-                if !degraded_reported {
-                    record_degraded(
-                        &mut journal,
-                        &mut mirror,
-                        &runtime_id,
-                        "OpenCode snapshot or event subscription unavailable",
-                    )?;
-                    degraded_reported = true;
-                }
-                if wait_or_shutdown(&mut shutdown, reconnect_delay).await? {
-                    break 'connector;
-                }
-                reconnect_delay = reconnect_delay
-                    .checked_mul(2)
-                    .unwrap_or(MAX_RECONNECT_DELAY)
-                    .min(MAX_RECONNECT_DELAY);
-                continue;
+            update = updates_rx.recv() => {
+                let Some(update) = update else {
+                    warn!("all runtime monitor tasks stopped");
+                    break;
+                };
+                apply_source_update(
+                    update,
+                    &mut journal,
+                    &mut mirror,
+                    &mut deltas_since_snapshot,
+                )?;
             }
-        };
-
-        let mut health_tick = tokio::time::interval(HEALTH_INTERVAL);
-        health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        health_tick.tick().await;
-        let mut deltas_since_snapshot = 0;
-        let disconnect_reason = loop {
-            tokio::select! {
-                result = &mut shutdown => {
-                    result?;
-                    break None;
-                }
-                item = events.next() => {
-                    match item {
-                        Some(Ok(event)) => {
-                            let is_delta = matches!(
-                                event.inner.as_ref(),
-                                Some(event::Inner::StreamDelta(_))
-                            );
-                            if is_delta {
-                                deltas_since_snapshot += 1;
-                            }
-                            let save_snapshot = !is_delta
-                                || deltas_since_snapshot >= DELTAS_PER_SNAPSHOT;
-                            let sequence = journal_runtime_event(
-                                &mut journal,
-                                &mut mirror,
-                                &runtime_id,
-                                event,
-                                save_snapshot,
-                            )?;
-                            if save_snapshot {
-                                deltas_since_snapshot = 0;
-                            }
-                            debug!(sequence, runtime_id = %runtime_id, "journaled OpenCode event");
-                        }
-                        Some(Err(error)) => break Some(error.to_string()),
-                        None => break Some("OpenCode event stream ended".into()),
-                    }
-                }
-                _ = health_tick.tick() => {
-                    if let Err(error) =
-                        refresh_opencode_snapshot(&opencode, &runtime_id, &mut mirror, &journal).await
-                    {
-                        break Some(format!("OpenCode health reconciliation failed: {error}"));
-                    }
-                }
-            }
-        };
-
-        let Some(reason) = disconnect_reason else {
-            break 'connector;
-        };
-        warn!(%reason, runtime_id = %runtime_id, "OpenCode mirror became stale");
-        record_degraded(
-            &mut journal,
-            &mut mirror,
-            &runtime_id,
-            "OpenCode event stream disconnected",
-        )?;
-        degraded_reported = true;
-        if wait_or_shutdown(&mut shutdown, reconnect_delay).await? {
-            break 'connector;
         }
-        reconnect_delay = reconnect_delay
-            .checked_mul(2)
-            .unwrap_or(MAX_RECONNECT_DELAY)
-            .min(MAX_RECONNECT_DELAY);
+    }
+
+    let _ = shutdown_tx.send(true);
+    drop(updates_rx);
+    for (config, adapter) in &runtimes {
+        if let Err(error) = adapter.shutdown_gracefully().await {
+            warn!(
+                %error,
+                runtime_id = %config.runtime_id,
+                "runtime adapter did not shut down cleanly"
+            );
+        }
+    }
+    for task in monitor_tasks {
+        if let Err(error) = task.await {
+            warn!(%error, "runtime monitor task failed");
+        }
     }
 
     mirror.save_snapshot(&journal)?;
@@ -223,76 +203,254 @@ async fn main() -> Result<(), DynError> {
     Ok(())
 }
 
-async fn synchronize_opencode(
-    adapter: &OpenCodeAdapter,
-    runtime_id: &str,
+fn apply_source_update(
+    update: SourceUpdate,
+    journal: &mut EventJournal,
     mirror: &mut RuntimeMirror,
-    journal: &EventJournal,
-) -> Result<EventStream, DynError> {
-    refresh_opencode_snapshot(adapter, runtime_id, mirror, journal).await?;
+    deltas_since_snapshot: &mut HashMap<String, usize>,
+) -> Result<(), event_journal::JournalError> {
+    match update {
+        SourceUpdate::Snapshot {
+            config,
+            projects,
+            sessions,
+        } => {
+            mirror.reconcile_runtime(
+                &config.runtime_id,
+                config.agent_type,
+                config.runtime_name,
+                projects,
+                sessions,
+            );
+            mirror.set_connector_state(ConnectorState::Degraded);
+            mirror.save_snapshot(journal)?;
+            info!(
+                runtime_id = %config.runtime_id,
+                runtime = config.runtime_name,
+                "runtime mirror synchronized"
+            );
+        }
+        SourceUpdate::Event { config, event } => {
+            let is_delta = matches!(
+                event.inner.as_ref(),
+                Some(event::Inner::StreamDelta(_))
+            );
+            let delta_count = deltas_since_snapshot
+                .entry(config.runtime_id.clone())
+                .or_default();
+            if is_delta {
+                *delta_count += 1;
+            }
+            let save_snapshot = !is_delta || *delta_count >= DELTAS_PER_SNAPSHOT;
+            let sequence = journal_runtime_event(
+                journal,
+                mirror,
+                &config.runtime_id,
+                event,
+                save_snapshot,
+            )?;
+            if save_snapshot {
+                *delta_count = 0;
+            }
+            debug!(
+                sequence,
+                runtime_id = %config.runtime_id,
+                "journaled runtime event"
+            );
+        }
+        SourceUpdate::Degraded { config, details } => {
+            record_degraded(journal, mirror, &config, &details)?;
+            warn!(
+                runtime_id = %config.runtime_id,
+                runtime = config.runtime_name,
+                %details,
+                "runtime mirror became stale"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn monitor_runtime(
+    adapter: Arc<dyn AgentAdapter>,
+    config: RuntimeConfig,
+    updates: mpsc::Sender<SourceUpdate>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
+    let mut degraded_reported = false;
+    loop {
+        if *shutdown.borrow() || updates.is_closed() {
+            return;
+        }
+
+        let synchronized =
+            synchronize_runtime(adapter.as_ref(), &config, &updates).await;
+        let mut events = match synchronized {
+            Ok(events) => {
+                reconnect_delay = INITIAL_RECONNECT_DELAY;
+                degraded_reported = false;
+                events
+            }
+            Err(error) => {
+                if updates.is_closed() || *shutdown.borrow() {
+                    return;
+                }
+                warn!(
+                    %error,
+                    runtime_id = %config.runtime_id,
+                    runtime = config.runtime_name,
+                    "runtime synchronization failed"
+                );
+                if !degraded_reported {
+                    if updates
+                        .send(SourceUpdate::Degraded {
+                            config: config.clone(),
+                            details: "runtime snapshot or event subscription unavailable".into(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    degraded_reported = true;
+                }
+                if wait_for_shutdown(&mut shutdown, reconnect_delay).await {
+                    return;
+                }
+                reconnect_delay = next_reconnect_delay(reconnect_delay);
+                continue;
+            }
+        };
+
+        let mut health_tick = tokio::time::interval(HEALTH_INTERVAL);
+        health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        health_tick.tick().await;
+        let disconnect_reason = loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                item = events.next() => {
+                    match item {
+                        Some(Ok(event)) => {
+                            if updates
+                                .send(SourceUpdate::Event {
+                                    config: config.clone(),
+                                    event,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "runtime event stream ended".into(),
+                    }
+                }
+                _ = health_tick.tick() => {
+                    if let Err(error) =
+                        refresh_runtime_snapshot(adapter.as_ref(), &config, &updates).await
+                    {
+                        if updates.is_closed() || *shutdown.borrow() {
+                            return;
+                        }
+                        break format!("health reconciliation failed: {error}");
+                    }
+                }
+            }
+        };
+
+        if !degraded_reported {
+            if updates
+                .send(SourceUpdate::Degraded {
+                    config: config.clone(),
+                    details: disconnect_reason,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            degraded_reported = true;
+        }
+        if wait_for_shutdown(&mut shutdown, reconnect_delay).await {
+            return;
+        }
+        reconnect_delay = next_reconnect_delay(reconnect_delay);
+    }
+}
+
+async fn synchronize_runtime(
+    adapter: &dyn AgentAdapter,
+    config: &RuntimeConfig,
+    updates: &mpsc::Sender<SourceUpdate>,
+) -> Result<EventStream, AdapterError> {
+    refresh_runtime_snapshot(adapter, config, updates).await?;
     let events = adapter.subscribe_events().await?;
-    // Subscribe first, then take a second baseline while the response stream
-    // buffers source events. This closes the list-before-subscribe race.
-    refresh_opencode_snapshot(adapter, runtime_id, mirror, journal).await?;
+    // Subscribe first, then take a second baseline while the adapter buffers
+    // source events. This closes the list-before-subscribe race.
+    refresh_runtime_snapshot(adapter, config, updates).await?;
     Ok(events)
 }
 
-async fn refresh_opencode_snapshot(
-    adapter: &OpenCodeAdapter,
-    runtime_id: &str,
-    mirror: &mut RuntimeMirror,
-    journal: &EventJournal,
-) -> Result<(), DynError> {
+async fn refresh_runtime_snapshot(
+    adapter: &dyn AgentAdapter,
+    config: &RuntimeConfig,
+    updates: &mpsc::Sender<SourceUpdate>,
+) -> Result<(), AdapterError> {
     adapter.probe().await?;
     let projects = adapter.discover_projects().await?;
     let sessions = adapter.list_sessions().await?;
-    mirror.reconcile_runtime(
-        runtime_id,
-        AgentType::Opencode,
-        OPENCODE_RUNTIME_NAME,
-        projects,
-        sessions,
-    );
-    mirror.set_connector_state(ConnectorState::Degraded);
-    mirror.save_snapshot(journal)?;
-    Ok(())
+    updates
+        .send(SourceUpdate::Snapshot {
+            config: config.clone(),
+            projects,
+            sessions,
+        })
+        .await
+        .map_err(|_| AdapterError::Internal("connector update receiver closed".into()))
 }
 
 fn record_degraded(
     journal: &mut EventJournal,
     mirror: &mut RuntimeMirror,
-    runtime_id: &str,
+    config: &RuntimeConfig,
     details: &str,
 ) -> Result<(), event_journal::JournalError> {
     let event = Event {
         event_id: uuid::Uuid::new_v4().to_string(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         inner: Some(event::Inner::RuntimeState(RuntimeStateEvent {
-            runtime_id: runtime_id.to_owned(),
-            agent_type: AgentType::Opencode as i32,
+            runtime_id: config.runtime_id.clone(),
+            agent_type: config.agent_type as i32,
             state: RuntimeState::Degraded as i32,
             active_profile_id: String::new(),
             details: details.to_owned(),
         })),
     };
-    journal_runtime_event(journal, mirror, runtime_id, event, true)?;
+    journal_runtime_event(journal, mirror, &config.runtime_id, event, true)?;
     Ok(())
 }
 
-async fn wait_or_shutdown<F>(
-    shutdown: &mut std::pin::Pin<&mut F>,
+async fn wait_for_shutdown(
+    shutdown: &mut watch::Receiver<bool>,
     delay: Duration,
-) -> Result<bool, std::io::Error>
-where
-    F: std::future::Future<Output = Result<(), std::io::Error>>,
-{
+) -> bool {
     tokio::select! {
-        result = shutdown => {
-            result?;
-            Ok(true)
-        }
-        _ = tokio::time::sleep(delay) => Ok(false),
+        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+        _ = tokio::time::sleep(delay) => false,
     }
+}
+
+fn next_reconnect_delay(delay: Duration) -> Duration {
+    delay
+        .checked_mul(2)
+        .unwrap_or(MAX_RECONNECT_DELAY)
+        .min(MAX_RECONNECT_DELAY)
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
@@ -308,8 +466,53 @@ fn new_boot_epoch() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use test_harness::DeterministicFakeAdapter;
+
     #[test]
     fn boot_epoch_fits_sqlite_integer() {
-        assert!(super::new_boot_epoch() <= i64::MAX as u64);
+        assert!(new_boot_epoch() <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn reconnect_delay_is_bounded() {
+        assert_eq!(
+            next_reconnect_delay(Duration::from_secs(1)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_reconnect_delay(Duration::from_secs(30)),
+            MAX_RECONNECT_DELAY
+        );
+    }
+
+    #[tokio::test]
+    async fn synchronization_brackets_subscription_with_snapshots() {
+        let adapter = DeterministicFakeAdapter::new(AgentType::Codex);
+        let config = RuntimeConfig {
+            runtime_id: "codex-test".into(),
+            agent_type: AgentType::Codex,
+            runtime_name: "Codex",
+        };
+        let (updates_tx, mut updates_rx) = mpsc::channel(4);
+        let mut events = synchronize_runtime(&adapter, &config, &updates_tx)
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            match updates_rx.recv().await.unwrap() {
+                SourceUpdate::Snapshot {
+                    config,
+                    projects,
+                    sessions,
+                } => {
+                    assert_eq!(config.runtime_id, "codex-test");
+                    assert_eq!(projects.len(), 1);
+                    assert_eq!(sessions.len(), 1);
+                }
+                _ => panic!("synchronization emitted a non-snapshot baseline"),
+            }
+        }
+        assert!(events.next().await.is_none());
     }
 }

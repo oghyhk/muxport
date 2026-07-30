@@ -1,6 +1,6 @@
 # Codex App Server Adapter
 
-- **Status:** Implemented adapter vertical slice; daemon mirroring pending
+- **Status:** Implemented adapter and durable daemon mirror foundation
 - **Reviewed:** 2026-07-30
 - **Protocol fixture:** `codex-cli 0.146.0-alpha.3.1`
 
@@ -68,6 +68,9 @@ App Server notifications are live process state, not a durable Muxport source
 of truth. After process loss, active-turn IDs and pending approval callbacks
 from that process are discarded. Threads remain discoverable through
 `thread/list`; a subsequent command resumes its thread before starting a turn.
-The connector daemon still needs the same snapshot-around-subscription,
-journaling, backoff, and periodic reconciliation path already used for
-OpenCode before Codex state is exposed as restart-safe mobile state.
+The connector daemon brackets each subscription with authoritative thread
+snapshots, journals normalized events through its single writer, reconciles
+every 30 seconds, and reconnects this runtime independently with bounded
+backoff. Process-bound active turns and approvals still cannot be reconstructed
+after App Server loss, so they are cleared instead of being presented as
+actionable.

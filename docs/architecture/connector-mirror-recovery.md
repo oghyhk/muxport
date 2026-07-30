@@ -1,17 +1,20 @@
 # Connector Source Mirror and Restart Recovery
 
-- **Status:** Implemented local OpenCode foundation
+- **Status:** Implemented local OpenCode and Codex foundation
 - **Reviewed:** 2026-07-30
 
 ## Purpose
 
-The connector daemon maintains a non-secret projection of OpenCode runtime and
-session state. The projection is derived from authoritative HTTP snapshots and
-normalized SSE events; it is not a replacement for OpenCode's own state.
+The connector daemon maintains one non-secret projection for multiple local
+agent runtimes. OpenCode and Codex are monitored independently and feed a
+single journal owner, so one unavailable or restarting runtime does not block,
+erase, or reorder state from the other. The projection is derived from
+authoritative vendor snapshots plus normalized live events; it is not a
+replacement for either vendor's own state.
 
 The direct/relay mobile transport is not implemented yet. Until it is
 authenticated and encrypted, the daemon deliberately reports the connector as
-`degraded` even when local OpenCode mirroring is healthy.
+`degraded` even when every local source mirror is healthy.
 
 ## Startup sequence
 
@@ -20,12 +23,18 @@ authenticated and encrypted, the daemon deliberately reports the connector as
    with the persisted ID is fatal instead of silently changing identity.
 3. Replay journal events newer than the snapshot into the in-memory projection.
 4. Persist a new recovery snapshot at the current journal sequence.
-5. Probe OpenCode and fetch authoritative projects, sessions, and statuses.
-6. Persist that baseline before opening the event stream.
-7. Open global SSE, then fetch and persist a second baseline while the HTTP
-   response buffers events. This closes the list-before-subscribe race for
-   session and status state.
-8. Begin consuming the buffered live stream.
+5. Start independent OpenCode and Codex monitor tasks.
+6. Each monitor probes its runtime and fetches authoritative projects, sessions,
+   and statuses.
+7. Persist that runtime baseline before opening its event stream.
+8. Open the runtime event stream, then fetch and persist a second baseline while
+   the stream buffers source events.
+9. Begin consuming buffered live events through the shared journal owner.
+
+The double baseline closes the list-before-subscribe race for state represented
+by host snapshots. Runtime updates share a bounded queue, but only the main
+daemon task writes the journal and projection; SQLite sequence order therefore
+remains deterministic across sources.
 
 The host ID persisted here is only a stable logical identifier. It is not a
 cryptographic host identity and must not be used as proof of pairing; durable
@@ -39,27 +48,34 @@ Each normalized event follows this order:
 2. Append the event to the durable journal and receive its monotonic sequence.
 3. Apply it to the in-memory projection.
 4. Persist a snapshot for state-changing events, and at least every 100 output
-   deltas.
+   deltas per runtime.
 
 If journal append fails, the projection is not changed. If snapshot persistence
 fails after append, restart recovery replays the durable event after the older
 snapshot.
 
-The daemon takes an authoritative health/session snapshot every 30 seconds to
-repair incomplete or ambiguous source events. High-frequency text deltas remain
-in the journal and are not copied into the host snapshot.
+Each monitor takes an authoritative health/session snapshot every 30 seconds to
+repair incomplete or ambiguous source events. Reconciliation replaces only the
+target runtime's sessions; state from other runtimes remains intact.
+High-frequency text deltas remain in the journal and are not copied into the
+host snapshot.
 
-## Disconnect behavior
+## Disconnect and restart behavior
 
-- A source error or clean SSE end marks OpenCode and the connector degraded.
+- A source error or clean event-stream end marks only that runtime degraded.
 - No source mutation is automatically retried or replayed.
-- Reconnect uses exponential backoff from 1 second to a 30-second cap.
-- Recovery requires a fresh health probe, two snapshot baselines around a new
-  subscription, and a new persisted snapshot.
-- Repeated failed reconnect attempts do not flood the journal with duplicate
-  degraded-state events.
-- Shutdown remains responsive during streaming and backoff, and writes a final
-  snapshot before exit.
+- Each runtime reconnects independently with exponential backoff from 1 second
+  to a 30-second cap.
+- Recovery requires a fresh probe, two snapshot baselines around a new
+  subscription, and persisted source state.
+- Repeated failed attempts do not flood the journal with duplicate degraded
+  events; a new event is recorded after a real recovery and later failure.
+- Codex App Server loss discards process-bound active-turn IDs and approval
+  callbacks. Durable threads are rediscovered with `thread/list`.
+- OpenCode is externally managed and is never killed by its HTTP adapter.
+- Shutdown signals every monitor, drops the update receiver to release blocked
+  producers, closes or terminates the owned Codex child, and writes a final
+  snapshot.
 
 ## Configuration
 
@@ -70,21 +86,26 @@ in the journal and are not copied into the host snapshot.
 | `MUXPORT_HOSTNAME` | Display hostname | OS hostname or `unnamed-host` |
 | `MUXPORT_OPENCODE_URL` | OpenCode server base URL | `http://127.0.0.1:4096` |
 | `MUXPORT_OPENCODE_PASSWORD` | OpenCode HTTP Basic password | unset |
-| `MUXPORT_OPENCODE_RUNTIME_ID` | Stable runtime correlation ID | `opencode-local` |
-| `MUXPORT_CODEX_PATH` | Codex executable path for conservative probing | `codex` |
+| `MUXPORT_OPENCODE_RUNTIME_ID` | Stable OpenCode runtime correlation ID | `opencode-local` |
+| `MUXPORT_CODEX_PATH` | Codex executable used to own an App Server child | `codex` |
+| `MUXPORT_CODEX_RUNTIME_ID` | Stable Codex runtime correlation ID | `codex-local` |
 
 Passwords are read from the environment and are not persisted in snapshots,
-events, or logs.
+events, or logs. Codex uses the account state already visible to its isolated
+process environment; the connector does not mutate that state.
 
 ## Known boundaries
 
-- The mirror currently snapshots projects, sessions, and statuses. Full message
+- OpenCode snapshots cover projects, sessions, and statuses. Full message
   history, todos, diffs, usage, and pending-permission enumeration still need
   supported source reads and version fixtures.
 - OpenCode does not document a pending-permission list endpoint, so approval
   commands carry `session_id` for restart-safe routing.
-- Relay/direct delivery, client acknowledgements, snapshot transfer, and mobile
-  application state replacement are not connected to this mirror yet.
-- Managed OpenCode process restart and credential/profile isolation are not
-  implemented; an external runtime is observed but never restarted by this
-  slice.
+- Codex active-turn and pending-approval state is process-bound and cannot be
+  reconstructed after App Server loss from the currently used stable reads.
+- Relay/direct delivery, client acknowledgements, snapshot transfer, command
+  dispatch, and mobile application state replacement are not connected to this
+  mirror yet.
+- Managed runtime restart and credential/profile isolation are not implemented.
+  OpenCode is observed externally; Codex owns one child using the current
+  process account state.

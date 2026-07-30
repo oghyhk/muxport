@@ -1015,7 +1015,10 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
-        Err(Self::unsupported("graceful shutdown"))
+        // This adapter observes an externally managed HTTP server and owns no
+        // child process. Dropping its event stream and client handles is the
+        // complete local shutdown operation.
+        Ok(())
     }
 }
 

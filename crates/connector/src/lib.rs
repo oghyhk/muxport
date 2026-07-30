@@ -208,6 +208,17 @@ impl RuntimeMirror {
                 }
                 self.set_existing_runtime_state(runtime_id, RuntimeState::OnlineWaitingApproval);
             }
+            Some(event::Inner::ApprovalResolved(approval)) => {
+                if let Some(session) = self
+                    .snapshot
+                    .active_sessions
+                    .iter_mut()
+                    .find(|session| session.session_id == approval.session_id)
+                {
+                    session.status = "running".into();
+                }
+                self.set_existing_runtime_state(runtime_id, RuntimeState::OnlineRunning);
+            }
             Some(event::Inner::RuntimeState(runtime)) if runtime.runtime_id == runtime_id => {
                 if let Ok(state) = RuntimeState::try_from(runtime.state) {
                     let agent_type = AgentType::try_from(runtime.agent_type)
@@ -331,7 +342,17 @@ fn observed_runtime_state(sessions: &[SessionSummary]) -> RuntimeState {
         RuntimeState::OnlineWaitingApproval
     } else if sessions
         .iter()
-        .any(|session| session.status == "busy" || session.status == "running")
+        .any(|session| session.status == "systemError")
+    {
+        RuntimeState::Degraded
+    } else if sessions
+        .iter()
+        .any(|session| {
+            matches!(
+                session.status.as_str(),
+                "busy" | "running" | "active" | "inProgress"
+            )
+        })
     {
         RuntimeState::OnlineRunning
     } else {
@@ -341,9 +362,13 @@ fn observed_runtime_state(sessions: &[SessionSummary]) -> RuntimeState {
 
 fn runtime_state_for_session_status(status: &str) -> Option<RuntimeState> {
     match status {
-        "busy" | "running" => Some(RuntimeState::OnlineRunning),
-        "idle" => Some(RuntimeState::OnlineIdle),
+        "busy" | "running" | "active" | "inProgress" => {
+            Some(RuntimeState::OnlineRunning)
+        }
+        "idle" | "completed" | "interrupted" | "failed" | "notLoaded" | "archived"
+        | "closed" => Some(RuntimeState::OnlineIdle),
         "waiting_approval" => Some(RuntimeState::OnlineWaitingApproval),
+        "systemError" => Some(RuntimeState::Degraded),
         _ => None,
     }
 }
@@ -351,7 +376,9 @@ fn runtime_state_for_session_status(status: &str) -> Option<RuntimeState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use muxport_protocol::{SessionUpdatedEvent, StreamDeltaEvent};
+    use muxport_protocol::{
+        ApprovalResolvedEvent, SessionUpdatedEvent, StreamDeltaEvent,
+    };
 
     fn session(id: &str, project_path: &str, title: &str, status: &str) -> SessionSummary {
         SessionSummary {
@@ -534,5 +561,110 @@ mod tests {
         )
         .is_err());
         assert_eq!(mirror.snapshot_at(1).active_sessions[0].status, "idle");
+    }
+
+    #[test]
+    fn runtime_reconciliation_isolated_between_opencode_and_codex() {
+        let mut mirror =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Recovering, 0);
+        mirror.reconcile_runtime(
+            "opencode-1",
+            AgentType::Opencode,
+            "OpenCode",
+            vec![],
+            vec![session("open-session", "/open", "Open", "idle")],
+        );
+        mirror.reconcile_runtime(
+            "codex-1",
+            AgentType::Codex,
+            "Codex",
+            vec![],
+            vec![session("codex-session", "/codex", "Codex", "active")],
+        );
+        mirror.reconcile_runtime(
+            "opencode-1",
+            AgentType::Opencode,
+            "OpenCode",
+            vec![],
+            vec![session("open-new", "/open", "Open new", "busy")],
+        );
+
+        let snapshot = mirror.snapshot_at(0);
+        assert_eq!(snapshot.active_sessions.len(), 2);
+        assert!(snapshot
+            .active_sessions
+            .iter()
+            .any(|session| session.session_id == "codex-session"));
+        assert!(snapshot
+            .active_sessions
+            .iter()
+            .any(|session| session.session_id == "open-new"));
+        assert!(!snapshot
+            .active_sessions
+            .iter()
+            .any(|session| session.session_id == "open-session"));
+        let codex = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.runtime_id == "codex-1")
+            .unwrap();
+        assert_eq!(
+            RuntimeState::try_from(codex.state).unwrap(),
+            RuntimeState::OnlineRunning
+        );
+    }
+
+    #[test]
+    fn codex_completion_and_approval_resolution_update_runtime_state() {
+        let mut mirror =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Recovering, 0);
+        mirror.reconcile_runtime(
+            "codex-1",
+            AgentType::Codex,
+            "Codex",
+            vec![],
+            vec![session(
+                "codex-session",
+                "/codex",
+                "Codex",
+                "waiting_approval",
+            )],
+        );
+        let resolved = Event {
+            event_id: "resolved".into(),
+            timestamp_ms: 2,
+            inner: Some(event::Inner::ApprovalResolved(ApprovalResolvedEvent {
+                approval_id: "approval-1".into(),
+                approved: true,
+                resolved_by: "muxport".into(),
+                session_id: "codex-session".into(),
+            })),
+        };
+        mirror.apply_event("codex-1", &resolved);
+        assert_eq!(
+            mirror.snapshot_at(0).active_sessions[0].status,
+            "running"
+        );
+
+        let completed = Event {
+            event_id: "completed".into(),
+            timestamp_ms: 3,
+            inner: Some(event::Inner::SessionUpdated(SessionUpdatedEvent {
+                session_id: "codex-session".into(),
+                runtime_id: "codex-1".into(),
+                title: String::new(),
+                status: "completed".into(),
+                credential_profile_id: String::new(),
+                updated_at_ms: 3,
+                project_path: String::new(),
+            })),
+        };
+        mirror.apply_event("codex-1", &completed);
+        let snapshot = mirror.snapshot_at(0);
+        assert_eq!(snapshot.active_sessions[0].status, "completed");
+        assert_eq!(
+            RuntimeState::try_from(snapshot.runtimes[0].state).unwrap(),
+            RuntimeState::OnlineIdle
+        );
     }
 }

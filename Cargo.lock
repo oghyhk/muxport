@@ -265,6 +265,7 @@ dependencies = [
  "process-supervisor",
  "serde",
  "serde_json",
+ "test-harness",
  "thiserror",
  "tokio",
  "tracing",
