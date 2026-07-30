@@ -5,7 +5,8 @@ use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
-    InstanceLock, PairingStore, PairingStoreError, RuntimeMirror,
+    DirectTransportService, InstanceLock, PairingStore, PairingStoreError,
+    RuntimeMirror,
 };
 use credential_vault::{
     HostIdentityManager, OsHostIdentityStore, OsVaultKeyStore, PersistentVault,
@@ -18,8 +19,11 @@ use muxport_protocol::{
 };
 use std::collections::HashMap;
 use std::error::Error;
+use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -124,8 +128,8 @@ async fn main() -> Result<(), DynError> {
             journal.current_sequence(),
         ),
     };
-    // Direct/relay mobile transport is not yet implemented, so the connector
-    // remains degraded even when all local source mirrors are healthy.
+    // Live snapshot/event delivery is not yet connected, so the connector
+    // remains degraded even when local source mirrors and commands are healthy.
     mirror.set_connector_state(ConnectorState::Degraded);
     mirror.save_snapshot(&journal)?;
 
@@ -162,7 +166,8 @@ async fn main() -> Result<(), DynError> {
             (config.runtime_id.clone(), Arc::clone(adapter))
         })
         .collect();
-    let _command_router = CommandRouter::open_sqlite(&command_db, adapter_registry)?;
+    let command_router =
+        Arc::new(CommandRouter::open_sqlite(&command_db, adapter_registry)?);
     info!(path = %command_db, "persistent command ledger initialized");
     let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
         .unwrap_or_else(|_| "muxport-pairing.db".into());
@@ -170,7 +175,7 @@ async fn main() -> Result<(), DynError> {
     info!(path = %pairing_db, "persistent pairing store initialized");
     let host_identity =
         HostIdentityManager::new(OsHostIdentityStore::new()).load_or_create(&host_id);
-    let _host_identity = match host_identity {
+    let direct_transport_security = match host_identity {
         Ok(identity) => {
             let binding = pairing_store.bind_host_identity(
                 &host_id,
@@ -182,7 +187,12 @@ async fn main() -> Result<(), DynError> {
                         created = identity.was_created(),
                         "OS-protected host identity is available"
                     );
-                    Some(identity)
+                    let registry =
+                        pairing_store.load_registry(&host_id, identity.signing_key())?;
+                    Some((
+                        Arc::new(identity.into_signing_key()),
+                        Arc::new(registry),
+                    ))
                 }
                 Err(PairingStoreError::HostIdentityMismatch) => {
                     warn!(
@@ -201,7 +211,7 @@ async fn main() -> Result<(), DynError> {
             None
         }
     };
-    let _pairing_store = pairing_store;
+    drop(pairing_store);
     let vault_file =
         std::env::var("MUXPORT_VAULT_FILE").unwrap_or_else(|_| "vault.sealed".into());
     let vault_key =
@@ -243,6 +253,49 @@ async fn main() -> Result<(), DynError> {
 
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let direct_transport_task =
+        match (
+            nonempty_env("MUXPORT_DIRECT_BIND"),
+            direct_transport_security,
+        ) {
+            (Some(bind_address), Some((host_identity, registry))) => {
+                let allow_remote =
+                    std::env::var("MUXPORT_ALLOW_REMOTE_DIRECT").as_deref()
+                        == Ok("1");
+                let bind_address =
+                    validate_direct_bind(&bind_address, allow_remote)?;
+                let listener = TcpListener::bind(bind_address).await?;
+                let local_address = listener.local_addr()?;
+                let service = DirectTransportService::new(
+                    host_id.clone(),
+                    boot_epoch,
+                    host_identity,
+                    registry,
+                    Arc::clone(&command_router),
+                )?;
+                info!(
+                    bind_address = %local_address,
+                    "authenticated direct command transport listening"
+                );
+                Some(tokio::spawn(service.serve(
+                    listener,
+                    shutdown_rx.clone(),
+                )))
+            }
+            (Some(bind_address), None) => {
+                warn!(
+                    %bind_address,
+                    "direct transport requested but the protected host identity is unavailable"
+                );
+                None
+            }
+            (None, _) => {
+                warn!(
+                    "direct transport is disabled; set MUXPORT_DIRECT_BIND to an explicit listen address"
+                );
+                None
+            }
+        };
     let mut monitor_tasks = Vec::new();
     for (config, adapter) in &runtimes {
         monitor_tasks.push(tokio::spawn(monitor_runtime(
@@ -255,7 +308,7 @@ async fn main() -> Result<(), DynError> {
     drop(updates_tx);
 
     warn!(
-        "mobile transport is not implemented; local OpenCode and Codex state will be mirrored and journaled"
+        "snapshot replay and live mobile event delivery are not connected; connector remains degraded"
     );
 
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
@@ -295,6 +348,17 @@ async fn main() -> Result<(), DynError> {
     for task in monitor_tasks {
         if let Err(error) = task.await {
             warn!(%error, "runtime monitor task failed");
+        }
+    }
+    if let Some(task) = direct_transport_task {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "direct transport stopped with an error");
+            }
+            Err(error) => {
+                warn!(%error, "direct transport task failed");
+            }
         }
     }
 
@@ -564,6 +628,25 @@ fn new_boot_epoch() -> u64 {
     (uuid::Uuid::new_v4().as_u128() & i64::MAX as u128) as u64
 }
 
+fn validate_direct_bind(
+    value: &str,
+    allow_remote: bool,
+) -> Result<SocketAddr, io::Error> {
+    let address: SocketAddr = value.parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MUXPORT_DIRECT_BIND must be an IP socket address",
+        )
+    })?;
+    if !address.ip().is_loopback() && !allow_remote {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "non-loopback direct transport requires MUXPORT_ALLOW_REMOTE_DIRECT=1",
+        ));
+    }
+    Ok(address)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +655,32 @@ mod tests {
     #[test]
     fn boot_epoch_fits_sqlite_integer() {
         assert!(new_boot_epoch() <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn direct_transport_defaults_to_loopback_only() {
+        assert!(validate_direct_bind("127.0.0.1:45821", false).is_ok());
+        assert!(validate_direct_bind("[::1]:45821", false).is_ok());
+        assert_eq!(
+            validate_direct_bind("0.0.0.0:45821", false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn remote_direct_transport_requires_explicit_opt_in() {
+        assert_eq!(
+            validate_direct_bind("192.0.2.10:45821", true).unwrap(),
+            "192.0.2.10:45821".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            validate_direct_bind("localhost:45821", true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

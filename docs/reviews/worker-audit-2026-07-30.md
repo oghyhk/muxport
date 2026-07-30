@@ -425,6 +425,27 @@ After this slice, `flutter test` passes 31 tests and `flutter analyze` reports
 no issues on Windows. Live transport, pairing UI, source-backed screens, and
 native-device verification remain unfinished.
 
+## Authenticated direct command transport
+
+The connector now has an opt-in bounded TCP endpoint for already-paired
+devices. A fresh signed server challenge binds host identity, connector boot
+epoch, and validity window before the existing signed Ed25519/X25519 handshake.
+Only exact non-revoked registry bindings reach directional
+ChaCha20-Poly1305 framing and the durable `CommandRouter`.
+
+Handshake/record sizes, handshake time, frame order, and concurrent sessions
+are bounded. The listener is disabled without `MUXPORT_DIRECT_BIND`, and a
+non-loopback address additionally requires `MUXPORT_ALLOW_REMOTE_DIRECT=1`.
+Tests perform an end-to-end encrypted probe, reject an unregistered identity,
+detect signed challenge epoch/expiry tampering, and enforce the connection cap.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 95
+tests on the clean Linux verification checkout. Rustfmt and clippy remain
+unavailable there and are not claimed. The Flutter wire client, pairing UI,
+online revocation propagation, replay/snapshot/event delivery, rate limiting,
+relay path, and network fuzzing remain unfinished, so the connector still
+reports degraded state.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

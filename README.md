@@ -4,10 +4,11 @@ Muxport is an open-source, mobile-first control plane for operating OpenCode
 and Codex runtimes on user-controlled desktops and servers.
 
 > **Project status:** early security-focused scaffold. The protocol, Rust
-> workspace, and Flutter shell compile and have baseline tests, but remote
-> control, end-to-end pairing, durable credential rotation, and real-time Codex
-> and OpenCode synchronization are not complete. Do not deploy this build as a
-> public relay or use it to manage production credentials.
+> workspace, and Flutter shell compile and have baseline tests. An opt-in
+> authenticated direct command endpoint exists, but its phone client,
+> end-to-end pairing UI, durable credential rotation, and real-time Codex and
+> OpenCode synchronization are not complete. Do not expose this build publicly
+> or use it to manage production credentials.
 
 Muxport is an independent project. It is not built, sponsored, or endorsed by
 the OpenCode team or OpenAI.
@@ -59,6 +60,17 @@ flutter test
 
 See [the worker audit](docs/reviews/worker-audit-2026-07-30.md) for the exact
 verified state and known gaps.
+
+The connector's command-only direct listener is disabled by default. For local
+development it can be enabled on loopback:
+
+```sh
+MUXPORT_DIRECT_BIND=127.0.0.1:45821 cargo run -p connector
+```
+
+Non-loopback binding additionally requires
+`MUXPORT_ALLOW_REMOTE_DIRECT=1`. Use only on an access-controlled private
+network; snapshot/event sync and the Flutter wire client are not connected yet.
 
 ## Security
 

@@ -1,6 +1,6 @@
 # Authenticated Session and Secure Envelope Foundation
 
-- **Status:** Cryptographic/session codec implemented; network listener pending
+- **Status:** Cryptographic/session codec and opt-in direct command listener implemented
 - **Reviewed:** 2026-07-30
 
 ## Identity handshake
@@ -78,5 +78,18 @@ long-term host Ed25519 seed is stored through Windows Credential Manager,
 macOS Keychain Services, or Linux Secret Service and matched to a public-key
 pin in the pairing database. A locked/unavailable store or pin mismatch disables
 pairing without a plaintext fallback. Headless unlock/recovery backends and the
-actual QR/SAS UI remain pending. No unauthenticated listener is introduced by
-this slice.
+actual QR/SAS UI remain pending.
+
+## Direct listener boundary
+
+The opt-in direct listener sends a signed, expiring server challenge before the
+existing initiator/responder handshake. The signature binds the pinned host
+identity, challenge, boot epoch, and validity window. Only a device already in
+the non-revoked registry can establish directional encryption and dispatch a
+durably idempotent command. Length, timeout, and concurrent-session bounds are
+enforced before command decoding.
+
+The listener is disabled by default and separately gates non-loopback binds.
+It does not yet implement pairing, mobile wire code, snapshot replay, live
+events, acknowledgements, online revocation propagation, or a relay path. See
+`direct-command-transport.md`.
