@@ -446,6 +446,24 @@ online revocation propagation, replay/snapshot/event delivery, rate limiting,
 relay path, and network fuzzing remain unfinished, so the connector still
 reports degraded state.
 
+## Flutter direct command client
+
+The mobile package now generates protobuf bindings from the shared schema and
+implements the connector's signed challenge, Ed25519/X25519 handshake,
+HKDF-SHA-256 key schedule, ordered ChaCha20-Poly1305 frames, and encrypted
+command/result envelope validation. A loopback test performs the complete
+exchange with an independent Dart host, while separate cases reject a wrong
+pinned host and a replayed frame.
+
+The client is deliberately not presented as live app functionality yet. There
+is no pairing/endpoint UI, reconnect supervisor, snapshot or event path,
+background lifecycle integration, or native phone-to-Rust interoperability
+test. Cached screens therefore remain stale and mutation controls remain
+disabled.
+
+After this slice, the complete mobile suite passes 34 tests and
+`flutter analyze` reports no issues on Windows.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

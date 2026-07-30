@@ -1,0 +1,445 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart' as hashes;
+import 'package:cryptography/cryptography.dart';
+import 'package:fixnum/fixnum.dart';
+import 'package:flutter_protocol/wire_protocol.dart' as wire;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:muxport_mobile/security/device_identity.dart';
+import 'package:muxport_mobile/transport/direct_transport_client.dart';
+import 'package:muxport_mobile/transport/direct_transport_protocol.dart';
+
+void main() {
+  test('mobile client completes authenticated encrypted probe', () async {
+    final ed25519 = Ed25519();
+    final hostIdentity = await ed25519.newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 1),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final hostPublicHex = _hex(hostPublic.bytes);
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(7),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final serverTask = _serveProbe(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+      expectedDeviceId: mobileIdentity.deviceId,
+      expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+    );
+
+    final connection = await AuthenticatedDirectConnection.connect(
+      address: InternetAddress.loopbackIPv4.address,
+      port: server.port,
+      pinnedHost: PinnedHostIdentity(
+        hostId: 'host-1',
+        publicKeyHex: hostPublicHex,
+      ),
+      identity: mobileIdentity,
+    );
+    final result = await connection.probe(
+      commandId: 'probe-1',
+      idempotencyKey: 'probe-idempotency-1',
+    );
+
+    expect(result.commandId, 'probe-1');
+    expect(result.success, isTrue);
+    expect(result.state, wire.RemoteOpState.REMOTE_OP_STATE_SUCCEEDED);
+    expect(result.resultJson, '{"status":"ok"}');
+
+    await connection.close();
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
+  test(
+    'mobile client rejects a challenge outside the pinned identity',
+    () async {
+      final ed25519 = Ed25519();
+      final actualHost = await ed25519.newKeyPair();
+      final actualHostPublic = await actualHost.extractPublicKey();
+      final pinnedHost = await ed25519.newKeyPair();
+      final pinnedHostPublic = await pinnedHost.extractPublicKey();
+      final mobileIdentity = await DeviceIdentityManager(
+        secureStore: _MemorySecureStore(),
+        random: Random(9),
+      ).loadOrCreate();
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final serverTask = () async {
+        final socket = await server.first;
+        final challenge = await _signedChallenge(
+          hostIdentity: actualHost,
+          hostPublicHex: _hex(actualHostPublic.bytes),
+        );
+        await _writeRecord(socket, utf8.encode(jsonEncode(challenge)));
+        await socket.close();
+      }();
+
+      await expectLater(
+        AuthenticatedDirectConnection.connect(
+          address: InternetAddress.loopbackIPv4.address,
+          port: server.port,
+          pinnedHost: PinnedHostIdentity(
+            hostId: 'host-1',
+            publicKeyHex: _hex(pinnedHostPublic.bytes),
+          ),
+          identity: mobileIdentity,
+        ),
+        throwsA(isA<DirectTransportProtocolException>()),
+      );
+
+      await serverTask;
+      await mobileIdentity.destroy();
+      actualHost.destroy();
+      pinnedHost.destroy();
+      await server.close();
+    },
+  );
+
+  test('ordered frame codec rejects replay', () async {
+    final initiatorKeys = DirectSessionKeys(
+      sendKey: List<int>.filled(32, 1),
+      receiveKey: List<int>.filled(32, 2),
+      sendNoncePrefix: const [3, 4, 5, 6],
+      receiveNoncePrefix: const [7, 8, 9, 10],
+      aad: utf8.encode('bound-session'),
+    );
+    final responderKeys = DirectSessionKeys(
+      sendKey: List<int>.filled(32, 2),
+      receiveKey: List<int>.filled(32, 1),
+      sendNoncePrefix: const [7, 8, 9, 10],
+      receiveNoncePrefix: const [3, 4, 5, 6],
+      aad: utf8.encode('bound-session'),
+    );
+    final initiator = DirectSessionCipher(initiatorKeys);
+    final responder = DirectSessionCipher(responderKeys);
+    initiatorKeys.destroy();
+    responderKeys.destroy();
+
+    final frame = await initiator.encrypt(utf8.encode('probe'));
+    final decoded = DirectEncryptedFrame.decode(frame.encode());
+    expect(utf8.decode(await responder.decrypt(decoded)), 'probe');
+    await expectLater(
+      responder.decrypt(decoded),
+      throwsA(isA<DirectTransportProtocolException>()),
+    );
+
+    initiator.destroy();
+    responder.destroy();
+  });
+}
+
+Future<void> _serveProbe({
+  required ServerSocket server,
+  required SimpleKeyPair hostIdentity,
+  required String hostPublicHex,
+  required String expectedDeviceId,
+  required String expectedDevicePublicKeyHex,
+}) async {
+  final socket = await server.first;
+  final reader = _TestRecordReader(socket);
+  try {
+    final challenge = await _signedChallenge(
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+    );
+    await _writeRecord(socket, utf8.encode(jsonEncode(challenge)));
+
+    final initiator = Map<String, Object?>.from(
+      jsonDecode(utf8.decode(await reader.readRecord())) as Map,
+    );
+    expect(initiator['protocolVersion'], directTransportProtocolVersion);
+    expect(initiator['hostId'], 'host-1');
+    expect(initiator['deviceId'], expectedDeviceId);
+    expect(initiator['deviceIdentityPublicKeyHex'], expectedDevicePublicKeyHex);
+    final initiatorSignatureValid = await Ed25519().verify(
+      _initiatorClaim(initiator),
+      signature: Signature(
+        _unhex(initiator['signatureHex']! as String),
+        publicKey: SimplePublicKey(
+          _unhex(initiator['deviceIdentityPublicKeyHex']! as String),
+          type: KeyPairType.ed25519,
+        ),
+      ),
+    );
+    expect(initiatorSignatureValid, isTrue);
+
+    final hostEphemeral = await X25519().newKeyPair();
+    final hostEphemeralPublic = await hostEphemeral.extractPublicKey();
+    final responder = <String, Object?>{
+      'protocolVersion': directTransportProtocolVersion,
+      'hostId': 'host-1',
+      'deviceId': expectedDeviceId,
+      'hostIdentityPublicKeyHex': hostPublicHex,
+      'ephemeralPublicKeyHex': _hex(hostEphemeralPublic.bytes),
+      'nonceHex': _hex(List<int>.filled(32, 13)),
+      'initiatorHashHex': _hex(_initiatorHash(initiator)),
+      'signatureHex': '',
+    };
+    final responderSignature = await Ed25519().sign(
+      _responderClaim(responder),
+      keyPair: hostIdentity,
+    );
+    responder['signatureHex'] = _hex(responderSignature.bytes);
+    await _writeRecord(socket, utf8.encode(jsonEncode(responder)));
+
+    final transcript = _transcript(initiator, responder);
+    final dh = await X25519().sharedSecretKey(
+      keyPair: hostEphemeral,
+      remotePublicKey: SimplePublicKey(
+        _unhex(initiator['ephemeralPublicKeyHex']! as String),
+        type: KeyPairType.x25519,
+      ),
+    );
+    final dhBytes = Uint8List.fromList(await dh.extractBytes());
+    dh.destroy();
+    hostEphemeral.destroy();
+    final transcriptHash = hashes.sha256.convert(transcript).bytes;
+    final shared = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
+      secretKey: SecretKeyData(dhBytes, overwriteWhenDestroyed: true),
+      nonce: transcriptHash,
+      info: utf8.encode('muxport-shared-secret-v1'),
+    );
+    dhBytes.fillRange(0, dhBytes.length, 0);
+    final directional = await Hkdf(hmac: Hmac.sha256(), outputLength: 72)
+        .deriveKey(
+          secretKey: shared,
+          nonce: transcriptHash,
+          info: utf8.encode('muxport-directional-session-v1'),
+        );
+    shared.destroy();
+    final material = Uint8List.fromList(await directional.extractBytes());
+    directional.destroy();
+    final hostKeys = DirectSessionKeys(
+      sendKey: material.sublist(32, 64),
+      receiveKey: material.sublist(0, 32),
+      sendNoncePrefix: material.sublist(68, 72),
+      receiveNoncePrefix: material.sublist(64, 68),
+      aad: _sessionAad('host-1', expectedDeviceId, transcript),
+    );
+    material.fillRange(0, material.length, 0);
+    final cipher = DirectSessionCipher(hostKeys);
+    hostKeys.destroy();
+
+    final requestFrame = DirectEncryptedFrame.decode(await reader.readRecord());
+    final request = wire.MuxportEnvelope.fromBuffer(
+      await cipher.decrypt(requestFrame),
+    );
+    expect(request.header.senderId, expectedDeviceId);
+    expect(request.header.recipientId, 'host-1');
+    expect(request.header.sequence.toInt(), requestFrame.sequence);
+    expect(request.command.commandId, 'probe-1');
+    expect(request.command.hasProbeHost(), isTrue);
+    expect(request.header.idempotencyKey, 'probe-idempotency-1');
+
+    final responseSequence = cipher.nextSendSequence;
+    final response = wire.MuxportEnvelope(
+      header: wire.EnvelopeHeader(
+        protocolVersion: directTransportProtocolVersion,
+        senderId: 'host-1',
+        recipientId: expectedDeviceId,
+        bootEpoch: Int64(22),
+        sequence: Int64(responseSequence),
+        timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+      ),
+      commandResult: wire.CommandResult(
+        commandId: request.command.commandId,
+        state: wire.RemoteOpState.REMOTE_OP_STATE_SUCCEEDED,
+        success: true,
+        completedAtMs: Int64(DateTime.now().millisecondsSinceEpoch),
+        resultJson: '{"status":"ok"}',
+      ),
+    );
+    final encryptedResponse = await cipher.encrypt(response.writeToBuffer());
+    expect(encryptedResponse.sequence, responseSequence);
+    await _writeRecord(socket, encryptedResponse.encode());
+    cipher.destroy();
+  } finally {
+    await reader.cancel();
+    await socket.close();
+  }
+}
+
+Future<Map<String, Object?>> _signedChallenge({
+  required SimpleKeyPair hostIdentity,
+  required String hostPublicHex,
+}) async {
+  final issuedAt = DateTime.now().millisecondsSinceEpoch;
+  final challenge = <String, Object?>{
+    'protocolVersion': directTransportProtocolVersion,
+    'hostId': 'host-1',
+    'hostIdentityPublicKeyHex': hostPublicHex,
+    'bootEpoch': 22,
+    'challenge': _hex(List<int>.filled(32, 7)),
+    'issuedAtMs': issuedAt,
+    'expiresAtMs': issuedAt + directTransportChallengeLifetimeMs,
+    'signatureHex': '',
+  };
+  final signedBytes = BytesBuilder(copy: false)
+    ..add(utf8.encode('muxport-server-challenge-v1'))
+    ..add(_field(_u32(challenge['protocolVersion']! as int)))
+    ..add(_field(utf8.encode(challenge['hostId']! as String)))
+    ..add(_field(utf8.encode(challenge['hostIdentityPublicKeyHex']! as String)))
+    ..add(_field(_u64(challenge['bootEpoch']! as int)))
+    ..add(_field(utf8.encode(challenge['challenge']! as String)))
+    ..add(_field(_i64(challenge['issuedAtMs']! as int)))
+    ..add(_field(_i64(challenge['expiresAtMs']! as int)));
+  final signature = await Ed25519().sign(
+    signedBytes.takeBytes(),
+    keyPair: hostIdentity,
+  );
+  challenge['signatureHex'] = _hex(signature.bytes);
+  return challenge;
+}
+
+Uint8List _initiatorClaim(Map<String, Object?> hello) {
+  return (BytesBuilder(copy: false)
+        ..add(_field(utf8.encode('muxport-initiator-hello-v1')))
+        ..add(_u32(hello['protocolVersion']! as int))
+        ..add(_field(utf8.encode(hello['deviceId']! as String)))
+        ..add(_field(utf8.encode(hello['hostId']! as String)))
+        ..add(_field(utf8.encode(hello['challenge']! as String)))
+        ..add(_field(_unhex(hello['deviceIdentityPublicKeyHex']! as String)))
+        ..add(_field(_unhex(hello['ephemeralPublicKeyHex']! as String)))
+        ..add(_field(_unhex(hello['nonceHex']! as String))))
+      .takeBytes();
+}
+
+Uint8List _responderClaim(Map<String, Object?> hello) {
+  return (BytesBuilder(copy: false)
+        ..add(_field(utf8.encode('muxport-responder-hello-v1')))
+        ..add(_u32(hello['protocolVersion']! as int))
+        ..add(_field(utf8.encode(hello['hostId']! as String)))
+        ..add(_field(utf8.encode(hello['deviceId']! as String)))
+        ..add(_field(_unhex(hello['hostIdentityPublicKeyHex']! as String)))
+        ..add(_field(_unhex(hello['ephemeralPublicKeyHex']! as String)))
+        ..add(_field(_unhex(hello['nonceHex']! as String)))
+        ..add(_field(_unhex(hello['initiatorHashHex']! as String))))
+      .takeBytes();
+}
+
+Uint8List _initiatorHash(Map<String, Object?> initiator) {
+  return Uint8List.fromList(
+    hashes.sha256.convert([
+      ..._initiatorClaim(initiator),
+      ..._unhex(initiator['signatureHex']! as String),
+    ]).bytes,
+  );
+}
+
+Uint8List _transcript(
+  Map<String, Object?> initiator,
+  Map<String, Object?> responder,
+) {
+  return (BytesBuilder(copy: false)
+        ..add(_field(utf8.encode('muxport-authenticated-transcript-v1')))
+        ..add(_field(_initiatorClaim(initiator)))
+        ..add(_field(_unhex(initiator['signatureHex']! as String)))
+        ..add(_field(_responderClaim(responder)))
+        ..add(_field(_unhex(responder['signatureHex']! as String))))
+      .takeBytes();
+}
+
+Uint8List _sessionAad(String hostId, String deviceId, List<int> transcript) {
+  final host = utf8.encode(hostId);
+  final device = utf8.encode(deviceId);
+  final transcriptHash = hashes.sha256.convert(transcript).bytes;
+  return (BytesBuilder(copy: false)
+        ..add(utf8.encode('muxport-secure-envelope-v1'))
+        ..add(_u64(host.length))
+        ..add(host)
+        ..add(_u64(device.length))
+        ..add(device)
+        ..add(_u64(transcriptHash.length))
+        ..add(transcriptHash))
+      .takeBytes();
+}
+
+Future<void> _writeRecord(Socket socket, List<int> bytes) async {
+  socket
+    ..add(_u32(bytes.length))
+    ..add(bytes);
+  await socket.flush();
+}
+
+class _TestRecordReader {
+  _TestRecordReader(Socket socket)
+    : _iterator = StreamIterator<Uint8List>(socket);
+
+  final StreamIterator<Uint8List> _iterator;
+  final List<int> _buffer = [];
+
+  Future<Uint8List> readRecord() async {
+    final header = await _readExact(4);
+    final length = ByteData.sublistView(header).getUint32(0, Endian.big);
+    if (length <= 0 || length > directTransportMaximumPlaintextBytes + 64) {
+      throw StateError('bad test record length');
+    }
+    return _readExact(length);
+  }
+
+  Future<Uint8List> _readExact(int length) async {
+    while (_buffer.length < length) {
+      if (!await _iterator.moveNext()) {
+        throw StateError('test peer closed early');
+      }
+      _buffer.addAll(_iterator.current);
+    }
+    final output = Uint8List.fromList(_buffer.take(length).toList());
+    _buffer.removeRange(0, length);
+    return output;
+  }
+
+  Future<void> cancel() => _iterator.cancel();
+}
+
+class _MemorySecureStore implements MobileSecureValueStore {
+  String? value;
+
+  @override
+  Future<String?> read(String key) async => value;
+
+  @override
+  Future<void> write(String key, String value) async {
+    this.value = value;
+  }
+}
+
+Uint8List _field(List<int> bytes) {
+  return Uint8List.fromList([..._u32(bytes.length), ...bytes]);
+}
+
+Uint8List _u32(int value) {
+  return (ByteData(4)..setUint32(0, value, Endian.big)).buffer.asUint8List();
+}
+
+Uint8List _u64(int value) {
+  return (ByteData(8)..setUint64(0, value, Endian.big)).buffer.asUint8List();
+}
+
+Uint8List _i64(int value) {
+  return (ByteData(8)..setInt64(0, value, Endian.big)).buffer.asUint8List();
+}
+
+String _hex(List<int> bytes) {
+  return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+}
+
+Uint8List _unhex(String value) {
+  final bytes = Uint8List(value.length ~/ 2);
+  for (var index = 0; index < bytes.length; index += 1) {
+    bytes[index] = int.parse(
+      value.substring(index * 2, index * 2 + 2),
+      radix: 16,
+    );
+  }
+  return bytes;
+}

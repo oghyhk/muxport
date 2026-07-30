@@ -5,10 +5,10 @@ and Codex runtimes on user-controlled desktops and servers.
 
 > **Project status:** early security-focused scaffold. The protocol, Rust
 > workspace, and Flutter shell compile and have baseline tests. An opt-in
-> authenticated direct command endpoint exists, but its phone client,
-> end-to-end pairing UI, durable credential rotation, and real-time Codex and
-> OpenCode synchronization are not complete. Do not expose this build publicly
-> or use it to manage production credentials.
+> authenticated direct command endpoint and Flutter wire client exist, but
+> their app integration, end-to-end pairing UI, durable credential rotation,
+> and real-time Codex and OpenCode synchronization are not complete. Do not
+> expose this build publicly or use it to manage production credentials.
 
 Muxport is an independent project. It is not built, sponsored, or endorsed by
 the OpenCode team or OpenAI.
@@ -70,7 +70,8 @@ MUXPORT_DIRECT_BIND=127.0.0.1:45821 cargo run -p connector
 
 Non-loopback binding additionally requires
 `MUXPORT_ALLOW_REMOTE_DIRECT=1`. Use only on an access-controlled private
-network; snapshot/event sync and the Flutter wire client are not connected yet.
+network; the Flutter wire client is not launched by the app yet, and
+snapshot/event sync is not connected.
 
 ## Security
 

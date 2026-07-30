@@ -90,6 +90,8 @@ durably idempotent command. Length, timeout, and concurrent-session bounds are
 enforced before command decoding.
 
 The listener is disabled by default and separately gates non-loopback binds.
-It does not yet implement pairing, mobile wire code, snapshot replay, live
-events, acknowledgements, online revocation propagation, or a relay path. See
+It does not yet implement pairing, app-level connection management, snapshot
+replay, live events, acknowledgements, online revocation propagation, or a
+relay path. The Flutter command client is described in
+`mobile-direct-client.md`; the connector listener is described in
 `direct-command-transport.md`.

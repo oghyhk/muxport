@@ -36,7 +36,8 @@ back through the same authenticated encrypted session.
 
 ## Current limitations
 
-- The Flutter client does not yet implement this wire protocol.
+- The Flutter client implements this command protocol but is not yet launched
+  by the app; native phone-to-Rust interoperability is still unverified.
 - Pairing offers and SAS confirmation are not exposed through a physical UI.
 - A registry snapshot is loaded when the connector starts; online revocation
   propagation is not yet implemented.
