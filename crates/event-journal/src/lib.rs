@@ -1,6 +1,6 @@
 use muxport_protocol::{Event, HostSnapshot};
 use prost::Message;
-use rusqlite::{params, Connection, ErrorCode};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
@@ -25,8 +25,12 @@ pub enum JournalError {
     AckBeyondCurrent { acknowledged: u64, current: u64 },
     #[error("Cursor acknowledgement regressed from {previous} to {attempted}")]
     AckRegression { previous: u64, attempted: u64 },
+    #[error("Replay cursor {requested} is beyond current sequence {current}")]
+    CursorBeyondCurrent { requested: u64, current: u64 },
     #[error("Snapshot sequence {snapshot} is beyond current sequence {current}")]
     InvalidSnapshotBoundary { snapshot: u64, current: u64 },
+    #[error("Event journal integrity check failed: {0}")]
+    IntegrityCheckFailed(String),
 }
 
 pub struct EventJournal {
@@ -48,6 +52,20 @@ impl EventJournal {
     }
 
     pub fn open_file(path: impl AsRef<Path>, boot_epoch: u64) -> Result<Self, JournalError> {
+        let path = path.as_ref();
+        if path.exists() {
+            let preflight = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let integrity: String =
+                preflight.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(JournalError::IntegrityCheckFailed(integrity));
+            }
+        }
+
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -100,9 +118,25 @@ impl EventJournal {
     }
 
     fn load_max_sequence(&mut self) -> Result<(), JournalError> {
-        let mut stmt = self.conn.prepare("SELECT COALESCE(MAX(sequence), 0) FROM events")?;
-        let max_seq: u64 = stmt.query_row([], |r| r.get(0))?;
-        self.current_sequence = max_seq;
+        // AUTOINCREMENT retains its high-water mark in sqlite_sequence even
+        // after compaction deletes every event. Loading only MAX(events) would
+        // reset the in-memory cursor to zero and make the next snapshot appear
+        // to be in the future.
+        let max_event: u64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM events",
+            [],
+            |row| row.get(0),
+        )?;
+        let high_water: u64 = self
+            .conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        self.current_sequence = max_event.max(high_water);
         Ok(())
     }
 
@@ -140,6 +174,12 @@ impl EventJournal {
         after_seq: u64,
         limit: usize,
     ) -> Result<Vec<(u64, Event)>, JournalError> {
+        if after_seq > self.current_sequence {
+            return Err(JournalError::CursorBeyondCurrent {
+                requested: after_seq,
+                current: self.current_sequence,
+            });
+        }
         let mut stmt = self.conn.prepare(
             "SELECT sequence, payload FROM events WHERE sequence > ?1 ORDER BY sequence ASC LIMIT ?2",
         )?;
@@ -162,6 +202,12 @@ impl EventJournal {
             let event = Event::decode(&payload[..])?;
             result.push((seq, event));
             expected = seq.saturating_add(1);
+        }
+        if result.is_empty() && limit > 0 && after_seq < self.current_sequence {
+            return Err(JournalError::GapDetected {
+                expected,
+                found: self.current_sequence.saturating_add(1),
+            });
         }
         Ok(result)
     }
@@ -450,5 +496,97 @@ mod tests {
             journal.record_cursor_ack("", 1),
             Err(JournalError::EmptyClientId)
         ));
+        assert!(matches!(
+            journal.get_events_after(2, 10),
+            Err(JournalError::CursorBeyondCurrent {
+                requested: 2,
+                current: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn full_compaction_retains_high_water_mark_across_restart() {
+        let file_name = format!(
+            "muxport-event-journal-compaction-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(file_name);
+
+        {
+            let mut journal = EventJournal::open_file(&path, 100).unwrap();
+            for sequence in 1..=3 {
+                journal
+                    .append_event(&Event {
+                        event_id: format!("event-{sequence}"),
+                        timestamp_ms: 1000 + sequence,
+                        inner: None,
+                    })
+                    .unwrap();
+            }
+            journal
+                .save_snapshot(&HostSnapshot {
+                    host_id: "host-1".into(),
+                    hostname: "test-host".into(),
+                    connector_state: 0,
+                    runtimes: vec![],
+                    credential_profiles: vec![],
+                    active_sessions: vec![],
+                    snapshot_sequence: 3,
+                })
+                .unwrap();
+            journal.record_cursor_ack("phone-1", 3).unwrap();
+            assert_eq!(journal.compact_acknowledged_events().unwrap(), 3);
+        }
+
+        {
+            let mut reopened = EventJournal::open_file(&path, 101).unwrap();
+            assert_eq!(reopened.current_sequence(), 3);
+            assert!(matches!(
+                reopened.get_events_after(0, 10),
+                Err(JournalError::GapDetected {
+                    expected: 1,
+                    found: 4
+                })
+            ));
+            assert_eq!(
+                reopened
+                    .append_event(&Event {
+                        event_id: "event-after-restart".into(),
+                        timestamp_ms: 2000,
+                        inner: None,
+                    })
+                    .unwrap(),
+                4
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn corrupt_existing_file_is_rejected_before_any_schema_write() {
+        let file_name = format!(
+            "muxport-event-journal-corrupt-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(file_name);
+        let corrupt_bytes = b"not a sqlite database; preserve this evidence";
+        std::fs::write(&path, corrupt_bytes).unwrap();
+
+        assert!(EventJournal::open_file(&path, 100).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt_bytes);
+
+        let _ = std::fs::remove_file(path);
     }
 }

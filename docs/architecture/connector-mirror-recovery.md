@@ -55,6 +55,12 @@ If journal append fails, the projection is not changed. If snapshot persistence
 fails after append, restart recovery replays the durable event after the older
 snapshot.
 
+Compaction never resets the connector sequence. On reopen, the journal restores
+SQLite's AUTOINCREMENT high-water mark even when every event row was deleted.
+A client cursor older than the retained window receives an explicit gap instead
+of an empty replay and must replace its cache from an authoritative snapshot.
+A cursor ahead of the connector is rejected as invalid.
+
 Each monitor takes an authoritative health/session snapshot every 30 seconds to
 repair incomplete or ambiguous source events. Reconciliation replaces only the
 target runtime's sessions; state from other runtimes remains intact.

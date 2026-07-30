@@ -266,6 +266,22 @@ lock and restores its persisted projection.
 After this slice, `cargo test --locked --workspace --all-targets` passes 77
 tests on the clean Linux verification checkout.
 
+## Journal compaction/restart correctness
+
+The event journal now preflights an existing database read-only with
+`quick_check` before any schema write. Corrupt evidence is rejected without
+being overwritten. Reopen restores the SQLite AUTOINCREMENT high-water mark,
+so deleting every acknowledged event cannot reset the connector sequence.
+
+Replay now rejects cursors ahead of the connector and reports a gap when all
+events after a stale cursor were compacted. That forces snapshot replacement
+instead of incorrectly treating an empty replay as synchronized state. A
+two-run daemon smoke verifies the read-only preflight against a real WAL
+database and restores the projection on the second run.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 79
+tests on the clean Linux verification checkout.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
