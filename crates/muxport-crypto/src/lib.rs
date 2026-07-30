@@ -171,6 +171,59 @@ pub fn decrypt_frame(key: &[u8; 32], nonce_bytes: &[u8; 12], ciphertext: &[u8], 
     cipher.decrypt(nonce_bytes.into(), payload).map_err(|_| CryptoError::DecryptionFailed)
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PairedDeviceRecord {
+    pub device_id: String,
+    pub device_name: String,
+    pub public_key_hex: String,
+    pub paired_at_ms: i64,
+    pub last_seen_at_ms: i64,
+    pub is_revoked: bool,
+}
+
+pub struct DeviceRegistry {
+    devices: std::collections::HashMap<String, PairedDeviceRecord>,
+}
+
+impl Default for DeviceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceRegistry {
+    pub fn new() -> Self {
+        Self {
+            devices: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn register_device(&mut self, record: PairedDeviceRecord) {
+        self.devices.insert(record.device_id.clone(), record);
+    }
+
+    pub fn revoke_device(&mut self, device_id: &str) -> bool {
+        if let Some(dev) = self.devices.get_mut(device_id) {
+            dev.is_revoked = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_authorized(&self, device_id: &str, pubkey_hex: &str) -> bool {
+        if let Some(dev) = self.devices.get(device_id) {
+            !dev.is_revoked && dev.public_key_hex == pubkey_hex
+        } else {
+            false
+        }
+    }
+
+    pub fn list_devices(&self) -> Vec<PairedDeviceRecord> {
+        self.devices.values().cloned().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +285,26 @@ mod tests {
             bob.decrypt_next(&second, b"route-a").unwrap(),
             b"second".to_vec()
         );
+    }
+
+    #[test]
+    fn device_registry_pairing_and_revocation() {
+        let mut registry = DeviceRegistry::new();
+        let dev = PairedDeviceRecord {
+            device_id: "phone-abc".into(),
+            device_name: "User iPhone".into(),
+            public_key_hex: "0102030405".into(),
+            paired_at_ms: 1000,
+            last_seen_at_ms: 1000,
+            is_revoked: false,
+        };
+        registry.register_device(dev);
+
+        assert!(registry.is_authorized("phone-abc", "0102030405"));
+        assert!(!registry.is_authorized("phone-abc", "wrongpubkey"));
+        assert!(!registry.is_authorized("unknown-phone", "0102030405"));
+
+        assert!(registry.revoke_device("phone-abc"));
+        assert!(!registry.is_authorized("phone-abc", "0102030405"));
     }
 }

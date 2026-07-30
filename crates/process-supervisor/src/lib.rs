@@ -84,6 +84,27 @@ impl ProcessSupervisor {
         }
         Ok(())
     }
+
+    pub fn compute_backoff_delay(retry_count: u32) -> Duration {
+        let base_secs = 1u64.checked_shl(retry_count.min(6)).unwrap_or(64);
+        let capped = base_secs.min(60);
+        Duration::from_secs(capped)
+    }
+
+    pub async fn check_exit(&mut self) -> Option<std::process::ExitStatus> {
+        if let Some(ref mut child) = self.current_child {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.record_crash();
+                    self.current_child = None;
+                    Some(status)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -99,5 +120,13 @@ mod tests {
             supervisor.record_crash();
         }
         assert!(supervisor.is_crash_looping());
+    }
+
+    #[test]
+    fn test_exponential_backoff_capping() {
+        assert_eq!(ProcessSupervisor::compute_backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(ProcessSupervisor::compute_backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(ProcessSupervisor::compute_backoff_delay(2), Duration::from_secs(4));
+        assert_eq!(ProcessSupervisor::compute_backoff_delay(10), Duration::from_secs(60));
     }
 }

@@ -103,6 +103,7 @@ impl DesiredObservedReconciler {
 
 pub struct CommandLedger {
     executed_commands: HashMap<String, (RemoteOpState, String)>,
+    conn: Option<rusqlite::Connection>,
 }
 
 impl Default for CommandLedger {
@@ -115,7 +116,50 @@ impl CommandLedger {
     pub fn new() -> Self {
         Self {
             executed_commands: HashMap::new(),
+            conn: None,
         }
+    }
+
+    pub fn open_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, rusqlite::Error> {
+        let conn = rusqlite::Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS command_ledger (
+                idempotency_key TEXT PRIMARY KEY,
+                state_code INTEGER NOT NULL,
+                result_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        let mut ledger = Self {
+            executed_commands: HashMap::new(),
+            conn: Some(conn),
+        };
+        ledger.load_from_db()?;
+        Ok(ledger)
+    }
+
+    fn load_from_db(&mut self) -> Result<(), rusqlite::Error> {
+        if let Some(ref conn) = self.conn {
+            let mut stmt = conn.prepare(
+                "SELECT idempotency_key, state_code, result_json FROM command_ledger",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let key: String = row.get(0)?;
+                let state_code: i32 = row.get(1)?;
+                let result_json: String = row.get(2)?;
+                let state = RemoteOpState::try_from(state_code).unwrap_or(RemoteOpState::Created);
+                Ok((key, (state, result_json)))
+            })?;
+            for r in rows {
+                let (key, val) = r?;
+                self.executed_commands.insert(key, val);
+            }
+        }
+        Ok(())
     }
 
     /// Returns the prior result for a duplicate command, or reserves a new key
@@ -137,6 +181,12 @@ impl CommandLedger {
                 idempotency_key.to_owned(),
                 (RemoteOpState::Created, String::new()),
             );
+            if let Some(ref conn) = self.conn {
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO command_ledger (idempotency_key, state_code, result_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![idempotency_key, RemoteOpState::Created as i32, "", now],
+                );
+            }
             Ok(None)
         }
     }
@@ -147,6 +197,13 @@ impl CommandLedger {
         state: RemoteOpState,
         result_json: String,
     ) {
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(ref conn) = self.conn {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO command_ledger (idempotency_key, state_code, result_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![&idempotency_key, state as i32, &result_json, now],
+            );
+        }
         self.executed_commands
             .insert(idempotency_key, (state, result_json));
     }
@@ -218,5 +275,33 @@ mod tests {
             ledger.check_or_record("expired-command", 0).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn sqlite_command_ledger_persists_and_recovers_state() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("cmd_ledger_{}.db", std::process::id()));
+
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            assert_eq!(ledger.check_or_record("cmd-persisted", 0).unwrap(), None);
+            ledger.record_result(
+                "cmd-persisted".into(),
+                RemoteOpState::Succeeded,
+                r#"{"persisted":true}"#.into(),
+            );
+        }
+
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            assert_eq!(
+                ledger.check_or_record("cmd-persisted", 0).unwrap(),
+                Some((RemoteOpState::Succeeded, r#"{"persisted":true}"#.into()))
+            );
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 }

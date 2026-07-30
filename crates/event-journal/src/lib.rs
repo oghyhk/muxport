@@ -77,6 +77,14 @@ impl EventJournal {
             [],
         )?;
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS cursor_acks (
+                client_id TEXT PRIMARY KEY,
+                sequence INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)",
             [],
         )?;
@@ -176,6 +184,39 @@ impl EventJournal {
 
     pub fn current_sequence(&self) -> u64 {
         self.current_sequence
+    }
+
+    pub fn record_cursor_ack(&self, client_id: &str, sequence: u64) -> Result<(), JournalError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cursor_acks (client_id, sequence, updated_at_ms) VALUES (?1, ?2, ?3)",
+            params![client_id, sequence, now_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cursor_ack(&self, client_id: &str) -> Result<Option<u64>, JournalError> {
+        let mut stmt = self.conn.prepare("SELECT sequence FROM cursor_acks WHERE client_id = ?1")?;
+        let mut rows = stmt.query(params![client_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let seq: u64 = row.get(0)?;
+        Ok(Some(seq))
+    }
+
+    pub fn compact_before_sequence(&self, before_seq: u64) -> Result<usize, JournalError> {
+        let deleted = self.conn.execute(
+            "DELETE FROM events WHERE sequence < ?1",
+            params![before_seq],
+        )?;
+        Ok(deleted)
+    }
+
+    pub fn verify_integrity(&self) -> Result<bool, JournalError> {
+        let mut stmt = self.conn.prepare("PRAGMA integrity_check")?;
+        let result: String = stmt.query_row([], |r| r.get(0))?;
+        Ok(result == "ok")
     }
 }
 
@@ -277,5 +318,31 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn cursor_ack_compaction_and_integrity_check_work() {
+        let mut journal = EventJournal::open_in_memory(1).unwrap();
+        assert!(journal.verify_integrity().unwrap());
+
+        for i in 1..=5 {
+            journal
+                .append_event(&Event {
+                    event_id: format!("evt-{i}"),
+                    timestamp_ms: 1000 + i,
+                    inner: None,
+                })
+                .unwrap();
+        }
+
+        journal.record_cursor_ack("phone-1", 3).unwrap();
+        assert_eq!(journal.get_cursor_ack("phone-1").unwrap(), Some(3));
+
+        let deleted = journal.compact_before_sequence(3).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = journal.get_events_after(2, 10).unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining[0].0, 3);
     }
 }
