@@ -17,6 +17,9 @@ rand = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+hkdf = { workspace = true }
+subtle = { workspace = true }
 atomic-write-file = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

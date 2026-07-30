@@ -40,6 +40,13 @@ atomically replace the sealed file, and restore the prior in-memory record if
 persistence fails. Activation is forbidden until the staged secret has an
 explicit positive provider-validation timestamp.
 
+Before enrollment or staging, the vault derives a dedicated fingerprint key
+from the DEK with HKDF-SHA-256 and compares HMAC-SHA-256 values in constant
+time. Active, staged, and rollback slots in the same provider/credential-type
+scope are checked. The keyed fingerprints are computed only in memory and are
+not persisted or displayed; identical bytes used for a different provider
+scope are not treated as the same credential.
+
 ## Migration and restart
 
 A valid v1 envelope is decrypted with its original KEK, and every active,
@@ -59,6 +66,6 @@ recovery, and ciphertext context swapping.
   providers for headless hosts.
 - Connect enrollment and stage/validate/activate/rollback to managed OpenCode
   and Codex profile directories.
-- Add non-reversible keyed duplicate fingerprints, explicit local-disable
-  metadata, upstream-revocation status, and audited deletion.
+- Add explicit local-disable metadata, upstream-revocation status, and audited
+  deletion.
 - Add native Windows/macOS/Linux crash and backup/restore tests.

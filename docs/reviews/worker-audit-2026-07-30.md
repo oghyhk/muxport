@@ -331,6 +331,17 @@ After this slice, `cargo test --locked --workspace --all-targets` passes 86
 tests on the clean Linux verification checkout. Native OS wrapping for the
 provider-vault KEK and managed-runtime credential activation remain pending.
 
+## Keyed duplicate credential detection
+
+Enrollment and staging now derive a vault-local fingerprint key from the random
+DEK with HKDF-SHA-256. Domain-separated HMAC-SHA-256 values are compared in
+constant time across active, staged, and rollback slots in the same
+provider/credential-type scope. No secret fingerprint is persisted or exposed
+in summaries.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 87
+tests on the clean Linux verification checkout.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

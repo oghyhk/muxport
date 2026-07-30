@@ -1,13 +1,17 @@
 use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use muxport_protocol::CredentialStatus;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -17,6 +21,10 @@ const LEGACY_VAULT_ENVELOPE_AAD: &[u8] = b"muxport-vault-envelope-v1";
 const WRAPPED_DEK_AAD_DOMAIN: &[u8] = b"muxport-vault-wrapped-dek-v2";
 const PAYLOAD_AAD_DOMAIN: &[u8] = b"muxport-vault-payload-v2";
 const RECORD_AAD_DOMAIN: &[u8] = b"muxport-vault-record-v2";
+const DUPLICATE_FINGERPRINT_DOMAIN: &[u8] =
+    b"muxport-vault-duplicate-fingerprint-v1";
+const DUPLICATE_FINGERPRINT_KEY_INFO: &[u8] =
+    b"muxport-vault-duplicate-fingerprint-key-v1";
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 
 #[derive(Error, Debug)]
@@ -37,6 +45,8 @@ pub enum VaultError {
     UnsupportedVersion(u32),
     #[error("Vault is bound to a different host")]
     HostContextMismatch,
+    #[error("The same credential secret is already stored in this provider scope")]
+    DuplicateCredential,
     #[error("Invalid credential operation: {0}")]
     InvalidOperation(String),
 }
@@ -154,6 +164,11 @@ struct LegacyCredentialRecord {
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct DataEncryptionKey {
     key: [u8; 32],
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct SecretFingerprint {
+    value: [u8; 32],
 }
 
 impl DataEncryptionKey {
@@ -398,6 +413,11 @@ impl PersistentVault {
                 enrollment.profile_id
             )));
         }
+        self.ensure_unique_secret(
+            &enrollment.provider,
+            &enrollment.credential_type,
+            plaintext,
+        )?;
         let aad = record_aad(
             &self.host_id,
             &enrollment.profile_id,
@@ -448,6 +468,61 @@ impl PersistentVault {
         records
     }
 
+    fn ensure_unique_secret(
+        &self,
+        provider: &str,
+        credential_type: &str,
+        candidate_secret: &[u8],
+    ) -> Result<(), VaultError> {
+        let candidate = secret_fingerprint(
+            &self.dek,
+            &self.host_id,
+            provider,
+            credential_type,
+            candidate_secret,
+        )?;
+        for record in self.records.values().filter(|record| {
+            record.provider == provider && record.credential_type == credential_type
+        }) {
+            let aad = record_aad(
+                &self.host_id,
+                &record.profile_id,
+                &record.provider,
+                &record.credential_type,
+            );
+            let mut slots = vec![(
+                record.encrypted_payload_hex.as_str(),
+                record.nonce_hex.as_str(),
+            )];
+            if let (Some(ciphertext), Some(nonce)) = (
+                record.staged_payload_hex.as_deref(),
+                record.staged_nonce_hex.as_deref(),
+            ) {
+                slots.push((ciphertext, nonce));
+            }
+            if let (Some(ciphertext), Some(nonce)) = (
+                record.previous_payload_hex.as_deref(),
+                record.previous_nonce_hex.as_deref(),
+            ) {
+                slots.push((ciphertext, nonce));
+            }
+            for (ciphertext, nonce) in slots {
+                let existing = decrypt(&self.dek.key, ciphertext, nonce, &aad)?;
+                let fingerprint = secret_fingerprint(
+                    &self.dek,
+                    &self.host_id,
+                    provider,
+                    credential_type,
+                    existing.expose_secret(),
+                )?;
+                if fingerprint.value.ct_eq(&candidate.value).unwrap_u8() == 1 {
+                    return Err(VaultError::DuplicateCredential);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn stage_credential(
         &mut self,
         profile_id: &str,
@@ -469,6 +544,11 @@ impl PersistentVault {
                 "credential is not eligible for staging".into(),
             ));
         }
+        self.ensure_unique_secret(
+            &previous.provider,
+            &previous.credential_type,
+            plaintext,
+        )?;
         let aad = record_aad(
             &self.host_id,
             &previous.profile_id,
@@ -853,6 +933,44 @@ fn context_aad(domain: &[u8], fields: &[&str]) -> Vec<u8> {
         aad.extend_from_slice(field.as_bytes());
     }
     aad
+}
+
+fn secret_fingerprint(
+    dek: &DataEncryptionKey,
+    host_id: &str,
+    provider: &str,
+    credential_type: &str,
+    secret: &[u8],
+) -> Result<SecretFingerprint, VaultError> {
+    let hkdf =
+        Hkdf::<Sha256>::from_prk(&dek.key).map_err(|_| VaultError::EncryptionFailed)?;
+    let mut fingerprint_key = [0_u8; 32];
+    if hkdf
+        .expand(DUPLICATE_FINGERPRINT_KEY_INFO, &mut fingerprint_key)
+        .is_err()
+    {
+        fingerprint_key.zeroize();
+        return Err(VaultError::EncryptionFailed);
+    }
+    let mac_result =
+        <Hmac<Sha256> as Mac>::new_from_slice(&fingerprint_key);
+    fingerprint_key.zeroize();
+    let mut mac = mac_result.map_err(|_| VaultError::EncryptionFailed)?;
+    mac.update(DUPLICATE_FINGERPRINT_DOMAIN);
+    update_mac_field(&mut mac, host_id.as_bytes());
+    update_mac_field(&mut mac, provider.as_bytes());
+    update_mac_field(&mut mac, credential_type.as_bytes());
+    update_mac_field(&mut mac, secret);
+    let mut output = mac.finalize().into_bytes();
+    let mut value = [0_u8; 32];
+    value.copy_from_slice(&output);
+    output.as_mut_slice().zeroize();
+    Ok(SecretFingerprint { value })
+}
+
+fn update_mac_field(mac: &mut Hmac<Sha256>, field: &[u8]) {
+    mac.update(&(field.len() as u64).to_be_bytes());
+    mac.update(field);
 }
 
 fn migrate_legacy_slot(
@@ -1265,6 +1383,63 @@ mod tests {
         assert!(matches!(
             vault.stage_credential("profile-1", &vec![0_u8; MAX_SECRET_BYTES + 1]),
             Err(VaultError::InvalidOperation(_))
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn keyed_duplicate_detection_covers_active_staged_and_rollback_slots() {
+        let path = unique_path("vault-duplicates");
+        let mut vault =
+            PersistentVault::open_or_create(&path, "host-1", kek(b"passphrase")).unwrap();
+        vault
+            .enroll_credential(
+                enrollment("profile-1", "provider-a"),
+                b"shared-secret",
+            )
+            .unwrap();
+        assert!(matches!(
+            vault.enroll_credential(
+                enrollment("profile-2", "provider-a"),
+                b"shared-secret"
+            ),
+            Err(VaultError::DuplicateCredential)
+        ));
+        assert!(matches!(
+            vault.stage_credential("profile-1", b"shared-secret"),
+            Err(VaultError::DuplicateCredential)
+        ));
+
+        vault
+            .enroll_credential(
+                enrollment("profile-other-provider", "provider-b"),
+                b"shared-secret",
+            )
+            .unwrap();
+        vault
+            .enroll_credential(
+                enrollment("profile-2", "provider-a"),
+                b"second-secret",
+            )
+            .unwrap();
+        vault
+            .stage_credential("profile-2", b"staged-secret")
+            .unwrap();
+        assert!(matches!(
+            vault.enroll_credential(
+                enrollment("profile-3", "provider-a"),
+                b"staged-secret"
+            ),
+            Err(VaultError::DuplicateCredential)
+        ));
+        vault.mark_staged_validated("profile-2", 3000).unwrap();
+        vault.activate_credential("profile-2").unwrap();
+        assert!(matches!(
+            vault.enroll_credential(
+                enrollment("profile-4", "provider-a"),
+                b"second-secret"
+            ),
+            Err(VaultError::DuplicateCredential)
         ));
         let _ = std::fs::remove_file(path);
     }
