@@ -461,8 +461,13 @@ background lifecycle integration, or native phone-to-Rust interoperability
 test. Cached screens therefore remain stale and mutation controls remain
 disabled.
 
-After this slice, the complete mobile suite passes 34 tests and
-`flutter analyze` reports no issues on Windows.
+The committed direct-session golden vector is independently accepted by Dart
+and Rust. It fixes the directional HKDF output, session AAD, generated protobuf
+bytes, ChaCha20-Poly1305 ciphertext, ordered nonce, and `MUX1` frame bytes.
+After this slice, the complete mobile suite passes 35 tests and
+`flutter analyze` reports no issues on Windows. The locked Rust workspace
+passes 96 tests on the Linux verification checkout. Rustfmt and clippy remain
+unavailable there and are not claimed.
 
 ## Major work still required
 

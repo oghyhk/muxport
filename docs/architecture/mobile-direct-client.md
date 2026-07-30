@@ -36,6 +36,13 @@ challenge verification, Ed25519/X25519 handshake, HKDF derivation, protobuf
 probe, ChaCha20-Poly1305 result, host-key mismatch rejection, and replay
 rejection are exercised.
 
+`protocol/fixtures/direct_session_v1.json` is a committed golden vector for the
+directional key schedule, session AAD, protobuf probe envelope, ordered nonce,
+ChaCha20-Poly1305 ciphertext, and `MUX1` framing. Both the Dart and Rust suites
+recompute and compare every field. Regenerate candidate JSON with
+`dart run tool/generate_direct_fixture.dart` from `apps/mobile`, then review the
+fixture diff rather than overwriting it automatically.
+
 The connection is not yet launched from the app because pairing and host
 endpoint management UI do not exist. Native phone-to-Rust interoperability,
 reconnect/retry orchestration, snapshot/replay/event traffic, online

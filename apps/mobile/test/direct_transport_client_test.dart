@@ -135,6 +135,58 @@ void main() {
     initiator.destroy();
     responder.destroy();
   });
+
+  test('Dart protocol matches the committed cross-language fixture', () async {
+    final fixture = Map<String, Object?>.from(
+      jsonDecode(
+            File(
+              '../../protocol/fixtures/direct_session_v1.json',
+            ).readAsStringSync(),
+          )
+          as Map,
+    );
+    final sharedSecret = SecretKeyData(
+      _unhex(fixture['sharedSecretHex']! as String),
+      overwriteWhenDestroyed: true,
+    );
+    final keys = await deriveInitiatorDirectSessionKeys(
+      sharedSecret: sharedSecret,
+      transcript: _unhex(fixture['transcriptHex']! as String),
+      hostId: fixture['hostId']! as String,
+      deviceId: fixture['deviceId']! as String,
+    );
+    sharedSecret.destroy();
+
+    expect(_hex(keys.sendKey), fixture['initiatorToResponderKeyHex']);
+    expect(_hex(keys.receiveKey), fixture['responderToInitiatorKeyHex']);
+    expect(_hex(keys.sendNoncePrefix), fixture['initiatorNoncePrefixHex']);
+    expect(_hex(keys.receiveNoncePrefix), fixture['responderNoncePrefixHex']);
+    expect(_hex(keys.aad), fixture['sessionAadHex']);
+
+    final envelope = wire.MuxportEnvelope(
+      header: wire.EnvelopeHeader(
+        protocolVersion: directTransportProtocolVersion,
+        senderId: fixture['deviceId']! as String,
+        recipientId: fixture['hostId']! as String,
+        bootEpoch: Int64.parseInt('72623859790382856'),
+        sequence: Int64.ONE,
+        timestampMs: Int64(1700000000000),
+        idempotencyKey: 'fixture-idempotency-1',
+      ),
+      command: wire.Command(
+        commandId: 'fixture-probe-1',
+        deadlineMs: Int64(1700000060000),
+        probeHost: wire.ProbeHostCmd(),
+      ),
+    );
+    expect(_hex(envelope.writeToBuffer()), fixture['envelopeHex']);
+
+    final cipher = DirectSessionCipher(keys);
+    final frame = await cipher.encrypt(envelope.writeToBuffer());
+    expect(_hex(frame.encode()), fixture['encryptedFrameHex']);
+    cipher.destroy();
+    keys.destroy();
+  });
 }
 
 Future<void> _serveProbe({

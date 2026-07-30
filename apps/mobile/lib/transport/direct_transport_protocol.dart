@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as hashes;
 import 'package:cryptography/cryptography.dart';
 
-import '../security/device_identity.dart';
+import 'transport_identity.dart';
 
 const int directTransportProtocolVersion = 1;
 const int directTransportChallengeLifetimeMs = 15000;
@@ -192,6 +192,43 @@ class DirectSessionKeys {
   }
 }
 
+Future<DirectSessionKeys> deriveInitiatorDirectSessionKeys({
+  required SecretKey sharedSecret,
+  required List<int> transcript,
+  required String hostId,
+  required String deviceId,
+}) async {
+  if (transcript.isEmpty || hostId.trim().isEmpty || deviceId.trim().isEmpty) {
+    throw const DirectTransportProtocolException(
+      'session key derivation context is invalid',
+    );
+  }
+  final transcriptHash = hashes.sha256.convert(transcript).bytes;
+  final directional = await Hkdf(hmac: Hmac.sha256(), outputLength: 72)
+      .deriveKey(
+        secretKey: sharedSecret,
+        nonce: transcriptHash,
+        info: utf8.encode('muxport-directional-session-v1'),
+      );
+  late final Uint8List material;
+  try {
+    material = Uint8List.fromList(await directional.extractBytes());
+  } finally {
+    directional.destroy();
+  }
+  try {
+    return DirectSessionKeys(
+      sendKey: material.sublist(0, 32),
+      receiveKey: material.sublist(32, 64),
+      sendNoncePrefix: material.sublist(64, 68),
+      receiveNoncePrefix: material.sublist(68, 72),
+      aad: _sessionAad(hostId, deviceId, transcript),
+    );
+  } finally {
+    material.fillRange(0, material.length, 0);
+  }
+}
+
 class DirectEncryptedFrame {
   DirectEncryptedFrame({required this.sequence, required List<int> ciphertext})
     : ciphertext = Uint8List.fromList(ciphertext) {
@@ -353,7 +390,7 @@ class DirectHandshakeInitiator {
        _ed25519 = ed25519 ?? Ed25519(),
        _random = random ?? Random.secure();
 
-  final MobileDeviceIdentity identity;
+  final DirectTransportIdentity identity;
   final X25519 _x25519;
   final Ed25519 _ed25519;
   final Random _random;
@@ -562,33 +599,15 @@ class PendingDirectHandshake {
         } finally {
           dhInput.destroy();
         }
-        late final SecretKeyData directional;
         try {
-          directional = await Hkdf(hmac: Hmac.sha256(), outputLength: 72)
-              .deriveKey(
-                secretKey: sharedKey,
-                nonce: transcriptHash,
-                info: utf8.encode('muxport-directional-session-v1'),
-              );
-        } finally {
-          sharedKey.destroy();
-        }
-        late final Uint8List material;
-        try {
-          material = Uint8List.fromList(await directional.extractBytes());
-        } finally {
-          directional.destroy();
-        }
-        try {
-          return DirectSessionKeys(
-            sendKey: material.sublist(0, 32),
-            receiveKey: material.sublist(32, 64),
-            sendNoncePrefix: material.sublist(64, 68),
-            receiveNoncePrefix: material.sublist(68, 72),
-            aad: _sessionAad(challenge.hostId, initiator.deviceId, transcript),
+          return await deriveInitiatorDirectSessionKeys(
+            sharedSecret: sharedKey,
+            transcript: transcript,
+            hostId: challenge.hostId,
+            deviceId: initiator.deviceId,
           );
         } finally {
-          material.fillRange(0, material.length, 0);
+          sharedKey.destroy();
         }
       } finally {
         dhBytes.fillRange(0, dhBytes.length, 0);

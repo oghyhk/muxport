@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart' as hashes;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../transport/transport_identity.dart';
+
 const String _deviceIdentityStorageKey = 'muxport.device.identity.v1';
 
 abstract interface class MobileSecureValueStore {
@@ -57,7 +59,7 @@ class DeviceIdentityUnavailableException implements Exception {
   }
 }
 
-class MobileDeviceIdentity {
+class MobileDeviceIdentity implements DirectTransportIdentity {
   MobileDeviceIdentity._({
     required SimpleKeyPair keyPair,
     required this.deviceId,
@@ -69,10 +71,13 @@ class MobileDeviceIdentity {
 
   final SimpleKeyPair _keyPair;
   final Ed25519 _algorithm;
+  @override
   final String deviceId;
+  @override
   final List<int> publicKeyBytes;
   bool _destroyed = false;
 
+  @override
   Future<Uint8List> sign(List<int> message) async {
     if (_destroyed) {
       throw StateError('device identity has been destroyed');

@@ -567,6 +567,11 @@ fn validate_device_public_key(public_key_hex: &str) -> Result<(), CryptoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use muxport_protocol::{
+        command, muxport_envelope, Command, EnvelopeHeader, MuxportEnvelope,
+        ProbeHostCmd,
+    };
+    use prost::Message;
 
     #[test]
     fn test_ecdh_key_exchange_and_aead() {
@@ -718,6 +723,102 @@ mod tests {
     }
 
     #[test]
+    fn rust_protocol_matches_committed_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol/fixtures/direct_session_v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["schemaVersion"].as_u64(), Some(1));
+        let host_id = fixture["hostId"].as_str().unwrap();
+        let device_id = fixture["deviceId"].as_str().unwrap();
+        let shared_secret: [u8; 32] = fixture_hex(
+            fixture["sharedSecretHex"].as_str().unwrap(),
+        )
+        .try_into()
+        .unwrap();
+        let transcript =
+            fixture_hex(fixture["transcriptHex"].as_str().unwrap());
+        let keys = derive_session_keys(&shared_secret, &transcript).unwrap();
+        assert_eq!(
+            fixture_hex(
+                fixture["initiatorToResponderKeyHex"]
+                    .as_str()
+                    .unwrap()
+            ),
+            keys.initiator_to_responder_key
+        );
+        assert_eq!(
+            fixture_hex(
+                fixture["responderToInitiatorKeyHex"]
+                    .as_str()
+                    .unwrap()
+            ),
+            keys.responder_to_initiator_key
+        );
+        assert_eq!(
+            fixture_hex(
+                fixture["initiatorNoncePrefixHex"].as_str().unwrap()
+            ),
+            keys.initiator_nonce_prefix
+        );
+        assert_eq!(
+            fixture_hex(
+                fixture["responderNoncePrefixHex"].as_str().unwrap()
+            ),
+            keys.responder_nonce_prefix
+        );
+
+        let mut aad = b"muxport-secure-envelope-v1".to_vec();
+        append_fixture_aad(&mut aad, host_id.as_bytes());
+        append_fixture_aad(&mut aad, device_id.as_bytes());
+        append_fixture_aad(&mut aad, &Sha256::digest(&transcript));
+        assert_eq!(
+            fixture_hex(fixture["sessionAadHex"].as_str().unwrap()),
+            aad
+        );
+
+        let envelope = MuxportEnvelope {
+            header: Some(EnvelopeHeader {
+                protocol_version: 1,
+                sender_id: device_id.to_owned(),
+                recipient_id: host_id.to_owned(),
+                boot_epoch: 72_623_859_790_382_856,
+                sequence: 1,
+                timestamp_ms: 1_700_000_000_000,
+                idempotency_key: "fixture-idempotency-1".into(),
+            }),
+            payload: Some(muxport_envelope::Payload::Command(Command {
+                command_id: "fixture-probe-1".into(),
+                deadline_ms: 1_700_000_060_000,
+                inner: Some(command::Inner::ProbeHost(ProbeHostCmd {})),
+            })),
+        };
+        let plaintext = envelope.encode_to_vec();
+        assert_eq!(
+            fixture_hex(fixture["envelopeHex"].as_str().unwrap()),
+            plaintext
+        );
+
+        let mut initiator = SessionCipher::from_directional_keys(
+            &keys,
+            SessionRole::Initiator,
+        );
+        let mut responder = SessionCipher::from_directional_keys(
+            &keys,
+            SessionRole::Responder,
+        );
+        let frame = initiator.encrypt_next(&plaintext, &aad).unwrap();
+        assert_eq!(
+            fixture_hex(fixture["encryptedFrameHex"].as_str().unwrap()),
+            frame.encode_wire().unwrap()
+        );
+        assert_eq!(
+            responder.decrypt_next(&frame, &aad).unwrap(),
+            plaintext
+        );
+    }
+
+    #[test]
     fn device_registry_rejects_malformed_keys() {
         let mut registry = DeviceRegistry::new();
         assert!(matches!(
@@ -787,5 +888,22 @@ mod tests {
             ),
             Err(CryptoError::InvalidRegistrySignature)
         ));
+    }
+
+    fn fixture_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0);
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    fn append_fixture_aad(output: &mut Vec<u8>, value: &[u8]) {
+        output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        output.extend_from_slice(value);
     }
 }
