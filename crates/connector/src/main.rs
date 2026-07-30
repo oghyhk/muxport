@@ -7,7 +7,10 @@ use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
     InstanceLock, PairingStore, PairingStoreError, RuntimeMirror,
 };
-use credential_vault::{HostIdentityManager, OsHostIdentityStore};
+use credential_vault::{
+    HostIdentityManager, OsHostIdentityStore, OsVaultKeyStore, PersistentVault,
+    VaultKeyManager,
+};
 use event_journal::EventJournal;
 use futures::StreamExt;
 use muxport_protocol::{
@@ -199,6 +202,44 @@ async fn main() -> Result<(), DynError> {
         }
     };
     let _pairing_store = pairing_store;
+    let vault_file =
+        std::env::var("MUXPORT_VAULT_FILE").unwrap_or_else(|_| "vault.sealed".into());
+    let vault_key =
+        VaultKeyManager::new(OsVaultKeyStore::new()).load_or_create(&host_id);
+    let _credential_vault = match vault_key {
+        Ok(vault_key) => {
+            let key_created = vault_key.was_created();
+            match PersistentVault::open_or_create(
+                &vault_file,
+                &host_id,
+                vault_key.into_key_encryption_key(),
+            ) {
+                Ok(vault) => {
+                    info!(
+                        path = %vault_file,
+                        key_created,
+                        "OS-protected credential vault is available"
+                    );
+                    Some(vault)
+                }
+                Err(error) => {
+                    warn!(
+                        %error,
+                        path = %vault_file,
+                        "credential vault is locked or invalid; credential operations remain disabled"
+                    );
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                %error,
+                "credential vault key is locked; credential operations remain disabled"
+            );
+            None
+        }
+    };
 
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

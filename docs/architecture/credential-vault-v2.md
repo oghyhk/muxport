@@ -5,9 +5,11 @@
 
 ## Envelope
 
-Every new vault generates a random 256-bit data-encryption key (DEK). The caller
-supplies a key-encryption key (KEK), currently derivable with Argon2id for the
-reviewed passphrase/headless path. The v2 file contains only:
+Every new vault generates a random 256-bit data-encryption key (DEK). Desktop
+connector startup loads or creates a separate random KEK in Windows Credential
+Manager, macOS Keychain Services, or Linux Secret Service. The library also
+supports Argon2id derivation for a future reviewed passphrase/headless path. The
+v2 file contains only:
 
 - format version and non-secret logical host ID;
 - the DEK encrypted with ChaCha20-Poly1305 under the KEK;
@@ -58,10 +60,13 @@ V2 reopen tests cover the correct host and KEK, wrong-host rejection, wrong-KEK
 rejection, metadata confidentiality, owner-only Unix permissions, lifecycle
 recovery, and ciphertext context swapping.
 
+If the native store is unavailable, corrupt, or contains a key that cannot open
+the sealed vault, daemon startup continues in a credential-locked state.
+Credential operations remain disabled and no plaintext or generated-file
+fallback is used.
+
 ## Remaining integration
 
-- Wrap or obtain the provider-vault KEK from the native desktop store instead
-  of relying only on the passphrase constructor.
 - Add reviewed systemd credential, TPM, and external secret-manager KEK
   providers for headless hosts.
 - Connect enrollment and stage/validate/activate/rollback to managed OpenCode

@@ -748,6 +748,10 @@ pub struct KeyEncryptionKey {
 }
 
 impl KeyEncryptionKey {
+    pub(crate) fn from_key_bytes(key: [u8; 32]) -> Self {
+        Self { key }
+    }
+
     pub fn derive_from_passphrase(
         passphrase: &[u8],
         salt: &[u8; 16],

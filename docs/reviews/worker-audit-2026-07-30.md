@@ -342,6 +342,23 @@ in summaries.
 After this slice, `cargo test --locked --workspace --all-targets` passes 87
 tests on the clean Linux verification checkout.
 
+## Native desktop provider-vault KEK
+
+A second versioned native-secret-store record now holds the random provider
+vault KEK independently of the Ed25519 host identity. Creation is read-back
+verified with constant-time comparison, temporary key records are zeroized, and
+there is no plaintext fallback. A mock native store proves that the same KEK
+reopens a populated v2 vault across manager restarts.
+
+The daemon initializes the protected vault at startup. If the key store is
+locked/unavailable or the key cannot open the envelope, credential operations
+remain disabled while non-secret runtime mirroring continues. A forced-invalid
+Secret Service two-run smoke confirms no vault file is created and the runtime
+projection still restores.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 89
+tests on the clean Linux verification checkout.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
@@ -352,9 +369,9 @@ tests on the clean Linux verification checkout.
 - Add reviewed headless host-identity unlock/recovery and rotation flows, then
   expose the existing authenticated pairing and revocation primitives through
   a bounded transport endpoint and physical QR/SAS interface.
-- Bind the encrypted persistent credential vault to OS key storage and connect
-  its atomic stage/validate/activate/rollback operations to provider-specific
-  managed runtimes.
+- Connect the OS-protected vault's atomic
+  stage/validate/activate/rollback operations to provider-specific managed
+  runtimes and add reviewed headless KEK backends.
 - Implement direct and optional relay command/event transport and wire decoded
   authenticated envelopes into the existing persistent command router.
 - Complete supervised-process monitoring, graceful shutdown, exponential

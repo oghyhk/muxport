@@ -95,6 +95,7 @@ host snapshot.
 | `MUXPORT_LOCK_FILE` | Connector OS-lock marker path | `<MUXPORT_STATE_DB>.lock` |
 | `MUXPORT_COMMAND_DB` | Durable command idempotency/result SQLite path | `muxport-commands.db` |
 | `MUXPORT_PAIRING_DB` | Pairing challenges and signed device registry SQLite path | `muxport-pairing.db` |
+| `MUXPORT_VAULT_FILE` | Host-bound encrypted provider credential vault | `vault.sealed` |
 | `MUXPORT_HOST_ID` | Optional stable logical host ID; must match persisted state | generated once |
 | `MUXPORT_HOSTNAME` | Display hostname | OS hostname or `unnamed-host` |
 | `MUXPORT_OPENCODE_URL` | OpenCode server base URL | `http://127.0.0.1:4096` |
@@ -106,6 +107,10 @@ host snapshot.
 Passwords are read from the environment and are not persisted in snapshots,
 events, or logs. Codex uses the account state already visible to its isolated
 process environment; the connector does not mutate that state.
+
+Desktop startup loads the host identity and provider-vault KEK from the native
+credential store. If either is locked or unavailable, non-secret runtime
+mirroring continues while pairing and/or credential operations remain disabled.
 
 ## Known boundaries
 
