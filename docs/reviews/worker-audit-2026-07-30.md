@@ -302,6 +302,17 @@ endpoint smoke verifies locked-store startup, shutdown, and projection restore.
 Native desktop integration tests and reviewed headless unlock/recovery backends
 remain required.
 
+## Cross-platform atomic vault replacement
+
+Vault persistence no longer implements replacement with
+`std::fs::rename`, which cannot overwrite an existing destination on Windows.
+It now uses a reviewed same-directory atomic writer that fsyncs and commits the
+replacement on Windows and Unix. Unix writes explicitly recreate the vault as
+owner-only `0600`; the credential-vault lifecycle test verifies that mode after
+multiple updates.
+
+The locked workspace remains at 85 passing tests after this change.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

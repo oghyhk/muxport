@@ -17,8 +17,15 @@
 3. **Memory Safety & Process Isolation:**
    - Decrypted credentials zeroized in memory immediately after use (`zeroize` crate in Rust).
    - Plaintext credentials strictly denied from entering logs, crash dumps, event journals, or remote mobile caches.
+4. **Durable file replacement:**
+   - Vault updates use a same-directory, cross-platform atomic replacement.
+   - Unix vault files are recreated with owner-only `0600` permissions rather
+     than inheriting a permissive mode.
 
 ## Consequences
 
 - Protection against offline file extraction on desktop/server hosts.
 - Headless servers supported safely without hardcoding plain keys in repository files.
+- An interrupted update preserves either the previous complete envelope or the
+  new complete envelope; Windows updates do not depend on `std::fs::rename`
+  overwriting an existing destination.

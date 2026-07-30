@@ -10,10 +10,9 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
 use muxport_protocol::CredentialStatus;
 use rand::rngs::OsRng;
-use rand::{RngCore, Rng};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -477,46 +476,22 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), VaultError> {
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| VaultError::Io(error.to_string()))?;
 
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| VaultError::Io("vault path has no valid file name".into()))?;
-    let random_suffix: u64 = OsRng.gen();
-    let temporary_path = parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        random_suffix
-    ));
-
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    let mut options = atomic_write_file::OpenOptions::new();
     #[cfg(unix)]
     {
+        use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
         use std::os::unix::fs::OpenOptionsExt;
+        AtomicOpenOptionsExt::preserve_mode(&mut options, false);
         options.mode(0o600);
     }
 
-    let write_result = (|| -> Result<(), VaultError> {
-        let mut file = options
-            .open(&temporary_path)
-            .map_err(|error| VaultError::Io(error.to_string()))?;
-        file.write_all(data)
-            .map_err(|error| VaultError::Io(error.to_string()))?;
-        file.sync_all()
-            .map_err(|error| VaultError::Io(error.to_string()))?;
-        std::fs::rename(&temporary_path, path)
-            .map_err(|error| VaultError::Io(error.to_string()))?;
-        #[cfg(unix)]
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| VaultError::Io(error.to_string()))?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temporary_path);
-    }
-    write_result
+    let mut file = options
+        .open(path)
+        .map_err(|error| VaultError::Io(error.to_string()))?;
+    file.write_all(data)
+        .map_err(|error| VaultError::Io(error.to_string()))?;
+    file.commit()
+        .map_err(|error| VaultError::Io(error.to_string()))
 }
 
 mod hex {
@@ -659,6 +634,14 @@ mod tests {
         let file_text = std::fs::read_to_string(&path).unwrap();
         assert!(!file_text.contains("Test Profile"));
         assert!(!file_text.contains("secret-v1"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         let key = KeyEncryptionKey::derive_from_passphrase(b"TEST_PASSPHRASE", &salt).unwrap();
         let reopened = PersistentVault::open_or_create(&path, key).unwrap();

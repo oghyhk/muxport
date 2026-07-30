@@ -44,6 +44,7 @@ hkdf = "0.12"
 sha2 = "0.10"
 subtle = "2.6"
 fs2 = "0.4.3"
+atomic-write-file = "0.3.0"
 rand = "0.8"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 argon2 = "0.5"
