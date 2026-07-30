@@ -92,6 +92,7 @@ impl AgentAdapter for CodexAdapter {
 
     async fn respond_approval(
         &self,
+        _session_id: &str,
         _approval_id: &str,
         _approved: bool,
         _reason: &str,

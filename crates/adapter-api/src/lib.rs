@@ -17,6 +17,12 @@ pub enum AdapterError {
     ApprovalNotFound(String),
     #[error("Credential validation failed: {0}")]
     CredentialInvalid(String),
+    #[error("Invalid adapter input: {0}")]
+    InvalidInput(String),
+    #[error("Agent runtime protocol error: {0}")]
+    Protocol(String),
+    #[error("Agent runtime operation outcome is unknown: {0}")]
+    OutcomeUnknown(String),
     #[error("Operation unsupported by runtime: {0}")]
     Unsupported(String),
     #[error("Internal adapter error: {0}")]
@@ -61,7 +67,13 @@ pub trait AgentAdapter: Send + Sync {
     async fn send_input(&self, session_id: &str, text: &str) -> Result<(), AdapterError>;
     async fn steer(&self, session_id: &str, instruction: &str) -> Result<(), AdapterError>;
     async fn interrupt(&self, session_id: &str, reason: &str) -> Result<(), AdapterError>;
-    async fn respond_approval(&self, approval_id: &str, approved: bool, reason: &str) -> Result<(), AdapterError>;
+    async fn respond_approval(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        approved: bool,
+        reason: &str,
+    ) -> Result<(), AdapterError>;
     async fn validate_credential(&self, secret_payload: &str) -> Result<CredentialStatus, AdapterError>;
     async fn activate_credential(&self, profile_id: &str, secret_payload: &str) -> Result<(), AdapterError>;
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError>;

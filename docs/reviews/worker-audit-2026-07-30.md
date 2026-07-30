@@ -109,21 +109,39 @@ The follow-up review found and corrected these issues:
 After correction, `cargo test --locked --workspace --all-targets` passes 31
 tests on the clean Linux verification checkout.
 
+## OpenCode connector foundation (`codex/review-muxport`)
+
+The next correction slice implemented the documented OpenCode HTTP/SSE
+vertical path. It includes versioned health discovery, cross-project session
+snapshots, session creation plus asynchronous prompt dispatch, subsequent
+input, interruption, permission replies, bounded SSE parsing, and conservative
+normalization. Mutations distinguish known rejection from an unknown outcome.
+
+Restart recovery no longer depends on adapter memory: session directories are
+reconstructed from OpenCode, and approval commands now carry `session_id`
+because OpenCode's permission reply route is session-scoped. Profile-specific
+startup and all credential operations remain fail-closed until managed runtime
+isolation and rollback are proven.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 39
+tests on the clean Linux verification checkout. Rustfmt and clippy remain
+unavailable there and are not claimed.
+
 ## Major work still required
 
-- Implement OpenCode SSE normalization, commands, approvals, and credential
-  profile isolation against generated OpenAPI types and compatibility fixtures.
+- Prove OpenCode credential profile isolation with managed runtimes,
+  compatibility fixtures, stage/validate/activate/rollback, and restart tests.
 - Implement the Codex stdio App Server lifecycle, initialization handshake,
   schema-generated JSON-RPC types, notifications, commands, approvals, and
   restart reconciliation.
 - Implement durable host identity, authenticated pairing, device revocation,
   transcript-bound key agreement, and key rotation. The current crypto crate is
   only a primitive layer.
-- Implement a persistent credential vault backed by OS key storage, atomic
-  stage/validate/activate/rollback rotation, provider-specific isolation, and
-  recovery tests.
-- Implement the connector's authenticated command/event transport and persist
-  the command ledger. The current ledger remains in memory.
+- Bind the encrypted persistent credential vault to OS key storage and connect
+  its atomic stage/validate/activate/rollback operations to provider-specific
+  managed runtimes.
+- Implement the connector's authenticated command/event transport and wire its
+  existing persistent command ledger into dispatch and reconciliation.
 - Complete supervised-process monitoring, graceful shutdown, exponential
   backoff, process identity checks, and adopted-runtime behavior.
 - Replace hardcoded Flutter demo data with state management, encrypted transport,

@@ -80,7 +80,13 @@ impl AgentAdapter for DeterministicFakeAdapter {
         Ok(())
     }
 
-    async fn respond_approval(&self, _approval_id: &str, _approved: bool, _reason: &str) -> Result<(), AdapterError> {
+    async fn respond_approval(
+        &self,
+        _session_id: &str,
+        _approval_id: &str,
+        _approved: bool,
+        _reason: &str,
+    ) -> Result<(), AdapterError> {
         Ok(())
     }
 

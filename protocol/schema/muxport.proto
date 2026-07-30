@@ -130,6 +130,8 @@ message ApproveActionCmd {
   string approval_id = 1;
   bool approved = 2;
   string decision_reason = 3;
+  // Required so approval replies remain routable after connector restart.
+  string session_id = 4;
 }
 
 message ChangeAssignmentCmd {
