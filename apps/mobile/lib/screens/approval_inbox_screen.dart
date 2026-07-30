@@ -6,9 +6,7 @@ class ApprovalInboxScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Approval Inbox'),
-      ),
+      appBar: AppBar(title: const Text('Approval Inbox')),
       body: ListView(
         padding: const EdgeInsets.all(16.0),
         children: [
@@ -30,13 +28,21 @@ class ApprovalInboxScreen extends StatelessWidget {
                       Text(
                         'Command Execution Approval',
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                              color: Colors.amber,
-                            ),
+                          fontWeight: FontWeight.bold,
+                          color: Colors.amber,
+                        ),
                       ),
                       const Spacer(),
-                      const Text('Host: vps-malaysia-01', style: TextStyle(fontSize: 10)),
+                      const Text(
+                        'Host: vps-malaysia-01',
+                        style: TextStyle(fontSize: 10),
+                      ),
                     ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Demo card only. Approval controls remain disabled until '
+                    'the source runtime is authenticated and refreshed.',
                   ),
                   const SizedBox(height: 8),
                   const Text('Agent wants to execute terminal command:'),
@@ -56,14 +62,18 @@ class ApprovalInboxScreen extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
                       OutlinedButton(
-                        onPressed: () {},
-                        style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                        onPressed: null,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red,
+                        ),
                         child: const Text('Reject'),
                       ),
                       const SizedBox(width: 8),
                       ElevatedButton(
-                        onPressed: () {},
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                        onPressed: null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                        ),
                         child: const Text('Approve'),
                       ),
                     ],

@@ -6,9 +6,7 @@ class SessionTimelineScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Unified Session Timeline'),
-      ),
+      appBar: AppBar(title: const Text('Unified Session Timeline')),
       body: Column(
         children: [
           Expanded(
@@ -17,20 +15,23 @@ class SessionTimelineScreen extends StatelessWidget {
               children: [
                 _buildMessageBubble(
                   sender: 'User',
-                  message: 'Implement Rust process supervisor crash loop detection in Muxport',
+                  message:
+                      'Implement Rust process supervisor crash loop detection in Muxport',
                   timestamp: '14:20',
                   isUser: true,
                 ),
                 _buildMessageBubble(
                   sender: 'OpenCode Agent',
-                  message: 'I have analyzed process-supervisor requirements. Adding sliding window time tracking for exit codes...',
+                  message:
+                      'I have analyzed process-supervisor requirements. Adding sliding window time tracking for exit codes...',
                   timestamp: '14:21',
                   isUser: false,
                   badge: 'opencode-go-pool-a',
                 ),
                 _buildMessageBubble(
                   sender: 'Codex Agent',
-                  message: 'App Server stdio JSON-RPC stream connected. Streaming delta items...',
+                  message:
+                      'App Server stdio JSON-RPC stream connected. Streaming delta items...',
                   timestamp: '14:22',
                   isUser: false,
                   badge: 'codex-work-api-key',
@@ -45,17 +46,15 @@ class SessionTimelineScreen extends StatelessWidget {
               children: [
                 Expanded(
                   child: TextField(
+                    enabled: false,
                     decoration: const InputDecoration(
-                      hintText: 'Steer or send prompt to runtime...',
+                      hintText: 'Transport is not connected',
                       border: InputBorder.none,
                       contentPadding: EdgeInsets.symmetric(horizontal: 12),
                     ),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: () {},
-                ),
+                IconButton(icon: const Icon(Icons.send), onPressed: null),
               ],
             ),
           ),
@@ -88,19 +87,28 @@ class SessionTimelineScreen extends StatelessWidget {
               children: [
                 Text(
                   sender,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
                 ),
                 if (badge != null) ...[
                   const SizedBox(width: 8),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.purple.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
                       badge,
-                      style: const TextStyle(fontSize: 10, color: Colors.purpleAccent),
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.purpleAccent,
+                      ),
                     ),
                   ),
                 ],

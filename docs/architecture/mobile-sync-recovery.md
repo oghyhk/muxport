@@ -46,6 +46,15 @@ writes and preserves the files instead of replacing them with an empty cache.
 Known secret-shaped fields are rejected as defense in depth; the longer-term
 protocol must replace generic snapshot maps with generated redacted types.
 
-Secure device-identity storage, authenticated transport, and UI binding are
-separate unfinished layers. Until those are connected, the existing screens
-remain explicitly marked as demo data.
+Protected device-identity storage is implemented as described in
+`mobile-device-identity.md`. Authenticated transport and source-backed UI
+binding remain separate unfinished layers.
+
+The application bootstrap now opens the generation cache and protected device
+identity before showing navigation. Cache corruption and identity lock are
+represented independently, cached hosts render as stale, pending operation IDs
+are visible as requiring reconciliation, and host controls stay disabled.
+Diagnostics reports the transport and leak audit as not connected/not run
+instead of presenting placeholder success. Session, approval, and credential
+screens still contain illustrative data, are marked as unwired, and cannot
+dispatch actions.

@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
 import 'screens/host_fleet_screen.dart';
 import 'screens/session_timeline_screen.dart';
 import 'screens/approval_inbox_screen.dart';
 import 'screens/credential_matrix_screen.dart';
 import 'screens/diagnostics_screen.dart';
+import 'state/app_bootstrap.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -11,7 +15,9 @@ void main() {
 }
 
 class MuxportApp extends StatelessWidget {
-  const MuxportApp({super.key});
+  const MuxportApp({super.key, this.bootstrap});
+
+  final Future<AppBootstrapState>? bootstrap;
 
   @override
   Widget build(BuildContext context) {
@@ -24,9 +30,11 @@ class MuxportApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const MainNavigationScreen(),
+      home: _BootstrapBoundary(
+        bootstrap: bootstrap ?? PlatformAppBootstrap.load(),
+      ),
       builder: (context, child) => Banner(
-        message: 'DEMO DATA',
+        message: 'UNWIRED UI',
         location: BannerLocation.topEnd,
         child: child ?? const SizedBox.shrink(),
       ),
@@ -35,8 +43,86 @@ class MuxportApp extends StatelessWidget {
   }
 }
 
+class _BootstrapBoundary extends StatefulWidget {
+  const _BootstrapBoundary({required this.bootstrap});
+
+  final Future<AppBootstrapState> bootstrap;
+
+  @override
+  State<_BootstrapBoundary> createState() => _BootstrapBoundaryState();
+}
+
+class _BootstrapBoundaryState extends State<_BootstrapBoundary> {
+  AppBootstrapState? _completedBootstrap;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<AppBootstrapState>(
+      future: widget.bootstrap,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return const _StartupFailureScreen();
+        }
+        final bootstrap = snapshot.data;
+        if (bootstrap == null) {
+          return const _StartupLoadingScreen();
+        }
+        _completedBootstrap = bootstrap;
+        return MainNavigationScreen(bootstrap: bootstrap);
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    final identity = _completedBootstrap?.identity;
+    if (identity != null) {
+      unawaited(identity.destroy());
+    }
+    super.dispose();
+  }
+}
+
+class _StartupLoadingScreen extends StatelessWidget {
+  const _StartupLoadingScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Semantics(
+          label: 'Loading protected Muxport state',
+          child: const CircularProgressIndicator(),
+        ),
+      ),
+    );
+  }
+}
+
+class _StartupFailureScreen extends StatelessWidget {
+  const _StartupFailureScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Muxport could not initialize local state. No remote command was '
+            'sent. Restart the app or open diagnostics after recovery.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class MainNavigationScreen extends StatefulWidget {
-  const MainNavigationScreen({super.key});
+  const MainNavigationScreen({required this.bootstrap, super.key});
+
+  final AppBootstrapState bootstrap;
 
   @override
   State<MainNavigationScreen> createState() => _MainNavigationScreenState();
@@ -45,18 +131,21 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
 
-  final List<Widget> _screens = const [
-    HostFleetScreen(),
-    SessionTimelineScreen(),
-    ApprovalInboxScreen(),
-    CredentialMatrixScreen(),
-    DiagnosticsScreen(),
-  ];
-
   @override
   Widget build(BuildContext context) {
+    final screens = [
+      HostFleetScreen(
+        hosts: widget.bootstrap.cache.hosts.values.toList(growable: false),
+        cacheStatus: widget.bootstrap.cacheStatus,
+        identityStatus: widget.bootstrap.identityStatus,
+      ),
+      const SessionTimelineScreen(),
+      const ApprovalInboxScreen(),
+      const CredentialMatrixScreen(),
+      DiagnosticsScreen(bootstrap: widget.bootstrap),
+    ];
     return Scaffold(
-      body: IndexedStack(index: _currentIndex, children: _screens),
+      body: IndexedStack(index: _currentIndex, children: screens),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) {

@@ -407,6 +407,24 @@ no issues on Windows. Native Keychain/Keystore behavior and physical-device
 restart tests are still required, and the identity is not yet wired into a
 phone-to-connector transport.
 
+## Honest mobile startup and cached host fleet
+
+Flutter now loads the protected phone identity and crash-safe host cache before
+showing navigation. Cache corruption, fallback to a prior generation, cache
+unavailability, and identity lock have distinct visible states. Cached hosts
+render as stale with their replay cursor and pending-reconciliation count;
+pairing and remote controls remain disabled.
+
+The diagnostics screen no longer claims that a connector, relay, vault, or
+secret-leak audit is healthy when those checks are unwired. Demo session,
+approval, and credential controls are disabled, and the global banner now says
+`UNWIRED UI`. Widget tests assert stale host presentation and ensure diagnostics
+contains neither fake `ONLINE` nor `0 SECRETS` success.
+
+After this slice, `flutter test` passes 31 tests and `flutter analyze` reports
+no issues on Windows. Live transport, pairing UI, source-backed screens, and
+native-device verification remain unfinished.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

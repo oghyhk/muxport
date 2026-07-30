@@ -1,59 +1,126 @@
 import 'package:flutter/material.dart';
 
+import '../state/app_bootstrap.dart';
+
 class DiagnosticsScreen extends StatelessWidget {
-  const DiagnosticsScreen({super.key});
+  const DiagnosticsScreen({required this.bootstrap, super.key});
+
+  final AppBootstrapState bootstrap;
 
   @override
   Widget build(BuildContext context) {
+    final identityReady =
+        bootstrap.identityStatus == IdentityBootstrapStatus.ready;
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Diagnostics & Audit Log'),
-      ),
+      appBar: AppBar(title: const Text('Diagnostics & Audit Log')),
       body: ListView(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(16),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16.0),
+              padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('System Health & Security Invariants',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const Text(
+                    'Local startup state',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
                   const SizedBox(height: 12),
-                  _buildHealthRow('Host Connector Daemon', 'ONLINE (boot_epoch: 1700000000000)', Colors.green),
-                  _buildHealthRow('Vault Encryption Key', 'SEALED & OS-PROTECTED', Colors.green),
-                  _buildHealthRow('Relay Connection', 'CONNECTED (ws://0.0.0.0:8080)', Colors.green),
-                  _buildHealthRow('Plaintext Secret Leak Audit', '0 SECRETS EXPOSED', Colors.green),
+                  _HealthRow(
+                    title: 'Host cache',
+                    value: _cacheLabel(bootstrap.cacheStatus),
+                    healthy:
+                        bootstrap.cacheStatus == CacheBootstrapStatus.ready ||
+                        bootstrap.cacheStatus ==
+                            CacheBootstrapStatus.recoveredPreviousGeneration,
+                  ),
+                  _HealthRow(
+                    title: 'Cache generation',
+                    value: bootstrap.cacheGeneration.toString(),
+                    healthy: true,
+                  ),
+                  _HealthRow(
+                    title: 'Protected phone identity',
+                    value: identityReady ? 'AVAILABLE' : 'LOCKED / UNAVAILABLE',
+                    healthy: identityReady,
+                  ),
+                  const _HealthRow(
+                    title: 'Connector transport',
+                    value: 'NOT CONNECTED',
+                    healthy: false,
+                  ),
+                  const _HealthRow(
+                    title: 'Secret leak audit',
+                    value: 'NOT RUN',
+                    healthy: false,
+                  ),
                 ],
               ),
             ),
           ),
           const SizedBox(height: 16),
-          ElevatedButton.icon(
+          FilledButton.icon(
             icon: const Icon(Icons.download),
-            label: const Text('Export Redacted Support Diagnostics'),
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Redacted diagnostics bundle exported cleanly.')),
-              );
-            },
+            label: const Text('Diagnostics export not implemented'),
+            onPressed: null,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildHealthRow(String title, String value, Color color) {
+  static String _cacheLabel(CacheBootstrapStatus status) {
+    return switch (status) {
+      CacheBootstrapStatus.ready => 'READY',
+      CacheBootstrapStatus.recoveredPreviousGeneration =>
+        'RECOVERED PREVIOUS GENERATION',
+      CacheBootstrapStatus.corrupt => 'CORRUPT / WRITE BLOCKED',
+      CacheBootstrapStatus.unavailable => 'UNAVAILABLE',
+    };
+  }
+}
+
+class _HealthRow extends StatelessWidget {
+  const _HealthRow({
+    required this.title,
+    required this.value,
+    required this.healthy,
+  });
+
+  final String title;
+  final String value;
+  final bool healthy;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = healthy ? Colors.green : Colors.orange;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.check_circle, color: color, size: 16),
+          Icon(
+            healthy ? Icons.check_circle : Icons.info,
+            color: color,
+            size: 16,
+          ),
           const SizedBox(width: 8),
-          Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-          const Spacer(),
-          Text(value, style: TextStyle(color: color, fontSize: 12)),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.end,
+              style: TextStyle(color: color, fontSize: 12),
+            ),
+          ),
         ],
       ),
     );

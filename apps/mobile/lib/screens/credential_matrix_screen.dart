@@ -8,12 +8,7 @@ class CredentialMatrixScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Account Profiles & Rotation'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: () {},
-          ),
-        ],
+        actions: [IconButton(icon: const Icon(Icons.add), onPressed: null)],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16.0),
@@ -47,7 +42,7 @@ class CredentialMatrixScreen extends StatelessWidget {
               padding: const EdgeInsets.all(16),
               backgroundColor: Colors.purple,
             ),
-            onPressed: () {},
+            onPressed: null,
           ),
         ],
       ),
