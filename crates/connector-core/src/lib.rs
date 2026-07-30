@@ -13,10 +13,14 @@ pub enum CoreError {
     CommandExpired,
     #[error("Idempotency key must not be empty")]
     EmptyIdempotencyKey,
+    #[error("Command fingerprint must not be empty")]
+    EmptyCommandFingerprint,
     #[error("Command was not reserved before recording a result: {0}")]
     UnknownCommand(String),
     #[error("Command ledger contains an invalid operation state: {0}")]
     InvalidStoredState(i32),
+    #[error("Command ledger integrity check failed: {0}")]
+    IntegrityCheckFailed(String),
     #[error("Command ledger database error: {0}")]
     Sql(#[from] rusqlite::Error),
 }
@@ -110,8 +114,15 @@ impl DesiredObservedReconciler {
 }
 
 pub struct CommandLedger {
-    executed_commands: HashMap<String, (RemoteOpState, String)>,
+    executed_commands: HashMap<String, CommandRecord>,
     conn: Option<rusqlite::Connection>,
+}
+
+#[derive(Clone)]
+struct CommandRecord {
+    state: RemoteOpState,
+    result_json: String,
+    fingerprint: String,
 }
 
 impl Default for CommandLedger {
@@ -133,15 +144,39 @@ impl CommandLedger {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let integrity: String =
+            conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(CoreError::IntegrityCheckFailed(integrity));
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS command_ledger (
                 idempotency_key TEXT PRIMARY KEY,
                 state_code INTEGER NOT NULL,
                 result_json TEXT NOT NULL,
+                command_fingerprint TEXT NOT NULL DEFAULT '',
                 updated_at_ms INTEGER NOT NULL
             )",
             [],
         )?;
+        let has_fingerprint = {
+            let mut stmt = conn.prepare("PRAGMA table_info(command_ledger)")?;
+            let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for column in columns {
+                if column? == "command_fingerprint" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_fingerprint {
+            conn.execute(
+                "ALTER TABLE command_ledger
+                 ADD COLUMN command_fingerprint TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
 
         let mut ledger = Self {
             executed_commands: HashMap::new(),
@@ -154,19 +189,28 @@ impl CommandLedger {
     fn load_from_db(&mut self) -> Result<(), CoreError> {
         if let Some(ref conn) = self.conn {
             let mut stmt = conn.prepare(
-                "SELECT idempotency_key, state_code, result_json FROM command_ledger",
+                "SELECT idempotency_key, state_code, result_json, command_fingerprint
+                 FROM command_ledger",
             )?;
             let rows = stmt.query_map([], |row| {
                 let key: String = row.get(0)?;
                 let state_code: i32 = row.get(1)?;
                 let result_json: String = row.get(2)?;
-                Ok((key, state_code, result_json))
+                let fingerprint: String = row.get(3)?;
+                Ok((key, state_code, result_json, fingerprint))
             })?;
             for r in rows {
-                let (key, state_code, result_json) = r?;
+                let (key, state_code, result_json, fingerprint) = r?;
                 let state = RemoteOpState::try_from(state_code)
                     .map_err(|_| CoreError::InvalidStoredState(state_code))?;
-                self.executed_commands.insert(key, (state, result_json));
+                self.executed_commands.insert(
+                    key,
+                    CommandRecord {
+                        state,
+                        result_json,
+                        fingerprint,
+                    },
+                );
             }
         }
         Ok(())
@@ -179,26 +223,64 @@ impl CommandLedger {
         idempotency_key: &str,
         deadline_ms: i64,
     ) -> Result<Option<(RemoteOpState, String)>, CoreError> {
+        self.reserve_command_inner(idempotency_key, deadline_ms, "")
+    }
+
+    /// Reserves an idempotency key and binds it to an immutable command
+    /// fingerprint before the caller performs a side effect. Reusing the key
+    /// for different command bytes is a conflict, never a cache hit.
+    pub fn reserve_command(
+        &mut self,
+        idempotency_key: &str,
+        deadline_ms: i64,
+        command_fingerprint: &str,
+    ) -> Result<Option<(RemoteOpState, String)>, CoreError> {
+        if command_fingerprint.is_empty() {
+            return Err(CoreError::EmptyCommandFingerprint);
+        }
+        self.reserve_command_inner(idempotency_key, deadline_ms, command_fingerprint)
+    }
+
+    fn reserve_command_inner(
+        &mut self,
+        idempotency_key: &str,
+        deadline_ms: i64,
+        command_fingerprint: &str,
+    ) -> Result<Option<(RemoteOpState, String)>, CoreError> {
         if idempotency_key.trim().is_empty() {
             return Err(CoreError::EmptyIdempotencyKey);
         }
-        let now = chrono::Utc::now().timestamp_millis();
-        if deadline_ms > 0 && now > deadline_ms {
-            return Err(CoreError::CommandExpired);
-        }
-
         if let Some(prev) = self.executed_commands.get(idempotency_key) {
-            Ok(Some(prev.clone()))
+            if prev.fingerprint != command_fingerprint {
+                return Err(CoreError::DuplicateCommand(idempotency_key.to_owned()));
+            }
+            Ok(Some((prev.state, prev.result_json.clone())))
         } else {
+            let now = chrono::Utc::now().timestamp_millis();
+            if deadline_ms > 0 && now > deadline_ms {
+                return Err(CoreError::CommandExpired);
+            }
             if let Some(ref conn) = self.conn {
                 conn.execute(
-                    "INSERT INTO command_ledger (idempotency_key, state_code, result_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![idempotency_key, RemoteOpState::Created as i32, "", now],
+                    "INSERT INTO command_ledger
+                        (idempotency_key, state_code, result_json, command_fingerprint, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        idempotency_key,
+                        RemoteOpState::Created as i32,
+                        "",
+                        command_fingerprint,
+                        now
+                    ],
                 )?;
             }
             self.executed_commands.insert(
                 idempotency_key.to_owned(),
-                (RemoteOpState::Created, String::new()),
+                CommandRecord {
+                    state: RemoteOpState::Created,
+                    result_json: String::new(),
+                    fingerprint: command_fingerprint.to_owned(),
+                },
             );
             Ok(None)
         }
@@ -224,7 +306,11 @@ impl CommandLedger {
             }
         }
         self.executed_commands
-            .insert(idempotency_key, (state, result_json));
+            .entry(idempotency_key)
+            .and_modify(|record| {
+                record.state = state;
+                record.result_json = result_json;
+            });
         Ok(())
     }
 }
@@ -295,6 +381,56 @@ mod tests {
         assert_eq!(
             ledger.check_or_record("expired-command", 0).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn command_fingerprint_prevents_idempotency_key_reuse() {
+        let mut ledger = CommandLedger::new();
+        assert_eq!(
+            ledger
+                .reserve_command("command-1", 0, "fingerprint-a")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            ledger
+                .reserve_command("command-1", 0, "fingerprint-a")
+                .unwrap(),
+            Some((RemoteOpState::Created, String::new()))
+        );
+        assert!(matches!(
+            ledger.reserve_command("command-1", 0, "fingerprint-b"),
+            Err(CoreError::DuplicateCommand(key)) if key == "command-1"
+        ));
+        assert!(matches!(
+            ledger.reserve_command("command-2", 0, ""),
+            Err(CoreError::EmptyCommandFingerprint)
+        ));
+    }
+
+    #[test]
+    fn completed_duplicate_is_returned_after_original_deadline() {
+        let mut ledger = CommandLedger::new();
+        ledger
+            .reserve_command("command-1", 0, "fingerprint-a")
+            .unwrap();
+        ledger
+            .record_result(
+                "command-1".into(),
+                RemoteOpState::Succeeded,
+                r#"{"ok":true}"#.into(),
+            )
+            .unwrap();
+        let expired = chrono::Utc::now().timestamp_millis() - 1;
+        assert_eq!(
+            ledger
+                .reserve_command("command-1", expired, "fingerprint-a")
+                .unwrap(),
+            Some((
+                RemoteOpState::Succeeded,
+                r#"{"ok":true}"#.into()
+            ))
         );
     }
 
@@ -378,5 +514,49 @@ mod tests {
             ),
             Err(CoreError::UnknownCommand(key)) if key == "never-reserved"
         ));
+    }
+
+    #[test]
+    fn sqlite_open_migrates_legacy_command_ledger() {
+        let db_path = std::env::temp_dir().join(format!(
+            "cmd-ledger-migration-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE command_ledger (
+                    idempotency_key TEXT PRIMARY KEY,
+                    state_code INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                );
+                INSERT INTO command_ledger
+                    (idempotency_key, state_code, result_json, updated_at_ms)
+                VALUES ('legacy', 6, '{\"legacy\":true}', 1);",
+            )
+            .unwrap();
+        }
+
+        let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+        assert_eq!(
+            ledger.check_or_record("legacy", 0).unwrap(),
+            Some((
+                RemoteOpState::Succeeded,
+                r#"{"legacy":true}"#.into()
+            ))
+        );
+        assert_eq!(
+            ledger
+                .reserve_command("new-command", 0, "new-fingerprint")
+                .unwrap(),
+            None
+        );
+
+        drop(ledger);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 }

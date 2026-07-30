@@ -2,12 +2,15 @@ use adapter_api::{AdapterError, AgentAdapter, CapabilitySet, EventStream, Projec
 use async_trait::async_trait;
 use futures::stream;
 use muxport_protocol::{AgentType, CredentialStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub struct DeterministicFakeAdapter {
     agent_type: AgentType,
     should_fail: Arc<AtomicBool>,
+    start_session_count: Arc<AtomicUsize>,
+    start_session_delay_ms: Arc<AtomicU64>,
+    start_session_outcome_unknown: Arc<AtomicBool>,
 }
 
 impl DeterministicFakeAdapter {
@@ -15,11 +18,29 @@ impl DeterministicFakeAdapter {
         Self {
             agent_type,
             should_fail: Arc::new(AtomicBool::new(false)),
+            start_session_count: Arc::new(AtomicUsize::new(0)),
+            start_session_delay_ms: Arc::new(AtomicU64::new(0)),
+            start_session_outcome_unknown: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn set_fail_mode(&self, fail: bool) {
         self.should_fail.store(fail, Ordering::SeqCst);
+    }
+
+    pub fn start_session_count(&self) -> usize {
+        self.start_session_count.load(Ordering::SeqCst)
+    }
+
+    pub fn set_start_session_delay(&self, delay: std::time::Duration) {
+        let delay_ms = delay.as_millis().try_into().unwrap_or(u64::MAX);
+        self.start_session_delay_ms
+            .store(delay_ms, Ordering::SeqCst);
+    }
+
+    pub fn set_start_session_outcome_unknown(&self, enabled: bool) {
+        self.start_session_outcome_unknown
+            .store(enabled, Ordering::SeqCst);
     }
 }
 
@@ -66,6 +87,16 @@ impl AgentAdapter for DeterministicFakeAdapter {
     }
 
     async fn start_session(&self, _project_path: &str, _prompt: &str, _profile_id: &str) -> Result<String, AdapterError> {
+        self.start_session_count.fetch_add(1, Ordering::SeqCst);
+        let delay_ms = self.start_session_delay_ms.load(Ordering::SeqCst);
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        if self.start_session_outcome_unknown.load(Ordering::SeqCst) {
+            return Err(AdapterError::OutcomeUnknown(
+                "injected fake unknown outcome".into(),
+            ));
+        }
         Ok("fake-sess-1".into())
     }
 

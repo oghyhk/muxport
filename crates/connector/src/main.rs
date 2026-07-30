@@ -3,7 +3,9 @@ use adapter_api::{
 };
 use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
-use connector::{journal_runtime_event, replay_events_after_snapshot, RuntimeMirror};
+use connector::{
+    journal_runtime_event, replay_events_after_snapshot, CommandRouter, RuntimeMirror,
+};
 use event_journal::EventJournal;
 use futures::StreamExt;
 use muxport_protocol::{
@@ -141,6 +143,17 @@ async fn main() -> Result<(), DynError> {
         (opencode_config, opencode),
         (codex_config, codex),
     ];
+    let command_db = std::env::var("MUXPORT_COMMAND_DB")
+        .unwrap_or_else(|_| "muxport-commands.db".into());
+    let adapter_registry = runtimes
+        .iter()
+        .map(|(config, adapter)| {
+            (config.runtime_id.clone(), Arc::clone(adapter))
+        })
+        .collect();
+    let _command_router = CommandRouter::open_sqlite(&command_db, adapter_registry)?;
+    info!(path = %command_db, "persistent command ledger initialized");
+
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut monitor_tasks = Vec::new();

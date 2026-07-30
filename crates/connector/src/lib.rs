@@ -1,3 +1,7 @@
+mod command_router;
+
+pub use command_router::{CommandDispatchError, CommandRouter};
+
 use adapter_api::{ProjectInfo, SessionSummary};
 use event_journal::{EventJournal, JournalError};
 use muxport_protocol::{

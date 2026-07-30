@@ -195,6 +195,24 @@ A two-run daemon smoke test with both sources intentionally unavailable handled
 the second run. A separate unavailable-source smoke confirmed that both runtime
 monitors independently emitted degraded updates before the clean shutdown.
 
+## Durable command dispatch boundary
+
+The connector now initializes a separate SQLite/WAL command ledger and an
+adapter-aware command router. Reservations bind each idempotency key to a
+SHA-256 fingerprint of the protobuf command before side effects, persist a
+dispatched marker, wait for an in-process duplicate, and persist the complete
+terminal result. Reusing a key for different bytes is rejected.
+
+Completed duplicates survive restart and are not redispatched. An interrupted
+or crash-recovered nonterminal record becomes `ReconciliationRequired` instead
+of being replayed. Expired commands never reach adapters, while retries of an
+already completed command still return its stored result after the original
+deadline. Session mutations now carry an explicit runtime ID so routing never
+guesses across OpenCode and Codex.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 65
+tests on the clean Linux verification checkout.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

@@ -21,6 +21,8 @@ muxport-protocol = { path = "../muxport-protocol" }
 muxport-crypto = { path = "../muxport-crypto" }
 tokio = { workspace = true }
 futures = { workspace = true }
+prost = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
