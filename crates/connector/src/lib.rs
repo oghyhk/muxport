@@ -1,6 +1,7 @@
 mod command_router;
 mod direct_transport;
 mod instance_lock;
+mod pairing_coordinator;
 mod pairing_store;
 mod secure_session;
 
@@ -9,6 +10,9 @@ pub use direct_transport::{
     DirectTransportError, DirectTransportService, ServerChallenge,
 };
 pub use instance_lock::{InstanceLock, InstanceLockError};
+pub use pairing_coordinator::{
+    PairingClaimResult, PairingCoordinator, PairingCoordinatorError,
+};
 pub use pairing_store::{
     ConfirmingParty, PairingStore, PairingStoreError,
 };

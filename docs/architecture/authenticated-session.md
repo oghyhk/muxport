@@ -29,6 +29,12 @@ that signature before treating the included host key as a candidate pin.
 Candidate trust is not persisted until the later SAS comparison. See
 `signed-pairing-offer.md`.
 
+The host pairing coordinator now keeps the offer's X25519 secret in memory,
+verifies the exact signed phone claim before consuming it, and derives the SAS
+itself from the complete transcript. A caller cannot inject an arbitrary SAS
+at claim time. Invalid signatures leave the offer available; a valid claim
+consumes it once.
+
 Only a SHA-256 domain-separated hash of each 256-bit rendezvous token is stored.
 Claiming uses an immediate transaction and accepts a signed
 `VerifiedInitiator` exactly once. The phone and host confirmations are recorded

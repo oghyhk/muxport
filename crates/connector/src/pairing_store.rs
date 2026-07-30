@@ -60,7 +60,7 @@ impl PairingStore {
     }
 
     #[cfg(test)]
-    fn open_in_memory() -> Result<Self, PairingStoreError> {
+    pub(crate) fn open_in_memory() -> Result<Self, PairingStoreError> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 

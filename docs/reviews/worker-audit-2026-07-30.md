@@ -466,7 +466,7 @@ and Rust. It fixes the directional HKDF output, session AAD, generated protobuf
 bytes, ChaCha20-Poly1305 ciphertext, ordered nonce, and `MUX1` frame bytes.
 After this slice, the complete mobile suite passes 37 tests and
 `flutter analyze` reports no issues on Windows. The locked Rust workspace
-passes 98 tests on the Linux verification checkout. Rustfmt and clippy remain
+passes 100 tests on the Linux verification checkout. Rustfmt and clippy remain
 unavailable there and are not claimed.
 
 ## Signed first-trust pairing offer
@@ -483,6 +483,14 @@ the transcript-derived SAS matches on both physical devices. Offer/claim
 transport, ephemeral-secret coordination, dual-confirmation UI, registry
 refresh, cancellation, and rate limiting are not wired, so pairing is still
 not usable end to end.
+
+The host-side coordinator now closes another important gap: it owns the
+process-memory-only offer secret, verifies the phone claim before consuming
+that secret, produces the signed responder, and derives the host SAS from the
+authenticated transcript rather than accepting a network-provided value.
+Tests prove an invalid signature does not consume the offer, a valid claim is
+single-use, both sides derive the same SAS, one-sided confirmation cannot
+finalize, and dual confirmation updates the signed registry.
 
 ## Major work still required
 

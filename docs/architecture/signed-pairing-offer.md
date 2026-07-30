@@ -28,10 +28,26 @@ The self-signature detects corruption and binds the endpoint, but it cannot by
 itself defeat replacement of the entire first-trust QR. Physical QR provenance
 and the out-of-band SAS comparison remain required.
 
+## Host-side coordinator
+
+The connector's pairing coordinator creates the signed offer and retains its
+matching X25519 secret only in process memory. On claim it first verifies the
+phone's signed initiator hello against the exact active rendezvous token. An
+invalid signature does not consume the offer; the first valid claim removes
+the in-memory secret so replay cannot derive another session.
+
+The coordinator signs the responder hello, derives the shared secret and SAS
+from the full authenticated transcript, and gives the SAS only to the trusted
+local host-display caller. It never accepts a caller-selected SAS for a new
+claim and the transport response must not send the host's SAS to the phone.
+The phone independently derives its value. The coordinator delegates the two
+idempotent confirmations and final registry transaction to the durable pairing
+store.
+
 ## Missing live path
 
-The connector does not yet expose offer creation, pairing claim, or
+The connector does not yet expose coordinator offer creation, claim, or
 confirmation over its listener. The app does not yet scan or render the QR/SAS
-screens. The in-memory host ephemeral secret, claim protocol, dual
-confirmation, registry refresh, cancellation, and rate limiting must be wired
-as one lifecycle before pairing is usable.
+screens. Transport message types, host console/UI confirmation, online
+registry refresh, cancellation, and rate limiting must be wired as one
+lifecycle before pairing is usable.
