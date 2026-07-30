@@ -313,6 +313,24 @@ multiple updates.
 
 The locked workspace remains at 85 passing tests after this change.
 
+## Credential vault v2 envelope
+
+The provider vault now generates a random zeroizing DEK and wraps it with a
+separate KEK. Domain-separated ChaCha20-Poly1305 authenticated data binds the
+wrapped key and payload to the logical host and binds every active, staged, and
+rollback secret to host/profile/provider/credential type. Listing returns only
+non-secret summaries.
+
+Stage, provider-validation, activation, discard, and rollback transitions are
+persisted with in-memory rollback on write failure. A real v1 fixture migrates
+all three secret slots under a fresh DEK and replaces the file only after the
+complete v2 envelope is sealed. Wrong-host, wrong-KEK, and cross-profile
+ciphertext reuse fail closed.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 86
+tests on the clean Linux verification checkout. Native OS wrapping for the
+provider-vault KEK and managed-runtime credential activation remain pending.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

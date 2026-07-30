@@ -7,8 +7,13 @@
 ## Decision
 
 1. **Vault Envelope:**
-   - Provider keys stored in encrypted vault file `vault.sealed` using AES-256-GCM.
-   - Key Encryption Key (KEK) wraps Data Encryption Key (DEK).
+   - Provider keys are stored in encrypted vault file `vault.sealed` using
+     ChaCha20-Poly1305.
+   - A random Data Encryption Key (DEK) encrypts the payload and individual
+     secret slots; the Key Encryption Key (KEK) wraps the DEK.
+   - Domain-separated authenticated data binds the envelope to its host and
+     each secret to host, profile, provider, credential type, and format
+     version.
 2. **OS Key Store Integrations:**
    - macOS: Apple Keychain Services API.
    - Windows: Windows DPAPI (Data Protection API) / Credential Manager.
@@ -21,6 +26,10 @@
    - Vault updates use a same-directory, cross-platform atomic replacement.
    - Unix vault files are recreated with owner-only `0600` permissions rather
      than inheriting a permissive mode.
+5. **Migration:**
+   - A valid v1 envelope is migrated by decrypting every active, staged, and
+     rollback slot and re-encrypting it under a fresh v2 DEK.
+   - Atomic replacement occurs only after the complete v2 envelope is sealed.
 
 ## Consequences
 
