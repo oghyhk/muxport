@@ -230,8 +230,25 @@ idempotency before releasing a command to dispatch.
 
 After this slice, `cargo test --locked --workspace --all-targets` passes 71
 tests on the clean Linux verification checkout. No listener is enabled yet:
-one-time pairing challenge persistence, physical SAS confirmation, atomic
-registry storage, and OS protection for the host identity key remain required.
+the physical SAS confirmation interface and OS protection for the host identity
+key remain required.
+
+## Restart-safe pairing transaction
+
+Pairing offers now use random 256-bit rendezvous tokens stored only as
+domain-separated hashes in a full-sync SQLite/WAL store. A verified signed
+initiator can claim a token once, SAS comparison is constant-time, and separate
+phone and host confirmations are both mandatory.
+
+Unclaimed or one-sided pairings are cancelled on connector restart because
+their ephemeral X25519 secrets no longer exist. Fully confirmed pairings can
+finalize after restart. Finalization updates the host-signed device registry and
+the pairing record in one database transaction, eliminating the registry/state
+crash window.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 75
+tests on the clean Linux verification checkout. Host identity private-key
+storage and the physical QR/SAS interface remain deliberately unimplemented.
 
 ## Major work still required
 

@@ -20,8 +20,20 @@ Non-contributory X25519 public keys are rejected.
 The pairing path may verify a self-asserted device signature before the device
 is registered, but registration remains forbidden until the user confirms the
 transcript-bound six-digit SAS out of band. Pairing-token generation,
-single-use consumption, expiry persistence, and the confirmation UI are still
-pending.
+single-use consumption, expiry, and confirmation state are persisted in a
+dedicated SQLite/WAL store.
+
+Only a SHA-256 domain-separated hash of each 256-bit rendezvous token is stored.
+Claiming uses an immediate transaction and accepts a signed
+`VerifiedInitiator` exactly once. The phone and host confirmations are recorded
+separately using a constant-time SAS-hash comparison; device registration
+requires both.
+
+Ephemeral X25519 secrets remain process-memory-only. On restart, unclaimed
+offers and one-sided confirmations are cancelled instead of being resumed with
+missing key material. A fully confirmed pairing can finalize after restart.
+Finalization updates the host-signed device registry and the pairing state in
+one SQLite transaction, so neither can commit without the other.
 
 ## Directional encryption
 
@@ -61,6 +73,7 @@ Load verifies the expected host ID, pinned host public key, signature, schema
 version, record key validity, and duplicate device IDs. Revoked identities
 cannot be silently re-registered.
 
-The caller still needs atomic file persistence and OS-protected storage for the
-host private identity key. No plaintext private-key file or unauthenticated
-listener is introduced by this slice.
+The signed registry is now stored atomically in the pairing database. The
+connector still needs OS-protected storage and unlock behavior for the host
+private identity key, plus the actual QR/SAS UI. No plaintext private-key file
+or unauthenticated listener is introduced by this slice.

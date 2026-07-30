@@ -1,7 +1,11 @@
 mod command_router;
+mod pairing_store;
 mod secure_session;
 
 pub use command_router::{CommandDispatchError, CommandRouter};
+pub use pairing_store::{
+    ConfirmingParty, PairingStore, PairingStoreError,
+};
 pub use secure_session::{
     AuthenticatedCommand, SecureEnvelopeSession, SecureSessionError,
     CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_PLAINTEXT_BYTES,

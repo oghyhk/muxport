@@ -39,6 +39,36 @@ pub struct ResponderHello {
     pub signature_hex: String,
 }
 
+pub struct VerifiedInitiator {
+    device_id: String,
+    host_id: String,
+    challenge: String,
+    device_identity_public_key_hex: String,
+    ephemeral_public: XPublicKey,
+}
+
+impl VerifiedInitiator {
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub fn host_id(&self) -> &str {
+        &self.host_id
+    }
+
+    pub fn challenge(&self) -> &str {
+        &self.challenge
+    }
+
+    pub fn device_identity_public_key_hex(&self) -> &str {
+        &self.device_identity_public_key_hex
+    }
+
+    pub fn ephemeral_public(&self) -> &XPublicKey {
+        &self.ephemeral_public
+    }
+}
+
 pub fn create_initiator_hello(
     identity: &SigningKey,
     device_id: &str,
@@ -71,8 +101,18 @@ pub fn verify_pairing_initiator(
     hello: &InitiatorHello,
     expected_host_id: &str,
     expected_challenge: &str,
-) -> Result<XPublicKey, CryptoError> {
-    verify_initiator_signature(hello, expected_host_id, expected_challenge)
+) -> Result<VerifiedInitiator, CryptoError> {
+    let ephemeral_public =
+        verify_initiator_signature(hello, expected_host_id, expected_challenge)?;
+    Ok(VerifiedInitiator {
+        device_id: hello.device_id.clone(),
+        host_id: hello.host_id.clone(),
+        challenge: hello.challenge.clone(),
+        device_identity_public_key_hex: hello
+            .device_identity_public_key_hex
+            .clone(),
+        ephemeral_public,
+    })
 }
 
 /// Verifies both the signed handshake and the existing non-revoked registry
@@ -82,7 +122,7 @@ pub fn verify_authorized_initiator(
     expected_host_id: &str,
     expected_challenge: &str,
     registry: &DeviceRegistry,
-) -> Result<XPublicKey, CryptoError> {
+) -> Result<VerifiedInitiator, CryptoError> {
     let ephemeral =
         verify_initiator_signature(hello, expected_host_id, expected_challenge)?;
     if !registry.is_authorized(
@@ -91,7 +131,15 @@ pub fn verify_authorized_initiator(
     ) {
         return Err(CryptoError::DeviceIdentityConflict);
     }
-    Ok(ephemeral)
+    Ok(VerifiedInitiator {
+        device_id: hello.device_id.clone(),
+        host_id: hello.host_id.clone(),
+        challenge: hello.challenge.clone(),
+        device_identity_public_key_hex: hello
+            .device_identity_public_key_hex
+            .clone(),
+        ephemeral_public: ephemeral,
+    })
 }
 
 pub fn create_responder_hello(
@@ -336,14 +384,17 @@ mod tests {
                 is_revoked: false,
             })
             .unwrap();
-        let verified_device_public = verify_authorized_initiator(
+        let verified_device = verify_authorized_initiator(
             &initiator,
             "host-1",
             challenge,
             &registry,
         )
         .unwrap();
-        assert_eq!(verified_device_public.as_bytes(), device_public.as_bytes());
+        assert_eq!(
+            verified_device.ephemeral_public().as_bytes(),
+            device_public.as_bytes()
+        );
 
         let responder = create_responder_hello(
             &host_identity,
@@ -371,7 +422,7 @@ mod tests {
         .unwrap();
         let host_shared = derive_shared_secret(
             host_ephemeral.secret,
-            &verified_device_public,
+            verified_device.ephemeral_public(),
             &transcript,
         )
         .unwrap();

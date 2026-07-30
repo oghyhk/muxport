@@ -4,7 +4,8 @@ use adapter_api::{
 use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{
-    journal_runtime_event, replay_events_after_snapshot, CommandRouter, RuntimeMirror,
+    journal_runtime_event, replay_events_after_snapshot, CommandRouter,
+    PairingStore, RuntimeMirror,
 };
 use event_journal::EventJournal;
 use futures::StreamExt;
@@ -153,6 +154,10 @@ async fn main() -> Result<(), DynError> {
         .collect();
     let _command_router = CommandRouter::open_sqlite(&command_db, adapter_registry)?;
     info!(path = %command_db, "persistent command ledger initialized");
+    let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
+        .unwrap_or_else(|_| "muxport-pairing.db".into());
+    let _pairing_store = PairingStore::open_sqlite(&pairing_db)?;
+    info!(path = %pairing_db, "persistent pairing store initialized");
 
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

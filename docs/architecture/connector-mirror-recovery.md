@@ -83,6 +83,7 @@ host snapshot.
 |---|---|---|
 | `MUXPORT_STATE_DB` | Connector event/snapshot SQLite path | `muxport-state.db` |
 | `MUXPORT_COMMAND_DB` | Durable command idempotency/result SQLite path | `muxport-commands.db` |
+| `MUXPORT_PAIRING_DB` | Pairing challenges and signed device registry SQLite path | `muxport-pairing.db` |
 | `MUXPORT_HOST_ID` | Optional stable logical host ID; must match persisted state | generated once |
 | `MUXPORT_HOSTNAME` | Display hostname | OS hostname or `unnamed-host` |
 | `MUXPORT_OPENCODE_URL` | OpenCode server base URL | `http://127.0.0.1:4096` |
