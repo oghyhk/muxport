@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
+const MAX_PENDING_OFFERS: usize = 8;
+
 #[derive(Error, Debug)]
 pub enum PairingCoordinatorError {
     #[error(transparent)]
@@ -23,6 +25,8 @@ pub enum PairingCoordinatorError {
     InvalidConfiguration,
     #[error("pairing offer is unknown, expired, or no longer active")]
     OfferUnavailable,
+    #[error("too many pairing offers are already active")]
+    OfferCapacityReached,
 }
 
 struct PendingOffer {
@@ -94,6 +98,9 @@ impl PairingCoordinator {
         ttl: Duration,
     ) -> Result<SignedPairingOffer, PairingCoordinatorError> {
         self.discard_expired_offers(chrono::Utc::now().timestamp_millis());
+        if self.pending_offers.len() >= MAX_PENDING_OFFERS {
+            return Err(PairingCoordinatorError::OfferCapacityReached);
+        }
         let key_pair = KeyPair::generate();
         let ephemeral_public_key_hex = encode_hex(key_pair.public.as_bytes());
         let offer = self.store.create_signed_offer(
@@ -139,6 +146,32 @@ impl PairingCoordinator {
             .pending_offers
             .remove(&initiator.challenge)
             .ok_or(PairingCoordinatorError::OfferUnavailable)?;
+        let rendezvous_token = initiator.challenge.clone();
+        let result = self.finish_claim(pending, initiator, verified, device_name);
+        if result.is_err() {
+            // The X25519 secret has been consumed or dropped, so the durable
+            // token must not continue to advertise a claimable offer.
+            let _ = self.store.cancel_by_token(&rendezvous_token);
+        }
+        result
+    }
+
+    pub fn cancel_offer(
+        &mut self,
+        rendezvous_token: &str,
+    ) -> Result<bool, PairingCoordinatorError> {
+        let removed = self.pending_offers.remove(rendezvous_token).is_some();
+        let cancelled = self.store.cancel_by_token(rendezvous_token)?;
+        Ok(removed || cancelled)
+    }
+
+    fn finish_claim(
+        &mut self,
+        pending: PendingOffer,
+        initiator: &InitiatorHello,
+        verified: muxport_crypto::VerifiedInitiator,
+        device_name: &str,
+    ) -> Result<PairingClaimResult, PairingCoordinatorError> {
         let KeyPair { secret, public } = pending.key_pair;
         let responder = create_responder_hello(
             &self.host_identity,
@@ -360,6 +393,49 @@ mod tests {
         coordinator.claim(&valid, "Phone").unwrap();
         assert!(matches!(
             coordinator.claim(&valid, "Phone"),
+            Err(PairingCoordinatorError::OfferUnavailable)
+        ));
+    }
+
+    #[test]
+    fn active_offer_cap_and_cancellation_bound_pairing_resources() {
+        let (mut coordinator, _) = coordinator();
+        let mut offers = Vec::new();
+        for _ in 0..MAX_PENDING_OFFERS {
+            offers.push(
+                coordinator
+                    .create_offer(Duration::from_secs(60))
+                    .unwrap(),
+            );
+        }
+        assert!(matches!(
+            coordinator.create_offer(Duration::from_secs(60)),
+            Err(PairingCoordinatorError::OfferCapacityReached)
+        ));
+
+        let cancelled = &offers[0];
+        assert!(coordinator
+            .cancel_offer(&cancelled.rendezvous_token)
+            .unwrap());
+        assert!(!coordinator
+            .cancel_offer(&cancelled.rendezvous_token)
+            .unwrap());
+        coordinator
+            .create_offer(Duration::from_secs(60))
+            .unwrap();
+
+        let device_identity = SigningKey::generate(&mut OsRng);
+        let device_ephemeral = KeyPair::generate();
+        let initiator = create_initiator_hello(
+            &device_identity,
+            "phone-1",
+            "host-1",
+            &cancelled.rendezvous_token,
+            &device_ephemeral.public,
+        )
+        .unwrap();
+        assert!(matches!(
+            coordinator.claim(&initiator, "Phone"),
             Err(PairingCoordinatorError::OfferUnavailable)
         ));
     }

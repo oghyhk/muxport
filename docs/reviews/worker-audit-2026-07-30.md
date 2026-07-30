@@ -466,7 +466,7 @@ and Rust. It fixes the directional HKDF output, session AAD, generated protobuf
 bytes, ChaCha20-Poly1305 ciphertext, ordered nonce, and `MUX1` frame bytes.
 After this slice, the complete mobile suite passes 37 tests and
 `flutter analyze` reports no issues on Windows. The locked Rust workspace
-passes 100 tests on the Linux verification checkout. Rustfmt and clippy remain
+passes 101 tests on the Linux verification checkout. Rustfmt and clippy remain
 unavailable there and are not claimed.
 
 ## Signed first-trust pairing offer
@@ -491,6 +491,10 @@ authenticated transcript rather than accepting a network-provided value.
 Tests prove an invalid signature does not consume the offer, a valid claim is
 single-use, both sides derive the same SAS, one-sided confirmation cannot
 finalize, and dual confirmation updates the signed registry.
+
+Active offers are capped at eight. Cancellation removes both the ephemeral
+secret and durable token state idempotently, and a post-consumption claim
+failure cancels the durable offer so it cannot falsely appear recoverable.
 
 ## Major work still required
 

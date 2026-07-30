@@ -580,6 +580,24 @@ impl PairingStore {
         )?;
         Ok(changed == 1)
     }
+
+    pub fn cancel_by_token(
+        &mut self,
+        rendezvous_token: &str,
+    ) -> Result<bool, PairingStoreError> {
+        let hash = token_hash(rendezvous_token);
+        let changed = self.conn.execute(
+            "UPDATE pairing_sessions SET state_code = ?1
+             WHERE token_hash = ?2 AND state_code IN (?3, ?4)",
+            params![
+                STATE_CANCELLED,
+                hash.as_slice(),
+                STATE_OFFERED,
+                STATE_CLAIMED
+            ],
+        )?;
+        Ok(changed == 1)
+    }
 }
 
 fn load_registry_tx(

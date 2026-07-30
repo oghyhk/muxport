@@ -44,6 +44,12 @@ The phone independently derives its value. The coordinator delegates the two
 idempotent confirmations and final registry transaction to the durable pairing
 store.
 
+No more than eight offers may be active at once. Explicit cancellation removes
+the process-memory secret and cancels the durable token idempotently. If a
+valid claim consumes or drops its X25519 secret but later processing fails,
+the coordinator also cancels the durable offer rather than leaving it
+apparently claimable.
+
 ## Missing live path
 
 The connector does not yet expose coordinator offer creation, claim, or
