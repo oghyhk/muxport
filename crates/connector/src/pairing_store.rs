@@ -1,7 +1,7 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use muxport_crypto::{
     CryptoError, DeviceRegistry, PairedDeviceRecord, QrPairingPayload,
-    VerifiedInitiator,
+    SignedPairingOffer, VerifiedInitiator,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -196,7 +196,9 @@ impl PairingStore {
         ttl: Duration,
     ) -> Result<QrPairingPayload, PairingStoreError> {
         if host_id.trim().is_empty()
+            || host_id.len() > 256
             || hostname.trim().is_empty()
+            || hostname.len() > 256
             || !valid_hex_32(ephemeral_public_key_hex)
             || ttl.is_zero()
             || ttl > MAX_PAIRING_TTL
@@ -240,6 +242,53 @@ impl PairingStore {
             ephemeral_pubkey_hex: ephemeral_public_key_hex.to_owned(),
             expires_at_ms,
         })
+    }
+
+    /// Creates the self-verifying payload that may be encoded into the host's
+    /// pairing QR. The identity carried by this offer is only persisted as a
+    /// phone-side pin after both devices compare and confirm the derived SAS.
+    pub fn create_signed_offer(
+        &mut self,
+        host_id: &str,
+        hostname: &str,
+        direct_endpoint: &str,
+        ephemeral_public_key_hex: &str,
+        ttl: Duration,
+        host_identity: &SigningKey,
+    ) -> Result<SignedPairingOffer, PairingStoreError> {
+        let endpoint: std::net::SocketAddr = direct_endpoint
+            .parse()
+            .map_err(|_| PairingStoreError::InvalidOffer)?;
+        if direct_endpoint.len() > 512
+            || endpoint.ip().is_unspecified()
+            || endpoint.port() == 0
+        {
+            return Err(PairingStoreError::InvalidOffer);
+        }
+        let payload = self.create_offer(
+            host_id,
+            hostname,
+            ephemeral_public_key_hex,
+            ttl,
+        )?;
+        let ttl_ms: i64 = ttl
+            .as_millis()
+            .try_into()
+            .map_err(|_| PairingStoreError::InvalidOffer)?;
+        let issued_at_ms = payload
+            .expires_at_ms
+            .checked_sub(ttl_ms)
+            .ok_or(PairingStoreError::InvalidOffer)?;
+        Ok(SignedPairingOffer::create(
+            host_identity,
+            &payload.host_id,
+            &payload.hostname,
+            direct_endpoint,
+            &payload.rendezvous_token,
+            &payload.ephemeral_pubkey_hex,
+            issued_at_ms,
+            payload.expires_at_ms,
+        )?)
     }
 
     /// Claims a token only after the caller has produced a
@@ -591,7 +640,9 @@ fn sas_hash(pairing_id: &str, sas: &str) -> [u8; 32] {
 
 fn valid_hex_32(value: &str) -> bool {
     value.len() == 64
-        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+        })
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -703,6 +754,42 @@ mod tests {
                 .device_id,
             "phone-1"
         );
+    }
+
+    #[test]
+    fn signed_offer_carries_verifiable_host_pin_and_reachable_endpoint() {
+        let mut store = PairingStore::open_in_memory().unwrap();
+        let host_identity = SigningKey::generate(&mut OsRng);
+        let host_ephemeral = KeyPair::generate();
+        let offer = store
+            .create_signed_offer(
+                "host-1",
+                "Developer workstation",
+                "192.0.2.10:45821",
+                &encode_hex(host_ephemeral.public.as_bytes()),
+                Duration::from_secs(60),
+                &host_identity,
+            )
+            .unwrap();
+        assert_eq!(offer.host_id, "host-1");
+        assert_eq!(offer.direct_endpoint, "192.0.2.10:45821");
+        assert_eq!(
+            offer
+                .verify(chrono::Utc::now().timestamp_millis())
+                .unwrap(),
+            host_identity.verifying_key()
+        );
+        assert!(matches!(
+            store.create_signed_offer(
+                "host-1",
+                "Developer workstation",
+                "0.0.0.0:45821",
+                &encode_hex(host_ephemeral.public.as_bytes()),
+                Duration::from_secs(60),
+                &host_identity,
+            ),
+            Err(PairingStoreError::InvalidOffer)
+        ));
     }
 
     #[test]

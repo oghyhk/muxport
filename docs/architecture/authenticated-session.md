@@ -23,6 +23,12 @@ transcript-bound six-digit SAS out of band. Pairing-token generation,
 single-use consumption, expiry, and confirmation state are persisted in a
 dedicated SQLite/WAL store.
 
+The QR model now self-signs the host identity, direct endpoint, single-use
+token, ephemeral X25519 key, and validity window. The Flutter parser verifies
+that signature before treating the included host key as a candidate pin.
+Candidate trust is not persisted until the later SAS comparison. See
+`signed-pairing-offer.md`.
+
 Only a SHA-256 domain-separated hash of each 256-bit rendezvous token is stored.
 Claiming uses an immediate transaction and accepts a signed
 `VerifiedInitiator` exactly once. The phone and host confirmations are recorded
@@ -78,7 +84,7 @@ long-term host Ed25519 seed is stored through Windows Credential Manager,
 macOS Keychain Services, or Linux Secret Service and matched to a public-key
 pin in the pairing database. A locked/unavailable store or pin mismatch disables
 pairing without a plaintext fallback. Headless unlock/recovery backends and the
-actual QR/SAS UI remain pending.
+live offer/claim/confirmation transport plus QR/SAS UI remain pending.
 
 ## Direct listener boundary
 

@@ -22,6 +22,10 @@ pub enum CryptoError {
     InvalidKeyLength,
     #[error("Pairing token expired or invalid")]
     InvalidPairingToken,
+    #[error("Signed pairing offer is invalid")]
+    InvalidPairingOffer,
+    #[error("Signed pairing offer has expired")]
+    ExpiredPairingOffer,
     #[error("Encrypted frame sequence was replayed or arrived out of order")]
     ReplayDetected,
     #[error("Encrypted frame sequence exhausted")]

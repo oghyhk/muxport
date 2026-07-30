@@ -12,6 +12,157 @@ pub const HANDSHAKE_PROTOCOL_VERSION: u32 = 1;
 const INITIATOR_DOMAIN: &[u8] = b"muxport-initiator-hello-v1";
 const RESPONDER_DOMAIN: &[u8] = b"muxport-responder-hello-v1";
 const TRANSCRIPT_DOMAIN: &[u8] = b"muxport-authenticated-transcript-v1";
+const PAIRING_OFFER_DOMAIN: &[u8] = b"muxport-pairing-offer-v1";
+const MAX_PAIRING_OFFER_LIFETIME_MS: i64 = 10 * 60 * 1000;
+const PAIRING_OFFER_CLOCK_SKEW_MS: i64 = 60 * 1000;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedPairingOffer {
+    pub protocol_version: u32,
+    pub host_id: String,
+    pub hostname: String,
+    pub host_identity_public_key_hex: String,
+    pub direct_endpoint: String,
+    pub rendezvous_token: String,
+    pub ephemeral_public_key_hex: String,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub signature_hex: String,
+}
+
+impl SignedPairingOffer {
+    pub fn create(
+        host_identity: &SigningKey,
+        host_id: &str,
+        hostname: &str,
+        direct_endpoint: &str,
+        rendezvous_token: &str,
+        ephemeral_public_key_hex: &str,
+        issued_at_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<Self, CryptoError> {
+        let mut offer = Self {
+            protocol_version: HANDSHAKE_PROTOCOL_VERSION,
+            host_id: host_id.to_owned(),
+            hostname: hostname.to_owned(),
+            host_identity_public_key_hex: encode_hex(
+                host_identity.verifying_key().as_bytes(),
+            ),
+            direct_endpoint: direct_endpoint.to_owned(),
+            rendezvous_token: rendezvous_token.to_owned(),
+            ephemeral_public_key_hex: ephemeral_public_key_hex.to_owned(),
+            issued_at_ms,
+            expires_at_ms,
+            signature_hex: String::new(),
+        };
+        offer.validate_fields()?;
+        offer.signature_hex =
+            encode_hex(&host_identity.sign(&offer.signed_bytes()?).to_bytes());
+        Ok(offer)
+    }
+
+    /// Verifies the offer's self-signature and validity window. The returned
+    /// key is a candidate pin: callers must still complete the displayed SAS
+    /// comparison before persisting trust.
+    pub fn verify(
+        &self,
+        now_ms: i64,
+    ) -> Result<VerifyingKey, CryptoError> {
+        self.validate_fields()?;
+        if now_ms
+            < self
+                .issued_at_ms
+                .saturating_sub(PAIRING_OFFER_CLOCK_SKEW_MS)
+        {
+            return Err(CryptoError::InvalidPairingOffer);
+        }
+        if now_ms
+            > self
+                .expires_at_ms
+                .saturating_add(PAIRING_OFFER_CLOCK_SKEW_MS)
+        {
+            return Err(CryptoError::ExpiredPairingOffer);
+        }
+        let identity_bytes =
+            parse_hex::<32>(&self.host_identity_public_key_hex)?;
+        let identity = VerifyingKey::from_bytes(&identity_bytes)
+            .map_err(|_| CryptoError::InvalidPairingOffer)?;
+        let signature_bytes = parse_hex::<64>(&self.signature_hex)?;
+        identity
+            .verify(
+                &self.signed_bytes()?,
+                &Signature::from_bytes(&signature_bytes),
+            )
+            .map_err(|_| CryptoError::InvalidHandshakeSignature)?;
+        Ok(identity)
+    }
+
+    fn validate_fields(&self) -> Result<(), CryptoError> {
+        let lifetime = self
+            .expires_at_ms
+            .checked_sub(self.issued_at_ms)
+            .ok_or(CryptoError::InvalidPairingOffer)?;
+        if self.protocol_version != HANDSHAKE_PROTOCOL_VERSION
+            || self.host_id.trim().is_empty()
+            || self.host_id.len() > 256
+            || self.hostname.trim().is_empty()
+            || self.hostname.len() > 256
+            || self.direct_endpoint.trim().is_empty()
+            || self.direct_endpoint.len() > 512
+            || lifetime <= 0
+            || lifetime > MAX_PAIRING_OFFER_LIFETIME_MS
+        {
+            return Err(CryptoError::InvalidPairingOffer);
+        }
+        let host_identity =
+            parse_hex::<32>(&self.host_identity_public_key_hex)
+                .map_err(|_| CryptoError::InvalidPairingOffer)?;
+        let rendezvous_token = parse_hex::<32>(&self.rendezvous_token)
+            .map_err(|_| CryptoError::InvalidPairingOffer)?;
+        let ephemeral_public =
+            parse_hex::<32>(&self.ephemeral_public_key_hex)
+                .map_err(|_| CryptoError::InvalidPairingOffer)?;
+        if self.host_identity_public_key_hex != encode_hex(&host_identity)
+            || self.rendezvous_token != encode_hex(&rendezvous_token)
+            || self.ephemeral_public_key_hex != encode_hex(&ephemeral_public)
+        {
+            return Err(CryptoError::InvalidPairingOffer);
+        }
+        if !self.signature_hex.is_empty() {
+            let signature = parse_hex::<64>(&self.signature_hex)
+                .map_err(|_| CryptoError::InvalidPairingOffer)?;
+            if self.signature_hex != encode_hex(&signature) {
+                return Err(CryptoError::InvalidPairingOffer);
+            }
+        }
+        Ok(())
+    }
+
+    fn signed_bytes(&self) -> Result<Vec<u8>, CryptoError> {
+        let mut claim = Vec::new();
+        push_field(&mut claim, PAIRING_OFFER_DOMAIN)?;
+        claim.extend_from_slice(&self.protocol_version.to_be_bytes());
+        push_field(&mut claim, self.host_id.as_bytes())?;
+        push_field(&mut claim, self.hostname.as_bytes())?;
+        push_field(
+            &mut claim,
+            &parse_hex::<32>(&self.host_identity_public_key_hex)?,
+        )?;
+        push_field(&mut claim, self.direct_endpoint.as_bytes())?;
+        push_field(
+            &mut claim,
+            &parse_hex::<32>(&self.rendezvous_token)?,
+        )?;
+        push_field(
+            &mut claim,
+            &parse_hex::<32>(&self.ephemeral_public_key_hex)?,
+        )?;
+        claim.extend_from_slice(&self.issued_at_ms.to_be_bytes());
+        claim.extend_from_slice(&self.expires_at_ms.to_be_bytes());
+        Ok(claim)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -495,6 +646,49 @@ mod tests {
                 &registry
             ),
             Err(CryptoError::DeviceIdentityConflict)
+        ));
+    }
+
+    #[test]
+    fn signed_pairing_offer_binds_identity_endpoint_and_expiry() {
+        let host_identity = SigningKey::generate(&mut OsRng);
+        let host_ephemeral = KeyPair::generate();
+        let now = 1_700_000_000_000_i64;
+        let offer = SignedPairingOffer::create(
+            &host_identity,
+            "host-1",
+            "Developer workstation",
+            "192.0.2.10:45821",
+            &encode_hex(&[7_u8; 32]),
+            &encode_hex(host_ephemeral.public.as_bytes()),
+            now,
+            now + 60_000,
+        )
+        .unwrap();
+        assert_eq!(
+            offer.verify(now).unwrap(),
+            host_identity.verifying_key()
+        );
+
+        let mut changed_endpoint = offer.clone();
+        changed_endpoint.direct_endpoint = "attacker.example:45821".into();
+        assert!(matches!(
+            changed_endpoint.verify(now),
+            Err(CryptoError::InvalidHandshakeSignature)
+        ));
+
+        let mut extended_expiry = offer.clone();
+        extended_expiry.expires_at_ms += 1;
+        assert!(matches!(
+            extended_expiry.verify(now),
+            Err(CryptoError::InvalidHandshakeSignature)
+        ));
+
+        assert!(matches!(
+            offer.verify(
+                offer.expires_at_ms + PAIRING_OFFER_CLOCK_SKEW_MS + 1
+            ),
+            Err(CryptoError::ExpiredPairingOffer)
         ));
     }
 }

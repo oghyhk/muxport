@@ -464,10 +464,25 @@ disabled.
 The committed direct-session golden vector is independently accepted by Dart
 and Rust. It fixes the directional HKDF output, session AAD, generated protobuf
 bytes, ChaCha20-Poly1305 ciphertext, ordered nonce, and `MUX1` frame bytes.
-After this slice, the complete mobile suite passes 35 tests and
+After this slice, the complete mobile suite passes 37 tests and
 `flutter analyze` reports no issues on Windows. The locked Rust workspace
-passes 96 tests on the Linux verification checkout. Rustfmt and clippy remain
+passes 98 tests on the Linux verification checkout. Rustfmt and clippy remain
 unavailable there and are not claimed.
+
+## Signed first-trust pairing offer
+
+The previous unsigned QR model was not sufficient to bootstrap the mobile
+host pin or route. Rust can now create a short-lived, self-signed offer binding
+the host ID, display name, long-term Ed25519 identity, concrete direct
+endpoint, 256-bit rendezvous token, ephemeral X25519 key, and validity window.
+The Flutter verifier independently rejects unknown/malformed fields, endpoint
+or expiry tampering, excessive lifetime, and invalid signatures.
+
+The embedded host key remains a candidate only; it must not be persisted until
+the transcript-derived SAS matches on both physical devices. Offer/claim
+transport, ephemeral-secret coordination, dual-confirmation UI, registry
+refresh, cancellation, and rate limiting are not wired, so pairing is still
+not usable end to end.
 
 ## Major work still required
 
