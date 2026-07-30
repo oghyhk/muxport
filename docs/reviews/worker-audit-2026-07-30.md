@@ -282,6 +282,26 @@ database and restores the projection on the second run.
 After this slice, `cargo test --locked --workspace --all-targets` passes 79
 tests on the clean Linux verification checkout.
 
+## OS-protected host identity and pin
+
+The connector's long-term Ed25519 seed now has a versioned native-secret-store
+implementation for Windows Credential Manager, macOS Keychain Services, and
+Linux Secret Service. New keys are generated randomly, read back before use,
+and held without a plaintext-file fallback. Temporary serialized secret bytes
+are zeroized.
+
+The pairing database separately pins the logical host ID and public key. A
+legacy signed registry must verify before receiving its first pin, and later
+host-ID or key replacement is rejected. If the native store is unavailable or
+the pin mismatches, the daemon continues local non-secret mirroring while
+keeping authenticated pairing disabled.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 85
+tests on the clean Linux verification checkout. A forced-invalid Secret Service
+endpoint smoke verifies locked-store startup, shutdown, and projection restore.
+Native desktop integration tests and reviewed headless unlock/recovery backends
+remain required.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
@@ -289,9 +309,9 @@ tests on the clean Linux verification checkout.
 - Add Codex compatibility fixtures across supported CLI versions and cover
   permission-profile/tool/MCP request shapes where the mobile protocol can
   represent them safely.
-- Implement OS-protected durable host identity and its unlock/recovery flow,
-  then expose the existing authenticated pairing and revocation primitives
-  through a bounded transport endpoint and physical QR/SAS interface.
+- Add reviewed headless host-identity unlock/recovery and rotation flows, then
+  expose the existing authenticated pairing and revocation primitives through
+  a bounded transport endpoint and physical QR/SAS interface.
 - Bind the encrypted persistent credential vault to OS key storage and connect
   its atomic stage/validate/activate/rollback operations to provider-specific
   managed runtimes.

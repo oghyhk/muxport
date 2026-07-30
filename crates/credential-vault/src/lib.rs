@@ -1,3 +1,10 @@
+mod host_identity;
+
+pub use host_identity::{
+    HostIdentityError, HostIdentityManager, HostIdentitySecretStore,
+    LoadedHostIdentity, OsHostIdentityStore,
+};
+
 use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;

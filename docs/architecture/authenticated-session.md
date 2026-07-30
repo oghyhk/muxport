@@ -74,6 +74,9 @@ version, record key validity, and duplicate device IDs. Revoked identities
 cannot be silently re-registered.
 
 The signed registry is now stored atomically in the pairing database. The
-connector still needs OS-protected storage and unlock behavior for the host
-private identity key, plus the actual QR/SAS UI. No plaintext private-key file
-or unauthenticated listener is introduced by this slice.
+long-term host Ed25519 seed is stored through Windows Credential Manager,
+macOS Keychain Services, or Linux Secret Service and matched to a public-key
+pin in the pairing database. A locked/unavailable store or pin mismatch disables
+pairing without a plaintext fallback. Headless unlock/recovery backends and the
+actual QR/SAS UI remain pending. No unauthenticated listener is introduced by
+this slice.

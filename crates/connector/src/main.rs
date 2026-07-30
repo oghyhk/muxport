@@ -5,8 +5,9 @@ use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
-    InstanceLock, PairingStore, RuntimeMirror,
+    InstanceLock, PairingStore, PairingStoreError, RuntimeMirror,
 };
+use credential_vault::{HostIdentityManager, OsHostIdentityStore};
 use event_journal::EventJournal;
 use futures::StreamExt;
 use muxport_protocol::{
@@ -162,8 +163,42 @@ async fn main() -> Result<(), DynError> {
     info!(path = %command_db, "persistent command ledger initialized");
     let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
         .unwrap_or_else(|_| "muxport-pairing.db".into());
-    let _pairing_store = PairingStore::open_sqlite(&pairing_db)?;
+    let mut pairing_store = PairingStore::open_sqlite(&pairing_db)?;
     info!(path = %pairing_db, "persistent pairing store initialized");
+    let host_identity =
+        HostIdentityManager::new(OsHostIdentityStore::new()).load_or_create(&host_id);
+    let _host_identity = match host_identity {
+        Ok(identity) => {
+            let binding = pairing_store.bind_host_identity(
+                &host_id,
+                &identity.signing_key().verifying_key(),
+            );
+            match binding {
+                Ok(_) => {
+                    info!(
+                        created = identity.was_created(),
+                        "OS-protected host identity is available"
+                    );
+                    Some(identity)
+                }
+                Err(PairingStoreError::HostIdentityMismatch) => {
+                    warn!(
+                        "protected host identity does not match its persisted pin; authenticated pairing remains disabled pending explicit recovery"
+                    );
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(error) => {
+            warn!(
+                %error,
+                "host identity is locked; authenticated pairing remains disabled"
+            );
+            None
+        }
+    };
+    let _pairing_store = pairing_store;
 
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

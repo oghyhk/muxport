@@ -1,4 +1,4 @@
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use muxport_crypto::{
     CryptoError, DeviceRegistry, PairedDeviceRecord, QrPairingPayload,
     VerifiedInitiator,
@@ -39,6 +39,8 @@ pub enum PairingStoreError {
     SasMismatch,
     #[error("Pairing requires confirmation from both phone and host")]
     ConfirmationIncomplete,
+    #[error("Persisted host identity does not match the protected signing key")]
+    HostIdentityMismatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +95,12 @@ impl PairingStore {
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 signed_blob BLOB NOT NULL,
                 updated_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS host_identity_pin (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                host_id TEXT NOT NULL,
+                public_key_hex TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
             );",
         )?;
         let now = chrono::Utc::now().timestamp_millis();
@@ -116,6 +124,68 @@ impl PairingStore {
             params![STATE_CANCELLED, STATE_OFFERED, STATE_CLAIMED],
         )?;
         Ok(Self { conn })
+    }
+
+    /// Pins the OS-protected host identity into non-secret local metadata.
+    /// Existing registries are signature-verified before a legacy database can
+    /// acquire its first pin, preventing a missing keyring entry from silently
+    /// replacing an identity that already paired devices.
+    pub fn bind_host_identity(
+        &mut self,
+        host_id: &str,
+        verifying_key: &VerifyingKey,
+    ) -> Result<bool, PairingStoreError> {
+        if host_id.trim().is_empty() {
+            return Err(PairingStoreError::HostIdentityMismatch);
+        }
+        let public_key_hex = encode_hex(verifying_key.as_bytes());
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT host_id, public_key_hex FROM host_identity_pin
+                 WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((pinned_host_id, pinned_public_key)) = existing {
+            if pinned_host_id != host_id || pinned_public_key != public_key_hex {
+                return Err(PairingStoreError::HostIdentityMismatch);
+            }
+            return Ok(false);
+        }
+
+        let signed_registry: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT signed_blob FROM signed_device_registry
+                 WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(signed_registry) = signed_registry {
+            DeviceRegistry::from_signed_snapshot(
+                &signed_registry,
+                host_id,
+                verifying_key,
+            )
+            .map_err(|_| PairingStoreError::HostIdentityMismatch)?;
+        }
+
+        tx.execute(
+            "INSERT INTO host_identity_pin
+                (singleton, host_id, public_key_hex, created_at_ms)
+             VALUES (1, ?1, ?2, ?3)",
+            params![
+                host_id,
+                public_key_hex,
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn create_offer(
@@ -814,5 +884,54 @@ mod tests {
             ),
             Err(PairingStoreError::InvalidOrConsumedToken)
         ));
+    }
+
+    #[test]
+    fn host_identity_pin_rejects_replacement_or_host_change() {
+        let mut store = PairingStore::open_in_memory().unwrap();
+        let first = SigningKey::generate(&mut OsRng);
+        let replacement = SigningKey::generate(&mut OsRng);
+
+        assert!(store
+            .bind_host_identity("host-1", &first.verifying_key())
+            .unwrap());
+        assert!(!store
+            .bind_host_identity("host-1", &first.verifying_key())
+            .unwrap());
+        assert!(matches!(
+            store.bind_host_identity("host-1", &replacement.verifying_key()),
+            Err(PairingStoreError::HostIdentityMismatch)
+        ));
+        assert!(matches!(
+            store.bind_host_identity("host-2", &first.verifying_key()),
+            Err(PairingStoreError::HostIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn legacy_signed_registry_must_verify_before_first_identity_pin() {
+        let mut store = PairingStore::open_in_memory().unwrap();
+        let host_identity = SigningKey::generate(&mut OsRng);
+        let replacement = SigningKey::generate(&mut OsRng);
+        let device_identity = SigningKey::generate(&mut OsRng);
+        let (pairing_id, _) =
+            claim_pairing(&mut store, "host-1", &device_identity);
+        store
+            .confirm_sas(&pairing_id, "123456", ConfirmingParty::Phone)
+            .unwrap();
+        store
+            .confirm_sas(&pairing_id, "123456", ConfirmingParty::Host)
+            .unwrap();
+        store
+            .finalize(&pairing_id, "host-1", &host_identity)
+            .unwrap();
+
+        assert!(matches!(
+            store.bind_host_identity("host-1", &replacement.verifying_key()),
+            Err(PairingStoreError::HostIdentityMismatch)
+        ));
+        assert!(store
+            .bind_host_identity("host-1", &host_identity.verifying_key())
+            .unwrap());
     }
 }
