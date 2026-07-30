@@ -98,10 +98,14 @@ async fn main() -> Result<(), DynError> {
     let codex_path = nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
     let codex = CodexAdapter::new(codex_path);
     match codex.probe().await {
-        Ok(_) => warn!(
-            "Codex App Server executable is present, but its protocol adapter remains fail-closed"
+        Ok(_) => info!(
+            version = ?codex.observed_version()?,
+            "Codex App Server adapter is available; durable daemon mirroring is pending"
         ),
         Err(error) => warn!(%error, "Codex runtime is unavailable"),
+    }
+    if let Err(error) = codex.shutdown_gracefully().await {
+        warn!(%error, "Codex probe process did not shut down cleanly");
     }
 
     warn!(
