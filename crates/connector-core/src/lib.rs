@@ -105,6 +105,12 @@ pub struct CommandLedger {
     executed_commands: HashMap<String, (RemoteOpState, String)>,
 }
 
+impl Default for CommandLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandLedger {
     pub fn new() -> Self {
         Self {
@@ -112,7 +118,13 @@ impl CommandLedger {
         }
     }
 
-    pub fn check_or_record(&mut self, idempotency_key: &str, deadline_ms: i64) -> Result<Option<(RemoteOpState, String)>, CoreError> {
+    /// Returns the prior result for a duplicate command, or reserves a new key
+    /// in `Created` state before the caller performs any side effect.
+    pub fn check_or_record(
+        &mut self,
+        idempotency_key: &str,
+        deadline_ms: i64,
+    ) -> Result<Option<(RemoteOpState, String)>, CoreError> {
         let now = chrono::Utc::now().timestamp_millis();
         if deadline_ms > 0 && now > deadline_ms {
             return Err(CoreError::CommandExpired);
@@ -121,12 +133,22 @@ impl CommandLedger {
         if let Some(prev) = self.executed_commands.get(idempotency_key) {
             Ok(Some(prev.clone()))
         } else {
+            self.executed_commands.insert(
+                idempotency_key.to_owned(),
+                (RemoteOpState::Created, String::new()),
+            );
             Ok(None)
         }
     }
 
-    pub fn record_result(&mut self, idempotency_key: String, state: RemoteOpState, result_json: String) {
-        self.executed_commands.insert(idempotency_key, (state, result_json));
+    pub fn record_result(
+        &mut self,
+        idempotency_key: String,
+        state: RemoteOpState,
+        result_json: String,
+    ) {
+        self.executed_commands
+            .insert(idempotency_key, (state, result_json));
     }
 }
 
@@ -160,5 +182,41 @@ mod tests {
         let actions = DesiredObservedReconciler::reconcile(&desired, &observed);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], "switch_profile:opencode-1:profile-b");
+    }
+
+    #[test]
+    fn command_ledger_reserves_before_execution_and_returns_prior_result() {
+        let mut ledger = CommandLedger::new();
+
+        assert_eq!(ledger.check_or_record("command-1", 0).unwrap(), None);
+        assert_eq!(
+            ledger.check_or_record("command-1", 0).unwrap(),
+            Some((RemoteOpState::Created, String::new()))
+        );
+
+        ledger.record_result(
+            "command-1".into(),
+            RemoteOpState::Succeeded,
+            r#"{"ok":true}"#.into(),
+        );
+        assert_eq!(
+            ledger.check_or_record("command-1", 0).unwrap(),
+            Some((RemoteOpState::Succeeded, r#"{"ok":true}"#.into()))
+        );
+    }
+
+    #[test]
+    fn command_ledger_rejects_expired_commands_without_reserving_them() {
+        let mut ledger = CommandLedger::new();
+        let expired = chrono::Utc::now().timestamp_millis() - 1;
+
+        assert!(matches!(
+            ledger.check_or_record("expired-command", expired),
+            Err(CoreError::CommandExpired)
+        ));
+        assert_eq!(
+            ledger.check_or_record("expired-command", 0).unwrap(),
+            None
+        );
     }
 }

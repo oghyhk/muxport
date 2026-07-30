@@ -13,7 +13,7 @@ class ApprovalInboxScreen extends StatelessWidget {
         padding: const EdgeInsets.all(16.0),
         children: [
           Card(
-            color: Colors.amber.withOpacity(0.1),
+            color: Colors.amber.withValues(alpha: 0.1),
             shape: RoundedRectangleBorder(
               side: const BorderSide(color: Colors.amber, width: 1),
               borderRadius: BorderRadius.circular(12),

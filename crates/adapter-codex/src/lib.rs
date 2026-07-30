@@ -1,23 +1,30 @@
-use adapter_api::{AdapterError, AgentAdapter, CapabilitySet, EventStream, ProjectInfo, SessionSummary};
-use async_trait::async_trait;
-use futures::stream;
-use muxport_protocol::{
-    event::Inner, AgentType, CredentialStatus, Event, StreamDeltaEvent,
+use adapter_api::{
+    AdapterError, AgentAdapter, CapabilitySet, EventStream, ProjectInfo, SessionSummary,
 };
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use async_trait::async_trait;
+use muxport_protocol::{AgentType, CredentialStatus};
+use tokio::process::Command;
 
+/// Conservative Codex App Server adapter scaffold.
+///
+/// `probe` verifies that the configured CLI exposes `app-server`; all protocol
+/// operations fail closed until the generated, version-matched JSON-RPC schema
+/// is wired into this crate.
 pub struct CodexAdapter {
     cmd_path: String,
-    active_profile_id: Arc<Mutex<String>>,
 }
 
 impl CodexAdapter {
     pub fn new(cmd_path: impl Into<String>) -> Self {
         Self {
             cmd_path: cmd_path.into(),
-            active_profile_id: Arc::new(Mutex::new("default-codex-profile".to_string())),
         }
+    }
+
+    fn unsupported(operation: &str) -> AdapterError {
+        AdapterError::Unsupported(format!(
+            "Codex App Server {operation} is not implemented by this connector build"
+        ))
     }
 }
 
@@ -28,86 +35,104 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn probe(&self) -> Result<CapabilitySet, AdapterError> {
+        let output = Command::new(&self.cmd_path)
+            .args(["app-server", "--help"])
+            .output()
+            .await
+            .map_err(|error| AdapterError::InitFailed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(AdapterError::InitFailed(format!(
+                "`{} app-server --help` exited with {}",
+                self.cmd_path, output.status
+            )));
+        }
+
         Ok(CapabilitySet {
-            can_stream_deltas: true,
-            can_approve_commands: true,
-            can_approve_edits: true,
-            can_interrupt: true,
-            can_switch_credentials_live: true,
-            can_read_usage: true,
+            can_stream_deltas: false,
+            can_approve_commands: false,
+            can_approve_edits: false,
+            can_interrupt: false,
+            can_switch_credentials_live: false,
+            can_read_usage: false,
         })
     }
 
     async fn discover_projects(&self) -> Result<Vec<ProjectInfo>, AdapterError> {
-        Ok(vec![ProjectInfo {
-            path: "/workspace/muxport".into(),
-            name: "muxport".into(),
-        }])
+        Err(Self::unsupported("project discovery"))
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError> {
-        let profile = self.active_profile_id.lock().await.clone();
-        Ok(vec![SessionSummary {
-            session_id: "codex-thread-1".into(),
-            title: "Codex Code Generation".into(),
-            status: "idle".into(),
-            credential_profile_id: profile,
-            created_at_ms: 1700000000000,
-        }])
+        Err(Self::unsupported("session listing"))
     }
 
     async fn subscribe_events(&self) -> Result<EventStream, AdapterError> {
-        let events = vec![
-            Ok(Event {
-                event_id: "evt-codex-1".into(),
-                timestamp_ms: 1700000000002,
-                inner: Some(Inner::StreamDelta(StreamDeltaEvent {
-                    session_id: "codex-thread-1".into(),
-                    turn_id: "turn-1".into(),
-                    delta_text: "Processing prompt in Codex...".into(),
-                    is_final: false,
-                })),
-            }),
-        ];
-        Ok(Box::pin(stream::iter(events)))
+        Err(Self::unsupported("event streaming"))
     }
 
-    async fn start_session(&self, _project_path: &str, _prompt: &str, _profile_id: &str) -> Result<String, AdapterError> {
-        let thread_id = format!("codex-thread-{}", uuid::Uuid::new_v4());
-        Ok(thread_id)
+    async fn start_session(
+        &self,
+        _project_path: &str,
+        _prompt: &str,
+        _profile_id: &str,
+    ) -> Result<String, AdapterError> {
+        Err(Self::unsupported("session creation"))
     }
 
     async fn send_input(&self, _session_id: &str, _text: &str) -> Result<(), AdapterError> {
-        Ok(())
+        Err(Self::unsupported("send input"))
     }
 
     async fn steer(&self, _session_id: &str, _instruction: &str) -> Result<(), AdapterError> {
-        Ok(())
+        Err(Self::unsupported("steering"))
     }
 
     async fn interrupt(&self, _session_id: &str, _reason: &str) -> Result<(), AdapterError> {
-        Ok(())
+        Err(Self::unsupported("interrupt"))
     }
 
-    async fn respond_approval(&self, _approval_id: &str, _approved: bool, _reason: &str) -> Result<(), AdapterError> {
-        Ok(())
+    async fn respond_approval(
+        &self,
+        _approval_id: &str,
+        _approved: bool,
+        _reason: &str,
+    ) -> Result<(), AdapterError> {
+        Err(Self::unsupported("approval response"))
     }
 
-    async fn validate_credential(&self, secret_payload: &str) -> Result<CredentialStatus, AdapterError> {
-        if secret_payload.is_empty() || secret_payload.contains("invalid") {
-            Ok(CredentialStatus::Invalid)
-        } else {
-            Ok(CredentialStatus::Active)
-        }
+    async fn validate_credential(
+        &self,
+        _secret_payload: &str,
+    ) -> Result<CredentialStatus, AdapterError> {
+        Err(Self::unsupported("credential validation"))
     }
 
-    async fn activate_credential(&self, profile_id: &str, _secret_payload: &str) -> Result<(), AdapterError> {
-        let mut prof = self.active_profile_id.lock().await;
-        *prof = profile_id.to_string();
-        Ok(())
+    async fn activate_credential(
+        &self,
+        _profile_id: &str,
+        _secret_payload: &str,
+    ) -> Result<(), AdapterError> {
+        Err(Self::unsupported("credential activation"))
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
-        Ok(())
+        Err(Self::unsupported("graceful shutdown"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn protocol_operations_fail_closed() {
+        let adapter = CodexAdapter::new("codex");
+        assert!(matches!(
+            adapter.list_sessions().await,
+            Err(AdapterError::Unsupported(_))
+        ));
+        assert!(matches!(
+            adapter.activate_credential("profile", "secret").await,
+            Err(AdapterError::Unsupported(_))
+        ));
     }
 }

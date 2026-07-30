@@ -24,6 +24,11 @@ class MuxportApp extends StatelessWidget {
         useMaterial3: true,
       ),
       home: const MainNavigationScreen(),
+      builder: (context, child) => Banner(
+        message: 'DEMO DATA',
+        location: BannerLocation.topEnd,
+        child: child ?? const SizedBox.shrink(),
+      ),
       debugShowCheckedModeBanner: false,
     );
   }

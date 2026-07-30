@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey};
+use zeroize::Zeroize;
 
 #[derive(Error, Debug)]
 pub enum CryptoError {
@@ -17,6 +18,10 @@ pub enum CryptoError {
     InvalidKeyLength,
     #[error("Pairing token expired or invalid")]
     InvalidPairingToken,
+    #[error("Encrypted frame sequence was replayed or arrived out of order")]
+    ReplayDetected,
+    #[error("Encrypted frame sequence exhausted")]
+    SequenceExhausted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -31,6 +36,97 @@ pub struct QrPairingPayload {
 pub struct KeyPair {
     pub secret: EphemeralSecret,
     pub public: XPublicKey,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EncryptedFrame {
+    pub sequence: u64,
+    pub ciphertext: Vec<u8>,
+}
+
+/// Ordered transport cipher that derives every nonce from a per-direction
+/// prefix and a monotonic sequence number.
+///
+/// The two peers must use opposite send/receive prefixes. WebSocket delivery is
+/// ordered, so rejecting old sequence numbers prevents replay and accidental
+/// nonce reuse within a session.
+pub struct SessionCipher {
+    key: [u8; 32],
+    send_nonce_prefix: [u8; 4],
+    receive_nonce_prefix: [u8; 4],
+    send_sequence: u64,
+    highest_received_sequence: u64,
+}
+
+impl Drop for SessionCipher {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+impl SessionCipher {
+    pub fn new(
+        key: [u8; 32],
+        send_nonce_prefix: [u8; 4],
+        receive_nonce_prefix: [u8; 4],
+    ) -> Self {
+        Self {
+            key,
+            send_nonce_prefix,
+            receive_nonce_prefix,
+            send_sequence: 0,
+            highest_received_sequence: 0,
+        }
+    }
+
+    pub fn encrypt_next(
+        &mut self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<EncryptedFrame, CryptoError> {
+        let sequence = self
+            .send_sequence
+            .checked_add(1)
+            .ok_or(CryptoError::SequenceExhausted)?;
+        let nonce = frame_nonce(self.send_nonce_prefix, sequence);
+        let bound_aad = frame_aad(sequence, aad);
+        let ciphertext = encrypt_frame(&self.key, &nonce, plaintext, &bound_aad)?;
+        self.send_sequence = sequence;
+        Ok(EncryptedFrame {
+            sequence,
+            ciphertext,
+        })
+    }
+
+    pub fn decrypt_next(
+        &mut self,
+        frame: &EncryptedFrame,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        if frame.sequence <= self.highest_received_sequence {
+            return Err(CryptoError::ReplayDetected);
+        }
+
+        let nonce = frame_nonce(self.receive_nonce_prefix, frame.sequence);
+        let bound_aad = frame_aad(frame.sequence, aad);
+        let plaintext = decrypt_frame(&self.key, &nonce, &frame.ciphertext, &bound_aad)?;
+        self.highest_received_sequence = frame.sequence;
+        Ok(plaintext)
+    }
+}
+
+fn frame_nonce(prefix: [u8; 4], sequence: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[..4].copy_from_slice(&prefix);
+    nonce[4..].copy_from_slice(&sequence.to_be_bytes());
+    nonce
+}
+
+fn frame_aad(sequence: u64, aad: &[u8]) -> Vec<u8> {
+    let mut bound = Vec::with_capacity(8 + aad.len());
+    bound.extend_from_slice(&sequence.to_be_bytes());
+    bound.extend_from_slice(aad);
+    bound
 }
 
 impl KeyPair {
@@ -105,5 +201,36 @@ mod tests {
         let decrypted = decrypt_frame(&bob_shared, &nonce, &ciphertext, aad).unwrap();
 
         assert_eq!(msg.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn session_cipher_uses_ordered_nonces_and_rejects_replay() {
+        let key = [9u8; 32];
+        let alice_prefix = [1, 2, 3, 4];
+        let bob_prefix = [5, 6, 7, 8];
+        let mut alice = SessionCipher::new(key, alice_prefix, bob_prefix);
+        let mut bob = SessionCipher::new(key, bob_prefix, alice_prefix);
+
+        let frame = alice.encrypt_next(b"first", b"route-a").unwrap();
+        assert_eq!(frame.sequence, 1);
+        assert_eq!(
+            bob.decrypt_next(&frame, b"route-a").unwrap(),
+            b"first".to_vec()
+        );
+        assert!(matches!(
+            bob.decrypt_next(&frame, b"route-a"),
+            Err(CryptoError::ReplayDetected)
+        ));
+
+        let second = alice.encrypt_next(b"second", b"route-a").unwrap();
+        assert_eq!(second.sequence, 2);
+        assert!(matches!(
+            bob.decrypt_next(&second, b"wrong-route"),
+            Err(CryptoError::DecryptionFailed)
+        ));
+        assert_eq!(
+            bob.decrypt_next(&second, b"route-a").unwrap(),
+            b"second".to_vec()
+        );
     }
 }

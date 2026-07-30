@@ -41,7 +41,7 @@ pub struct CredentialRecord {
 }
 
 pub struct KeyEncryptionKey {
-    pub key: [u8; 32],
+    key: [u8; 32],
 }
 
 impl Drop for KeyEncryptionKey {
@@ -126,5 +126,32 @@ mod tests {
         let decrypted = kek.decrypt_secret(&ciphertext_hex, &nonce_hex, profile_id).unwrap();
 
         assert_eq!(&decrypted.inner[..], secret);
+    }
+
+    #[test]
+    fn vault_rejects_wrong_context_key_and_tampered_ciphertext() {
+        let salt = [7u8; 16];
+        let key = KeyEncryptionKey::derive_from_passphrase(b"correct passphrase", &salt).unwrap();
+        let wrong_key =
+            KeyEncryptionKey::derive_from_passphrase(b"different passphrase", &salt).unwrap();
+        let (ciphertext_hex, nonce_hex) = key
+            .encrypt_secret(b"TEST_CREDENTIAL_PLACEHOLDER", "profile-a")
+            .unwrap();
+
+        assert!(matches!(
+            key.decrypt_secret(&ciphertext_hex, &nonce_hex, "profile-b"),
+            Err(VaultError::DecryptionFailed)
+        ));
+        assert!(matches!(
+            wrong_key.decrypt_secret(&ciphertext_hex, &nonce_hex, "profile-a"),
+            Err(VaultError::DecryptionFailed)
+        ));
+
+        let mut tampered = hex::decode(&ciphertext_hex).unwrap();
+        tampered[0] ^= 1;
+        assert!(matches!(
+            key.decrypt_secret(&hex::encode(tampered), &nonce_hex, "profile-a"),
+            Err(VaultError::DecryptionFailed)
+        ));
     }
 }

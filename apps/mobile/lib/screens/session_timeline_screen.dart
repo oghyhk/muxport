@@ -95,7 +95,7 @@ class SessionTimelineScreen extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                      color: Colors.purple.withOpacity(0.3),
+                      color: Colors.purple.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(

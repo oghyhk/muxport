@@ -1,18 +1,15 @@
-use muxport_crypto::{derive_shared_secret, generate_sas_code, KeyPair};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_char;
 
 #[no_mangle]
 pub extern "C" fn muxport_mobile_generate_sas(
-    our_secret_hex: *const c_char,
-    their_pubkey_hex: *const c_char,
+    _our_secret_hex: *const c_char,
+    _their_pubkey_hex: *const c_char,
 ) -> *mut c_char {
-    if our_secret_hex.is_null() || their_pubkey_hex.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    let result = "123456";
-    CString::new(result).unwrap().into_raw()
+    // Fail closed until this boundary accepts an opaque key handle rather than
+    // caller-supplied secret-key bytes. Returning a fixed SAS would make an
+    // unauthenticated pairing appear trustworthy.
+    std::ptr::null_mut()
 }
 
 #[no_mangle]
@@ -29,8 +26,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_mobile_core_ffi_stub() {
+    fn unimplemented_pairing_never_returns_a_fake_sas() {
         let ptr = muxport_mobile_generate_sas(std::ptr::null(), std::ptr::null());
+        assert!(ptr.is_null());
+
+        let placeholder = std::ffi::CString::new("00").unwrap();
+        let ptr = muxport_mobile_generate_sas(placeholder.as_ptr(), placeholder.as_ptr());
         assert!(ptr.is_null());
     }
 }

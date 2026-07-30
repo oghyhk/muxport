@@ -11,6 +11,8 @@ pub enum AdapterError {
     InitFailed(String),
     #[error("Connection lost to agent runtime")]
     ConnectionLost,
+    #[error("Connection lost to agent runtime: {0}")]
+    ConnectionLostWithDetail(String),
     #[error("Approval target not found: {0}")]
     ApprovalNotFound(String),
     #[error("Credential validation failed: {0}")]
