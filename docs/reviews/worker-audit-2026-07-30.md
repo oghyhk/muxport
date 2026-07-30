@@ -359,6 +359,27 @@ projection still restores.
 After this slice, `cargo test --locked --workspace --all-targets` passes 89
 tests on the clean Linux verification checkout.
 
+## Deterministic Flutter sync recovery
+
+The mobile package now has a pure recovery state machine and versioned,
+non-secret cache representation. Cached hosts always restart as stale with
+mutations disabled. Host ID/key and protocol checks precede replay; changed
+epochs, compacted cursors, and live sequence gaps force authoritative snapshot
+replacement.
+
+Contiguous events advance the cursor only through a transition explicitly
+marked for atomic persistence before connector acknowledgement. Event IDs and
+source object versions are deduplicated independently. Pending operations
+survive cache round trips by idempotency key, remain pending through dispatch
+and source acknowledgement, and become successful only on a terminal connector
+result. Unknown outcomes remain reconciliation-required instead of being
+replayed.
+
+After this slice, `flutter test` passes 16 tests and `flutter analyze` reports
+no issues on Windows. The state machine is not yet connected to atomic device
+storage, authenticated transport, or the demo UI, so those controls remain
+unfinished.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
