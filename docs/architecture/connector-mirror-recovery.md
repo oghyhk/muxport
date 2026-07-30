@@ -18,18 +18,19 @@ authenticated and encrypted, the daemon deliberately reports the connector as
 
 ## Startup sequence
 
-1. Open the event database in WAL mode and run SQLite integrity checking.
-2. Load the latest persisted host snapshot. A configured host ID that conflicts
+1. Acquire an OS-owned exclusive connector lock before opening any store.
+2. Open the event database in WAL mode and run SQLite integrity checking.
+3. Load the latest persisted host snapshot. A configured host ID that conflicts
    with the persisted ID is fatal instead of silently changing identity.
-3. Replay journal events newer than the snapshot into the in-memory projection.
-4. Persist a new recovery snapshot at the current journal sequence.
-5. Start independent OpenCode and Codex monitor tasks.
-6. Each monitor probes its runtime and fetches authoritative projects, sessions,
+4. Replay journal events newer than the snapshot into the in-memory projection.
+5. Persist a new recovery snapshot at the current journal sequence.
+6. Start independent OpenCode and Codex monitor tasks.
+7. Each monitor probes its runtime and fetches authoritative projects, sessions,
    and statuses.
-7. Persist that runtime baseline before opening its event stream.
-8. Open the runtime event stream, then fetch and persist a second baseline while
+8. Persist that runtime baseline before opening its event stream.
+9. Open the runtime event stream, then fetch and persist a second baseline while
    the stream buffers source events.
-9. Begin consuming buffered live events through the shared journal owner.
+10. Begin consuming buffered live events through the shared journal owner.
 
 The double baseline closes the list-before-subscribe race for state represented
 by host snapshots. Runtime updates share a bounded queue, but only the main
@@ -76,12 +77,16 @@ host snapshot.
 - Shutdown signals every monitor, drops the update receiver to release blocked
   producers, closes or terminates the owned Codex child, and writes a final
   snapshot.
+- A concurrent connector using the same lock path fails closed. The marker file
+  is retained because only the live OS lock proves ownership; normal exit,
+  crash, and reboot release the lock without stale-file deletion.
 
 ## Configuration
 
 | Environment variable | Meaning | Default |
 |---|---|---|
 | `MUXPORT_STATE_DB` | Connector event/snapshot SQLite path | `muxport-state.db` |
+| `MUXPORT_LOCK_FILE` | Connector OS-lock marker path | `<MUXPORT_STATE_DB>.lock` |
 | `MUXPORT_COMMAND_DB` | Durable command idempotency/result SQLite path | `muxport-commands.db` |
 | `MUXPORT_PAIRING_DB` | Pairing challenges and signed device registry SQLite path | `muxport-pairing.db` |
 | `MUXPORT_HOST_ID` | Optional stable logical host ID; must match persisted state | generated once |

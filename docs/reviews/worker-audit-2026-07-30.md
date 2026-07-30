@@ -250,6 +250,22 @@ After this slice, `cargo test --locked --workspace --all-targets` passes 75
 tests on the clean Linux verification checkout. Host identity private-key
 storage and the physical QR/SAS interface remain deliberately unimplemented.
 
+## Single-instance store ownership
+
+The daemon now acquires an OS-owned exclusive lock before opening its state,
+command, or pairing databases. A concurrent connector using the same store
+configuration fails closed. The marker records only the process ID and start
+time and is retained across exits; operating-system lock ownership, not file
+presence, identifies the live process.
+
+Focused tests prove contention and reacquisition after drop. A Linux
+process-level smoke test also starts a real daemon, rejects a second process,
+stops the owner with SIGINT, and verifies that a new daemon reacquires the same
+lock and restores its persisted projection.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 77
+tests on the clean Linux verification checkout.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,
@@ -257,14 +273,14 @@ storage and the physical QR/SAS interface remain deliberately unimplemented.
 - Add Codex compatibility fixtures across supported CLI versions and cover
   permission-profile/tool/MCP request shapes where the mobile protocol can
   represent them safely.
-- Implement durable host identity, authenticated pairing, device revocation,
-  transcript-bound key agreement, and key rotation. The current crypto crate is
-  only a primitive layer.
+- Implement OS-protected durable host identity and its unlock/recovery flow,
+  then expose the existing authenticated pairing and revocation primitives
+  through a bounded transport endpoint and physical QR/SAS interface.
 - Bind the encrypted persistent credential vault to OS key storage and connect
   its atomic stage/validate/activate/rollback operations to provider-specific
   managed runtimes.
-- Implement the connector's authenticated command/event transport and wire its
-  existing persistent command ledger into dispatch and reconciliation.
+- Implement direct and optional relay command/event transport and wire decoded
+  authenticated envelopes into the existing persistent command router.
 - Complete supervised-process monitoring, graceful shutdown, exponential
   backoff, process identity checks, and adopted-runtime behavior.
 - Replace hardcoded Flutter demo data with state management, encrypted transport,

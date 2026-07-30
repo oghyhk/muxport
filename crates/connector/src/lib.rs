@@ -1,8 +1,10 @@
 mod command_router;
+mod instance_lock;
 mod pairing_store;
 mod secure_session;
 
 pub use command_router::{CommandDispatchError, CommandRouter};
+pub use instance_lock::{InstanceLock, InstanceLockError};
 pub use pairing_store::{
     ConfirmingParty, PairingStore, PairingStoreError,
 };

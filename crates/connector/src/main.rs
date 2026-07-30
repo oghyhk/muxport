@@ -5,7 +5,7 @@ use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
-    PairingStore, RuntimeMirror,
+    InstanceLock, PairingStore, RuntimeMirror,
 };
 use event_journal::EventJournal;
 use futures::StreamExt;
@@ -60,11 +60,17 @@ async fn main() -> Result<(), DynError> {
 
     info!("starting Muxport connector host daemon");
 
+    let state_db =
+        std::env::var("MUXPORT_STATE_DB").unwrap_or_else(|_| "muxport-state.db".into());
+    let lock_path = nonempty_env("MUXPORT_LOCK_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| InstanceLock::default_path_for(&state_db));
+    let _instance_lock = InstanceLock::acquire(&lock_path)?;
+    info!(path = %lock_path.display(), "exclusive connector instance lock acquired");
+
     // SQLite INTEGER is signed 64-bit; keep the random epoch positive and
     // representable so persistence cannot fail during the first snapshot.
     let boot_epoch = new_boot_epoch();
-    let state_db =
-        std::env::var("MUXPORT_STATE_DB").unwrap_or_else(|_| "muxport-state.db".into());
     let mut journal = EventJournal::open_file(&state_db, boot_epoch)?;
     if !journal.verify_integrity()? {
         return Err("event journal integrity check failed; preserve the database for recovery".into());
