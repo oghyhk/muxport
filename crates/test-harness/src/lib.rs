@@ -53,6 +53,7 @@ impl AgentAdapter for DeterministicFakeAdapter {
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError> {
         Ok(vec![SessionSummary {
             session_id: "fake-sess-1".into(),
+            project_path: "/fake/repo".into(),
             title: "Fake Test Session".into(),
             status: "idle".into(),
             credential_profile_id: "fake-profile-1".into(),

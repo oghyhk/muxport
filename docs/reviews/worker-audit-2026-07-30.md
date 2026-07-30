@@ -127,6 +127,32 @@ After this slice, `cargo test --locked --workspace --all-targets` passes 39
 tests on the clean Linux verification checkout. Rustfmt and clippy remain
 unavailable there and are not claimed.
 
+## Connector mirror and restart recovery
+
+The daemon now restores its projection from the latest snapshot plus newer
+journal events, verifies the journal before use, reconciles authoritative
+OpenCode project/session/status state, journals live SSE before applying it,
+persists state snapshots, and reconnects with bounded exponential backoff.
+Taking a second snapshot after opening SSE closes the list-before-subscribe race
+for the state currently represented by host snapshots. Periodic source
+reconciliation repairs incomplete session/status events without replaying
+mutations.
+
+Protocol events now retain session project paths and resolved approvals retain
+their session IDs. The protocol build explicitly tracks the external `.proto`
+file so schema edits cannot silently reuse stale generated Rust code.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 45
+tests on the clean Linux verification checkout. The daemon still declares
+itself degraded because authenticated mobile transport is not connected.
+
+A two-run daemon smoke test also passed with OpenCode intentionally offline:
+the first process journaled degraded state and handled `SIGINT`, while the
+second process reopened the same database at sequence 1, passed integrity
+checking, restored its snapshot, and shut down cleanly. The first smoke attempt
+exposed and led to correction of a boot-epoch overflow at the SQLite signed
+integer boundary.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

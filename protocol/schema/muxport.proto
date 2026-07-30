@@ -195,6 +195,7 @@ message SessionUpdatedEvent {
   string status = 4;
   string credential_profile_id = 5;
   int64 updated_at_ms = 6;
+  string project_path = 7;
 }
 
 message StreamDeltaEvent {
@@ -216,6 +217,7 @@ message ApprovalResolvedEvent {
   string approval_id = 1;
   bool approved = 2;
   string resolved_by = 3;
+  string session_id = 4;
 }
 
 message CredentialRotatedEvent {

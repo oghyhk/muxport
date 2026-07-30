@@ -259,6 +259,7 @@ dependencies = [
  "connector-core",
  "credential-vault",
  "event-journal",
+ "futures",
  "muxport-crypto",
  "muxport-protocol",
  "process-supervisor",
@@ -268,6 +269,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

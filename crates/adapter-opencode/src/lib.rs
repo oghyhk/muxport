@@ -456,6 +456,7 @@ impl OpenCodeAdapter {
                         status: status.to_owned(),
                         credential_profile_id: String::new(),
                         updated_at_ms,
+                        project_path: session_directory.to_owned(),
                     }),
                 )))
             }
@@ -471,40 +472,46 @@ impl OpenCodeAdapter {
                         )
                     })?;
                 self.remember_session(session_id, directory, None)?;
-                let title = self
+                let context = self
                     .session_context(session_id)?
-                    .map(|session| session.title)
-                    .unwrap_or_default();
+                    .unwrap_or(SessionContext {
+                        directory: directory.to_owned(),
+                        title: String::new(),
+                    });
                 let timestamp = now_ms();
                 Ok(Some(new_event(
                     timestamp,
                     event::Inner::SessionUpdated(SessionUpdatedEvent {
                         session_id: session_id.to_owned(),
                         runtime_id: String::new(),
-                        title,
+                        title: context.title,
                         status: status.to_owned(),
                         credential_profile_id: String::new(),
                         updated_at_ms: timestamp,
+                        project_path: context.directory,
                     }),
                 )))
             }
             "session.idle" => {
                 let session_id = required_string(properties, "sessionID", event_type)?;
                 self.remember_session(session_id, directory, None)?;
-                let title = self
+                let context = self
                     .session_context(session_id)?
-                    .map(|session| session.title)
-                    .unwrap_or_default();
+                    .unwrap_or(SessionContext {
+                        directory: directory.to_owned(),
+                        title: String::new(),
+                    });
                 let timestamp = now_ms();
                 Ok(Some(new_event(
                     timestamp,
                     event::Inner::SessionUpdated(SessionUpdatedEvent {
                         session_id: session_id.to_owned(),
                         runtime_id: String::new(),
-                        title,
+                        title: context.title,
                         status: "idle".into(),
                         credential_profile_id: String::new(),
                         updated_at_ms: timestamp,
+                        project_path: context.directory,
                     }),
                 )))
             }
@@ -608,6 +615,7 @@ impl OpenCodeAdapter {
             }
             "permission.replied" => {
                 let approval_id = required_string(properties, "permissionID", event_type)?;
+                let session_id = required_string(properties, "sessionID", event_type)?;
                 let response = required_string(properties, "response", event_type)?;
                 self.pending_approvals
                     .write()
@@ -623,6 +631,7 @@ impl OpenCodeAdapter {
                         approval_id: approval_id.to_owned(),
                         approved: response != "reject",
                         resolved_by: "opencode".into(),
+                        session_id: session_id.to_owned(),
                     }),
                 )))
             }
@@ -724,6 +733,7 @@ impl AgentAdapter for OpenCodeAdapter {
                         .map(|status| status.kind.clone())
                         .unwrap_or_else(|| "unknown".into()),
                     session_id: session.id,
+                    project_path: actual_directory,
                     title,
                     credential_profile_id: String::new(),
                     created_at_ms: session

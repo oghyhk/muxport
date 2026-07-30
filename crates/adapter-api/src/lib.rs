@@ -48,6 +48,7 @@ pub struct ProjectInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SessionSummary {
     pub session_id: String,
+    pub project_path: String,
     pub title: String,
     pub status: String,
     pub credential_profile_id: String,
