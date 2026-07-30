@@ -78,6 +78,12 @@ not claimed. A local Android debug build could not be completed because the
 Gradle distribution download stalled before receiving data; CI includes the
 same build as an independent verification gate.
 
+The first pushed [GitHub Actions run](https://github.com/oghyhk/muxport/actions/runs/30537951610)
+was rejected before either job received a runner. GitHub reported that the
+account is locked due to a billing issue; both jobs contain zero executed
+steps. This is an account-level CI blocker and is not recorded as a passing or
+failing build.
+
 ## Major work still required
 
 - Implement OpenCode SSE normalization, commands, approvals, and credential
