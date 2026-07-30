@@ -213,6 +213,26 @@ guesses across OpenCode and Codex.
 After this slice, `cargo test --locked --workspace --all-targets` passes 65
 tests on the clean Linux verification checkout.
 
+## Authenticated session and envelope foundation
+
+The cryptographic layer now signs fresh X25519 handshake claims with pinned
+Ed25519 device and host identities, binds HKDF and the SAS to the complete
+signed transcript, rejects non-contributory keys, and derives separate
+directional AEAD keys and nonce prefixes. Ordered decryption now requires the
+exact next sequence rather than accepting gaps.
+
+Paired-device registries can be serialized with a host-identity signature and
+reject tampering, wrong-host loading, malformed keys, duplicates, revoked
+re-registration, and identity replacement. A secure connector envelope codec
+binds frames to the authenticated route/transcript and validates protocol,
+sender, recipient, sequence, boot epoch, size, payload type, and command
+idempotency before releasing a command to dispatch.
+
+After this slice, `cargo test --locked --workspace --all-targets` passes 71
+tests on the clean Linux verification checkout. No listener is enabled yet:
+one-time pairing challenge persistence, physical SAS confirmation, atomic
+registry storage, and OS protection for the host identity key remain required.
+
 ## Major work still required
 
 - Prove OpenCode credential profile isolation with managed runtimes,

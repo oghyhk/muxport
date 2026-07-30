@@ -20,13 +20,13 @@ Status: draft; controls listed below are requirements unless accompanied by veri
 
 | Threat Vector | Mitigation Strategy | Verification / Controls |
 |---|---|---|
-| Malicious / Compromised Relay | End-to-end ChaCha20-Poly1305 encryption with AAD binding host ID, device ID, epoch, sequence, and direction. | Relay may drop, delay, reorder, replay, or inject random frames, but must not decrypt content or forge an authenticated command. |
-| Replay Attacks | Monotonic sequence counters per direction and boot-epoch validation. The current ordered transport primitive rejects any sequence at or below the highest accepted value. | Replay, reflection, reconnect, and out-of-order behavior require dedicated tests before this control is complete. |
-| Man-in-the-Middle (MITM) | Out-of-band QR pairing with X25519 ECDH + HKDF-SHA256 and mandatory SAS 6-digit verification code. | Pairing materials short-lived; identity keys pinned after initial pairing. |
+| Malicious / Compromised Relay | Directional ChaCha20-Poly1305 keys with AAD binding the host ID, device ID, signed handshake transcript, and exact frame sequence. The encrypted protobuf header independently validates sender, recipient, boot epoch, and sequence. | Unit tests reject replay, sequence gaps, wrong AAD, route mismatch, and boot-epoch changes. Relay/network end-to-end tests are still required. |
+| Replay Attacks | Each direction accepts exactly the next sequence. A fresh signed ephemeral handshake creates new keys; the encrypted envelope fixes the remote boot epoch for that session. | Ordered-cipher and secure-envelope replay/out-of-order tests pass. Reconnect and persisted challenge-consumption tests remain required. |
+| Man-in-the-Middle (MITM) | Ed25519-signed device/host handshake claims bind fresh X25519 keys, identities, route, nonce, challenge, and prior-message hash. HKDF and the SAS are bound to the complete signed transcript. | Tamper, wrong-challenge, revoked-device, wrong-host, and non-contributory-key tests pass. Pairing token persistence and physical SAS confirmation remain unimplemented. |
 | Host Memory / Disk Leakage | Credential and vault envelopes use ChaCha20-Poly1305. The KEK must ultimately be wrapped by Keychain, DPAPI, Secret Service, or a reviewed headless fallback; plaintext buffers are zeroized where supported. | OS key-store integration, log redaction, artifact scanning, and crash-report tests are still required. |
 | Unintended Credential Switch | Immutable session bindings (`credential_profile_id`); account assignment changes apply to NEW sessions only. | Turn execution verifies session binding against profile ID before dispatch. |
 | Malicious Mobile Approval Request | Approval IDs bound to session and action type; connector re-verifies source state before confirming approval. | Double approvals or stale approvals rejected at host level. |
-| Unauthorized Stolen Mobile Device | Device revocation API on host vault removes device identity public key instantly. | Host rejects connection attempts from revoked public keys. |
+| Unauthorized Stolen Mobile Device | Signed device-registry snapshots retain pinned identities and revocation state; normal handshakes require an exact non-revoked binding. | Revocation, identity replacement, malformed key, registry tamper, and wrong-host signature tests pass. Atomic persistence and host-key OS protection remain required. |
 
 ## 3. Security Test Plan
 

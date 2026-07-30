@@ -1,6 +1,11 @@
 mod command_router;
+mod secure_session;
 
 pub use command_router::{CommandDispatchError, CommandRouter};
+pub use secure_session::{
+    AuthenticatedCommand, SecureEnvelopeSession, SecureSessionError,
+    CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_PLAINTEXT_BYTES,
+};
 
 use adapter_api::{ProjectInfo, SessionSummary};
 use event_journal::{EventJournal, JournalError};
