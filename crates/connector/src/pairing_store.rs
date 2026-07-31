@@ -295,6 +295,7 @@ impl PairingStore {
     /// `VerifiedInitiator` from the signed pairing hello.
     pub fn claim_verified_initiator(
         &mut self,
+        rendezvous_token: &str,
         initiator: &VerifiedInitiator,
         device_name: &str,
         sas: &str,
@@ -304,7 +305,7 @@ impl PairingStore {
             return Err(PairingStoreError::InvalidOffer);
         }
         let now = chrono::Utc::now().timestamp_millis();
-        let token_hash = token_hash(initiator.challenge());
+        let token_hash = token_hash(rendezvous_token);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -711,7 +712,12 @@ mod tests {
         )
         .unwrap();
         let pairing_id = store
-            .claim_verified_initiator(&verified, "Phone", "123456")
+            .claim_verified_initiator(
+                &offer.rendezvous_token,
+                &verified,
+                "Phone",
+                "123456",
+            )
             .unwrap();
         (pairing_id, offer.rendezvous_token)
     }
@@ -736,7 +742,12 @@ mod tests {
         let replay =
             verify_pairing_initiator(&replay, "host-1", &token).unwrap();
         assert!(matches!(
-            store.claim_verified_initiator(&replay, "Phone", "123456"),
+            store.claim_verified_initiator(
+                &token,
+                &replay,
+                "Phone",
+                "123456"
+            ),
             Err(PairingStoreError::InvalidOrConsumedToken)
         ));
         assert!(matches!(
@@ -894,6 +905,7 @@ mod tests {
             let mut store = PairingStore::open_sqlite(&db_path).unwrap();
             assert!(matches!(
                 store.claim_verified_initiator(
+                    &offer.rendezvous_token,
                     &verified,
                     "Phone",
                     "123456"
@@ -945,7 +957,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            store.claim_verified_initiator(&verified, "Phone", "123456"),
+            store.claim_verified_initiator(
+                &offer.rendezvous_token,
+                &verified,
+                "Phone",
+                "123456"
+            ),
             Err(PairingStoreError::InvalidOrConsumedToken)
         ));
 
@@ -983,6 +1000,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             store.claim_verified_initiator(
+                &expired.rendezvous_token,
                 &expired_verified,
                 "Phone 2",
                 "123456"

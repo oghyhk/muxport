@@ -5,8 +5,8 @@ use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
-    DirectTransportService, InstanceLock, PairingStore, PairingStoreError,
-    RuntimeMirror,
+    DirectTransportService, InstanceLock, PairingCoordinator, PairingStore,
+    PairingStoreError, RuntimeMirror,
 };
 use credential_vault::{
     HostIdentityManager, OsHostIdentityStore, OsVaultKeyStore, PersistentVault,
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -187,11 +187,11 @@ async fn main() -> Result<(), DynError> {
                         created = identity.was_created(),
                         "OS-protected host identity is available"
                     );
-                    let registry =
-                        pairing_store.load_registry(&host_id, identity.signing_key())?;
+                    pairing_store
+                        .load_registry(&host_id, identity.signing_key())?;
                     Some((
                         Arc::new(identity.into_signing_key()),
-                        Arc::new(registry),
+                        pairing_store,
                     ))
                 }
                 Err(PairingStoreError::HostIdentityMismatch) => {
@@ -211,7 +211,6 @@ async fn main() -> Result<(), DynError> {
             None
         }
     };
-    drop(pairing_store);
     let vault_file =
         std::env::var("MUXPORT_VAULT_FILE").unwrap_or_else(|_| "vault.sealed".into());
     let vault_key =
@@ -258,7 +257,7 @@ async fn main() -> Result<(), DynError> {
             nonempty_env("MUXPORT_DIRECT_BIND"),
             direct_transport_security,
         ) {
-            (Some(bind_address), Some((host_identity, registry))) => {
+            (Some(bind_address), Some((host_identity, pairing_store))) => {
                 let allow_remote =
                     std::env::var("MUXPORT_ALLOW_REMOTE_DIRECT").as_deref()
                         == Ok("1");
@@ -266,11 +265,23 @@ async fn main() -> Result<(), DynError> {
                     validate_direct_bind(&bind_address, allow_remote)?;
                 let listener = TcpListener::bind(bind_address).await?;
                 let local_address = listener.local_addr()?;
-                let service = DirectTransportService::new(
+                let advertised_endpoint =
+                    nonempty_env("MUXPORT_PAIRING_ENDPOINT")
+                        .unwrap_or_else(|| local_address.to_string());
+                let pairing = Arc::new(Mutex::new(
+                    PairingCoordinator::new(
+                        pairing_store,
+                        Arc::clone(&host_identity),
+                        host_id.clone(),
+                        hostname.clone(),
+                        advertised_endpoint,
+                    )?,
+                ));
+                let service = DirectTransportService::new_with_pairing(
                     host_id.clone(),
                     boot_epoch,
                     host_identity,
-                    registry,
+                    pairing,
                     Arc::clone(&command_router),
                 )?;
                 info!(

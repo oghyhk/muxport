@@ -1,5 +1,6 @@
 use crate::{
-    CommandDispatchError, CommandRouter, SecureEnvelopeSession,
+    CommandDispatchError, CommandRouter, ConfirmingParty,
+    PairingCoordinator, PairingCoordinatorError, SecureEnvelopeSession,
     SecureSessionError, DEFAULT_MAX_PLAINTEXT_BYTES,
 };
 use ed25519_dalek::{
@@ -7,16 +8,17 @@ use ed25519_dalek::{
 };
 use muxport_crypto::{
     authenticated_transcript, create_responder_hello, derive_session_keys,
-    derive_shared_secret, verify_authorized_initiator, CryptoError,
-    DeviceRegistry, EncryptedFrame, InitiatorHello, KeyPair, SessionCipher,
-    SessionRole, HANDSHAKE_PROTOCOL_VERSION,
+    derive_shared_secret, pairing_connection_challenge,
+    verify_authorized_initiator, CryptoError, DeviceRegistry, EncryptedFrame,
+    InitiatorHello, KeyPair, ResponderHello, SessionCipher, SessionRole,
+    HANDSHAKE_PROTOCOL_VERSION,
 };
 use muxport_protocol::muxport_envelope;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,12 +26,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const MAX_ENCRYPTED_RECORD_BYTES: usize =
     DEFAULT_MAX_PLAINTEXT_BYTES + 16 + 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const PAIRING_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const CHALLENGE_CLOCK_SKEW: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_CONNECTIONS: usize = 32;
 
@@ -53,6 +56,12 @@ pub enum DirectTransportError {
     InvalidConfiguration,
     #[error("server challenge signature or context is invalid")]
     InvalidServerChallenge,
+    #[error(transparent)]
+    Pairing(#[from] PairingCoordinatorError),
+    #[error("pairing coordinator lock is unavailable")]
+    PairingLockUnavailable,
+    #[error("pairing request or confirmation is invalid")]
+    InvalidPairingRequest,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -151,12 +160,47 @@ impl ServerChallenge {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingHandshakeRequest {
+    pub kind: String,
+    pub protocol_version: u32,
+    pub rendezvous_token: String,
+    pub device_name: String,
+    pub initiator: InitiatorHello,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingHandshakeResponse {
+    pub protocol_version: u32,
+    pub pairing_id: String,
+    pub responder: ResponderHello,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingPhoneConfirmation {
+    pub protocol_version: u32,
+    pub pairing_id: String,
+    pub confirmed: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingPhoneAcknowledgement {
+    pub protocol_version: u32,
+    pub pairing_id: String,
+    pub awaiting_host_confirmation: bool,
+}
+
 #[derive(Clone)]
 pub struct DirectTransportService {
     host_id: String,
     boot_epoch: u64,
     host_identity: Arc<SigningKey>,
     registry: Arc<DeviceRegistry>,
+    pairing: Option<Arc<Mutex<PairingCoordinator>>>,
     command_router: Arc<CommandRouter>,
     max_connections: usize,
 }
@@ -178,9 +222,34 @@ impl DirectTransportService {
             boot_epoch,
             host_identity,
             registry,
+            pairing: None,
             command_router,
             max_connections: DEFAULT_MAX_CONNECTIONS,
         })
+    }
+
+    pub fn new_with_pairing(
+        host_id: impl Into<String>,
+        boot_epoch: u64,
+        host_identity: Arc<SigningKey>,
+        pairing: Arc<Mutex<PairingCoordinator>>,
+        command_router: Arc<CommandRouter>,
+    ) -> Result<Self, DirectTransportError> {
+        let registry = {
+            let coordinator = pairing
+                .lock()
+                .map_err(|_| DirectTransportError::PairingLockUnavailable)?;
+            Arc::new(coordinator.load_registry()?)
+        };
+        let mut service = Self::new(
+            host_id,
+            boot_epoch,
+            host_identity,
+            registry,
+            command_router,
+        )?;
+        service.pairing = Some(pairing);
+        Ok(service)
     }
 
     #[cfg(test)]
@@ -259,14 +328,40 @@ impl DirectTransportService {
         .await?;
 
         let initiator_bytes = handshake_read(&mut stream).await?;
+        if serde_json::from_slice::<serde_json::Value>(&initiator_bytes)?
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("pairing")
+        {
+            return self
+                .handle_pairing_connection(
+                    &mut stream,
+                    &challenge,
+                    &initiator_bytes,
+                )
+                .await;
+        }
         let initiator: InitiatorHello =
             serde_json::from_slice(&initiator_bytes)?;
-        let verified = verify_authorized_initiator(
-            &initiator,
-            &self.host_id,
-            &challenge,
-            &self.registry,
-        )?;
+        let verified = if let Some(pairing) = &self.pairing {
+            let coordinator = pairing
+                .lock()
+                .map_err(|_| DirectTransportError::PairingLockUnavailable)?;
+            let registry = coordinator.load_registry()?;
+            verify_authorized_initiator(
+                &initiator,
+                &self.host_id,
+                &challenge,
+                &registry,
+            )?
+        } else {
+            verify_authorized_initiator(
+                &initiator,
+                &self.host_id,
+                &challenge,
+                &self.registry,
+            )?
+        };
 
         let responder_key = KeyPair::generate();
         let responder = create_responder_hello(
@@ -336,6 +431,95 @@ impl DirectTransportService {
             )?;
             write_record(&mut stream, &response.encode_wire()?).await?;
         }
+    }
+
+    async fn handle_pairing_connection(
+        &self,
+        stream: &mut TcpStream,
+        server_challenge: &str,
+        request_bytes: &[u8],
+    ) -> Result<(), DirectTransportError> {
+        let pairing = self
+            .pairing
+            .as_ref()
+            .ok_or(DirectTransportError::InvalidPairingRequest)?;
+        let request: PairingHandshakeRequest =
+            serde_json::from_slice(request_bytes)?;
+        if request.kind != "pairing"
+            || request.protocol_version != HANDSHAKE_PROTOCOL_VERSION
+            || request.device_name.trim().is_empty()
+            || request.device_name.len() > 128
+        {
+            return Err(DirectTransportError::InvalidPairingRequest);
+        }
+        let expected_challenge = pairing_connection_challenge(
+            &request.rendezvous_token,
+            server_challenge,
+        )?;
+        let mut claim = {
+            let mut coordinator = pairing
+                .lock()
+                .map_err(|_| DirectTransportError::PairingLockUnavailable)?;
+            coordinator.claim(
+                &request.rendezvous_token,
+                &expected_challenge,
+                &request.initiator,
+                &request.device_name,
+            )?
+        };
+        info!(
+            pairing_id = %claim.pairing_id(),
+            device_id = %request.initiator.device_id,
+            sas = %claim.host_sas(),
+            "pairing claim received; compare this SAS on the trusted host display"
+        );
+        let response = PairingHandshakeResponse {
+            protocol_version: HANDSHAKE_PROTOCOL_VERSION,
+            pairing_id: claim.pairing_id().to_owned(),
+            responder: claim.responder().clone(),
+        };
+        handshake_write(stream, &serde_json::to_vec(&response)?).await?;
+
+        let confirmation_wire = timeout(
+            PAIRING_CONFIRMATION_TIMEOUT,
+            read_record(stream, MAX_HANDSHAKE_BYTES),
+        )
+        .await
+        .map_err(|_| DirectTransportError::HandshakeTimeout)??;
+        let confirmation_frame = EncryptedFrame::decode_wire(
+            &confirmation_wire,
+            MAX_HANDSHAKE_BYTES,
+        )?;
+        let confirmation_plaintext =
+            claim.decrypt_phone_record(&confirmation_frame)?;
+        let confirmation: PairingPhoneConfirmation =
+            serde_json::from_slice(&confirmation_plaintext)?;
+        if confirmation.protocol_version != HANDSHAKE_PROTOCOL_VERSION
+            || confirmation.pairing_id != claim.pairing_id()
+            || !confirmation.confirmed
+        {
+            return Err(DirectTransportError::InvalidPairingRequest);
+        }
+        let fully_confirmed = {
+            let mut coordinator = pairing
+                .lock()
+                .map_err(|_| DirectTransportError::PairingLockUnavailable)?;
+            coordinator.confirm(
+                claim.pairing_id(),
+                claim.host_sas(),
+                ConfirmingParty::Phone,
+            )?
+        };
+        let acknowledgement = PairingPhoneAcknowledgement {
+            protocol_version: HANDSHAKE_PROTOCOL_VERSION,
+            pairing_id: claim.pairing_id().to_owned(),
+            awaiting_host_confirmation: !fully_confirmed,
+        };
+        let encrypted_ack = claim.encrypt_host_record(
+            &serde_json::to_vec(&acknowledgement)?,
+        )?;
+        write_record(stream, &encrypted_ack.encode_wire()?).await?;
+        Ok(())
     }
 }
 
@@ -437,11 +621,12 @@ fn append_signed_field(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CommandRouter;
+    use crate::{CommandRouter, PairingCoordinator, PairingStore};
     use connector_core::CommandLedger;
     use ed25519_dalek::SigningKey;
     use muxport_crypto::{
-        create_initiator_hello, verify_responder_hello,
+        create_initiator_hello, generate_sas_code,
+        pairing_connection_challenge, verify_responder_hello,
         PairedDeviceRecord, ResponderHello,
     };
     use muxport_protocol::{
@@ -449,6 +634,7 @@ mod tests {
     };
     use rand::rngs::OsRng;
     use std::collections::HashMap;
+    use std::time::Duration;
     use tokio::net::TcpStream;
 
     fn service(
@@ -638,6 +824,189 @@ mod tests {
             Err(DirectTransportError::Io(ref error))
                 if error.kind() == io::ErrorKind::UnexpectedEof
         ));
+
+        shutdown_tx.send(true).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_pairing_enrolls_device_and_refreshes_authorization() {
+        let phone_identity = SigningKey::generate(&mut OsRng);
+        let host_identity = Arc::new(SigningKey::generate(&mut OsRng));
+        let coordinator = Arc::new(Mutex::new(
+            PairingCoordinator::new(
+                PairingStore::open_in_memory().unwrap(),
+                Arc::clone(&host_identity),
+                "host-1",
+                "Test host",
+                "127.0.0.1:45821",
+            )
+            .unwrap(),
+        ));
+        let offer = coordinator
+            .lock()
+            .unwrap()
+            .create_offer(Duration::from_secs(60))
+            .unwrap();
+        let router = Arc::new(CommandRouter::new(
+            CommandLedger::new(),
+            HashMap::new(),
+        ));
+        let service = DirectTransportService::new_with_pairing(
+            "host-1",
+            22,
+            Arc::clone(&host_identity),
+            Arc::clone(&coordinator),
+            router,
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(service.serve(listener, shutdown_rx));
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let challenge: ServerChallenge =
+            serde_json::from_slice(&handshake_read(&mut stream).await.unwrap())
+                .unwrap();
+        challenge
+            .verify(
+                "host-1",
+                &host_identity.verifying_key(),
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap();
+        let connection_challenge = pairing_connection_challenge(
+            &offer.rendezvous_token,
+            &challenge.challenge,
+        )
+        .unwrap();
+        let phone_ephemeral = KeyPair::generate();
+        let initiator = create_initiator_hello(
+            &phone_identity,
+            "phone-live",
+            "host-1",
+            &connection_challenge,
+            &phone_ephemeral.public,
+        )
+        .unwrap();
+        let request = PairingHandshakeRequest {
+            kind: "pairing".into(),
+            protocol_version: HANDSHAKE_PROTOCOL_VERSION,
+            rendezvous_token: offer.rendezvous_token.clone(),
+            device_name: "Live phone".into(),
+            initiator: initiator.clone(),
+        };
+        handshake_write(
+            &mut stream,
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .await
+        .unwrap();
+        let response: PairingHandshakeResponse =
+            serde_json::from_slice(&handshake_read(&mut stream).await.unwrap())
+                .unwrap();
+        let host_ephemeral = verify_responder_hello(
+            &response.responder,
+            &initiator,
+            "host-1",
+            &offer.host_identity_public_key_hex,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_hex(host_ephemeral.as_bytes()),
+            offer.ephemeral_public_key_hex
+        );
+        let transcript =
+            authenticated_transcript(&initiator, &response.responder).unwrap();
+        let shared_secret = derive_shared_secret(
+            phone_ephemeral.secret,
+            &host_ephemeral,
+            &transcript,
+        )
+        .unwrap();
+        let sas = generate_sas_code(&shared_secret, &transcript).unwrap();
+        let keys = derive_session_keys(&shared_secret, &transcript).unwrap();
+        let mut phone_cipher = SessionCipher::from_directional_keys(
+            &keys,
+            SessionRole::Initiator,
+        );
+
+        assert!(!coordinator
+            .lock()
+            .unwrap()
+            .confirm(
+                &response.pairing_id,
+                &sas,
+                ConfirmingParty::Host,
+            )
+            .unwrap());
+        let confirmation = PairingPhoneConfirmation {
+            protocol_version: HANDSHAKE_PROTOCOL_VERSION,
+            pairing_id: response.pairing_id.clone(),
+            confirmed: true,
+        };
+        let encrypted_confirmation = phone_cipher
+            .encrypt_next(
+                &serde_json::to_vec(&confirmation).unwrap(),
+                &transcript,
+            )
+            .unwrap();
+        write_record(
+            &mut stream,
+            &encrypted_confirmation.encode_wire().unwrap(),
+        )
+        .await
+        .unwrap();
+        let acknowledgement_wire =
+            handshake_read(&mut stream).await.unwrap();
+        let acknowledgement_frame = EncryptedFrame::decode_wire(
+            &acknowledgement_wire,
+            MAX_HANDSHAKE_BYTES,
+        )
+        .unwrap();
+        let acknowledgement: PairingPhoneAcknowledgement =
+            serde_json::from_slice(
+                &phone_cipher
+                    .decrypt_next(&acknowledgement_frame, &transcript)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(acknowledgement.pairing_id, response.pairing_id);
+        assert!(!acknowledgement.awaiting_host_confirmation);
+
+        let mut reconnect = TcpStream::connect(address).await.unwrap();
+        let reconnect_challenge: ServerChallenge =
+            serde_json::from_slice(
+                &handshake_read(&mut reconnect).await.unwrap(),
+            )
+            .unwrap();
+        let reconnect_ephemeral = KeyPair::generate();
+        let reconnect_hello = create_initiator_hello(
+            &phone_identity,
+            "phone-live",
+            "host-1",
+            &reconnect_challenge.challenge,
+            &reconnect_ephemeral.public,
+        )
+        .unwrap();
+        handshake_write(
+            &mut reconnect,
+            &serde_json::to_vec(&reconnect_hello).unwrap(),
+        )
+        .await
+        .unwrap();
+        let reconnect_responder: ResponderHello = serde_json::from_slice(
+            &handshake_read(&mut reconnect).await.unwrap(),
+        )
+        .unwrap();
+        verify_responder_hello(
+            &reconnect_responder,
+            &reconnect_hello,
+            "host-1",
+            &offer.host_identity_public_key_hex,
+        )
+        .unwrap();
 
         shutdown_tx.send(true).unwrap();
         server.await.unwrap().unwrap();

@@ -4,9 +4,10 @@ use crate::{
 use ed25519_dalek::SigningKey;
 use muxport_crypto::{
     authenticated_transcript, create_responder_hello,
-    derive_shared_secret, generate_sas_code, verify_pairing_initiator,
-    CryptoError, InitiatorHello, KeyPair, PairedDeviceRecord,
-    ResponderHello, SignedPairingOffer,
+    derive_session_keys, derive_shared_secret, generate_sas_code,
+    verify_pairing_initiator, CryptoError, EncryptedFrame, InitiatorHello,
+    KeyPair, PairedDeviceRecord, ResponderHello, SessionCipher, SessionRole,
+    SignedPairingOffer,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,6 +39,8 @@ pub struct PairingClaimResult {
     pairing_id: String,
     responder: ResponderHello,
     host_sas: String,
+    transcript: Vec<u8>,
+    transport_cipher: SessionCipher,
 }
 
 impl PairingClaimResult {
@@ -54,6 +57,20 @@ impl PairingClaimResult {
     /// value from the authenticated transcript.
     pub fn host_sas(&self) -> &str {
         &self.host_sas
+    }
+
+    pub fn decrypt_phone_record(
+        &mut self,
+        frame: &EncryptedFrame,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.transport_cipher.decrypt_next(frame, &self.transcript)
+    }
+
+    pub fn encrypt_host_record(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<EncryptedFrame, CryptoError> {
+        self.transport_cipher.encrypt_next(plaintext, &self.transcript)
     }
 }
 
@@ -123,6 +140,8 @@ impl PairingCoordinator {
 
     pub fn claim(
         &mut self,
+        rendezvous_token: &str,
+        expected_challenge: &str,
         initiator: &InitiatorHello,
         device_name: &str,
     ) -> Result<PairingClaimResult, PairingCoordinatorError> {
@@ -130,7 +149,7 @@ impl PairingCoordinator {
         self.discard_expired_offers(now);
         let pending = self
             .pending_offers
-            .get(&initiator.challenge)
+            .get(rendezvous_token)
             .ok_or(PairingCoordinatorError::OfferUnavailable)?;
         if pending.expires_at_ms < now {
             return Err(PairingCoordinatorError::OfferUnavailable);
@@ -138,20 +157,25 @@ impl PairingCoordinator {
         let verified = verify_pairing_initiator(
             initiator,
             &self.host_id,
-            &initiator.challenge,
+            expected_challenge,
         )?;
         // Do not consume the in-memory secret until the identity signature and
         // complete offer context have both verified.
         let pending = self
             .pending_offers
-            .remove(&initiator.challenge)
+            .remove(rendezvous_token)
             .ok_or(PairingCoordinatorError::OfferUnavailable)?;
-        let rendezvous_token = initiator.challenge.clone();
-        let result = self.finish_claim(pending, initiator, verified, device_name);
+        let result = self.finish_claim(
+            pending,
+            rendezvous_token,
+            initiator,
+            verified,
+            device_name,
+        );
         if result.is_err() {
             // The X25519 secret has been consumed or dropped, so the durable
             // token must not continue to advertise a claimable offer.
-            let _ = self.store.cancel_by_token(&rendezvous_token);
+            let _ = self.store.cancel_by_token(rendezvous_token);
         }
         result
     }
@@ -168,6 +192,7 @@ impl PairingCoordinator {
     fn finish_claim(
         &mut self,
         pending: PendingOffer,
+        rendezvous_token: &str,
         initiator: &InitiatorHello,
         verified: muxport_crypto::VerifiedInitiator,
         device_name: &str,
@@ -186,7 +211,14 @@ impl PairingCoordinator {
             &transcript,
         )?;
         let host_sas = generate_sas_code(&shared_secret, &transcript)?;
+        let directional_keys =
+            derive_session_keys(&shared_secret, &transcript)?;
+        let transport_cipher = SessionCipher::from_directional_keys(
+            &directional_keys,
+            SessionRole::Responder,
+        );
         let pairing_id = self.store.claim_verified_initiator(
+            rendezvous_token,
             &verified,
             device_name,
             &host_sas,
@@ -195,6 +227,8 @@ impl PairingCoordinator {
             pairing_id,
             responder,
             host_sas,
+            transcript,
+            transport_cipher,
         })
     }
 
@@ -204,7 +238,16 @@ impl PairingCoordinator {
         sas: &str,
         party: ConfirmingParty,
     ) -> Result<bool, PairingCoordinatorError> {
-        Ok(self.store.confirm_sas(pairing_id, sas, party)?)
+        let both_confirmed =
+            self.store.confirm_sas(pairing_id, sas, party)?;
+        if both_confirmed {
+            self.store.finalize(
+                pairing_id,
+                &self.host_id,
+                &self.host_identity,
+            )?;
+        }
+        Ok(both_confirmed)
     }
 
     pub fn finalize(
@@ -292,7 +335,14 @@ mod tests {
             &device_public,
         )
         .unwrap();
-        let claim = coordinator.claim(&initiator, "Phone").unwrap();
+        let mut claim = coordinator
+            .claim(
+                &offer.rendezvous_token,
+                &offer.rendezvous_token,
+                &initiator,
+                "Phone",
+            )
+            .unwrap();
         let host_ephemeral = verify_responder_hello(
             claim.responder(),
             &initiator,
@@ -315,6 +365,29 @@ mod tests {
         let device_sas =
             generate_sas_code(&device_shared, &transcript).unwrap();
         assert_eq!(device_sas, claim.host_sas());
+        let device_keys =
+            derive_session_keys(&device_shared, &transcript).unwrap();
+        let mut device_cipher = SessionCipher::from_directional_keys(
+            &device_keys,
+            SessionRole::Initiator,
+        );
+        let encrypted_confirmation = device_cipher
+            .encrypt_next(b"confirmed", &transcript)
+            .unwrap();
+        assert_eq!(
+            claim
+                .decrypt_phone_record(&encrypted_confirmation)
+                .unwrap(),
+            b"confirmed"
+        );
+        let encrypted_ack =
+            claim.encrypt_host_record(b"accepted").unwrap();
+        assert_eq!(
+            device_cipher
+                .decrypt_next(&encrypted_ack, &transcript)
+                .unwrap(),
+            b"accepted"
+        );
 
         assert!(!coordinator
             .confirm(
@@ -343,8 +416,6 @@ mod tests {
             .unwrap()
             .is_authorized("phone-1", &record.public_key_hex));
 
-        let device_keys =
-            derive_session_keys(&device_shared, &transcript).unwrap();
         let host_keys =
             derive_session_keys(&device_shared, &transcript).unwrap();
         let mut device_cipher = SessionCipher::from_directional_keys(
@@ -385,14 +456,31 @@ mod tests {
         let valid = initiator.clone();
         initiator.device_id = "attacker".into();
         assert!(matches!(
-            coordinator.claim(&initiator, "Attacker"),
+            coordinator.claim(
+                &offer.rendezvous_token,
+                &offer.rendezvous_token,
+                &initiator,
+                "Attacker"
+            ),
             Err(PairingCoordinatorError::Crypto(
                 CryptoError::InvalidHandshakeSignature
             ))
         ));
-        coordinator.claim(&valid, "Phone").unwrap();
+        coordinator
+            .claim(
+                &offer.rendezvous_token,
+                &offer.rendezvous_token,
+                &valid,
+                "Phone",
+            )
+            .unwrap();
         assert!(matches!(
-            coordinator.claim(&valid, "Phone"),
+            coordinator.claim(
+                &offer.rendezvous_token,
+                &offer.rendezvous_token,
+                &valid,
+                "Phone"
+            ),
             Err(PairingCoordinatorError::OfferUnavailable)
         ));
     }
@@ -435,7 +523,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            coordinator.claim(&initiator, "Phone"),
+            coordinator.claim(
+                &cancelled.rendezvous_token,
+                &cancelled.rendezvous_token,
+                &initiator,
+                "Phone"
+            ),
             Err(PairingCoordinatorError::OfferUnavailable)
         ));
     }

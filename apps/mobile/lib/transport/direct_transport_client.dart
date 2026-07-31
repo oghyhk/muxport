@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_protocol/wire_protocol.dart' as wire;
 
+import '../pairing/signed_pairing_offer.dart';
 import '../security/device_identity.dart';
 import 'direct_transport_protocol.dart';
 
@@ -15,6 +16,245 @@ const Duration _handshakeTimeout = Duration(seconds: 15);
 const int _maximumHandshakeRecordBytes = 16 * 1024;
 const int _maximumEncryptedRecordBytes =
     directTransportMaximumPlaintextBytes + 32;
+
+class PairingEnrollmentResult {
+  const PairingEnrollmentResult({
+    required this.hostId,
+    required this.hostname,
+    required this.hostIdentityPublicKeyHex,
+    required this.address,
+    required this.port,
+    required this.pairingId,
+    required this.awaitingHostConfirmation,
+  });
+
+  final String hostId;
+  final String hostname;
+  final String hostIdentityPublicKeyHex;
+  final String address;
+  final int port;
+  final String pairingId;
+  final bool awaitingHostConfirmation;
+
+  PinnedHostIdentity get pinnedHost => PinnedHostIdentity(
+    hostId: hostId,
+    publicKeyHex: hostIdentityPublicKeyHex,
+  );
+}
+
+class PendingDirectPairing {
+  PendingDirectPairing._({
+    required Socket socket,
+    required _SocketRecordReader reader,
+    required DirectSessionCipher cipher,
+    required SignedPairingOffer offer,
+    required this.pairingId,
+    required this.sas,
+  }) : _socket = socket,
+       _reader = reader,
+       _cipher = cipher,
+       _offer = offer;
+
+  static Future<PendingDirectPairing> connect({
+    required SignedPairingOffer offer,
+    required MobileDeviceIdentity identity,
+    required String deviceName,
+    Duration connectTimeout = _defaultConnectTimeout,
+  }) async {
+    if (deviceName.trim().isEmpty || deviceName.length > 128) {
+      throw const DirectTransportProtocolException(
+        'pairing device name must be between 1 and 128 characters',
+      );
+    }
+    Socket? socket;
+    _SocketRecordReader? reader;
+    PendingDirectHandshake? pendingHandshake;
+    try {
+      socket = await Socket.connect(
+        offer.directAddress,
+        offer.directPort,
+        timeout: connectTimeout,
+      );
+      socket.setOption(SocketOption.tcpNoDelay, true);
+      reader = _SocketRecordReader(socket);
+      final initiator = DirectHandshakeInitiator(identity: identity);
+      final challengeRecord = await reader
+          .readRecord(_maximumHandshakeRecordBytes)
+          .timeout(_handshakeTimeout);
+      final serverChallenge = await initiator.verifyServerChallenge(
+        jsonValue: jsonDecode(utf8.decode(challengeRecord)),
+        pinnedHost: offer.candidateHostPin,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      final boundChallenge = VerifiedServerChallenge(
+        hostId: serverChallenge.hostId,
+        hostIdentityPublicKeyHex: serverChallenge.hostIdentityPublicKeyHex,
+        bootEpoch: serverChallenge.bootEpoch,
+        challenge: pairingConnectionChallenge(
+          rendezvousToken: offer.rendezvousToken,
+          serverChallenge: serverChallenge.challenge,
+        ),
+        issuedAtMs: serverChallenge.issuedAtMs,
+        expiresAtMs: serverChallenge.expiresAtMs,
+      );
+      pendingHandshake = await initiator.createInitiatorHello(
+        challenge: boundChallenge,
+      );
+      final request = <String, Object?>{
+        'kind': 'pairing',
+        'protocolVersion': directTransportProtocolVersion,
+        'rendezvousToken': offer.rendezvousToken,
+        'deviceName': deviceName,
+        'initiator': pendingHandshake.initiator.toJson(),
+      };
+      await _writeRecord(
+        socket,
+        utf8.encode(jsonEncode(request)),
+        maximumBytes: _maximumHandshakeRecordBytes,
+      ).timeout(_handshakeTimeout);
+      final responseRecord = await reader
+          .readRecord(_maximumHandshakeRecordBytes)
+          .timeout(_handshakeTimeout);
+      final responseValue = jsonDecode(utf8.decode(responseRecord));
+      if (responseValue is! Map) {
+        throw const DirectTransportProtocolException(
+          'pairing response must be a JSON object',
+        );
+      }
+      final response = Map<String, Object?>.from(responseValue);
+      if (response.keys.toSet().difference(const {
+            'protocolVersion',
+            'pairingId',
+            'responder',
+          }).isNotEmpty ||
+          response.length != 3 ||
+          response['protocolVersion'] != directTransportProtocolVersion ||
+          response['pairingId'] is! String ||
+          (response['pairingId']! as String).trim().isEmpty ||
+          (response['pairingId']! as String).length > 256) {
+        throw const DirectTransportProtocolException(
+          'pairing response context is invalid',
+        );
+      }
+      final material = await pendingHandshake.finishPairing(
+        response['responder'],
+        expectedHostEphemeralPublicKeyHex: offer.ephemeralPublicKeyHex,
+      );
+      final cipher = DirectSessionCipher(material.keys);
+      material.keys.destroy();
+      return PendingDirectPairing._(
+        socket: socket,
+        reader: reader,
+        cipher: cipher,
+        offer: offer,
+        pairingId: response['pairingId']! as String,
+        sas: material.sas,
+      );
+    } on DirectTransportProtocolException {
+      pendingHandshake?.abort();
+      await reader?.cancel();
+      socket?.destroy();
+      rethrow;
+    } on Object catch (error) {
+      pendingHandshake?.abort();
+      await reader?.cancel();
+      socket?.destroy();
+      throw DirectTransportProtocolException(
+        'could not establish the direct pairing session',
+        error,
+      );
+    }
+  }
+
+  final Socket _socket;
+  final _SocketRecordReader _reader;
+  final DirectSessionCipher _cipher;
+  final SignedPairingOffer _offer;
+  final String pairingId;
+  final String sas;
+  bool _closed = false;
+
+  Future<PairingEnrollmentResult> confirm() async {
+    _ensureOpen();
+    try {
+      final confirmation = <String, Object?>{
+        'protocolVersion': directTransportProtocolVersion,
+        'pairingId': pairingId,
+        'confirmed': true,
+      };
+      final encrypted = await _cipher.encrypt(
+        utf8.encode(jsonEncode(confirmation)),
+      );
+      await _writeRecord(
+        _socket,
+        encrypted.encode(),
+        maximumBytes: _maximumHandshakeRecordBytes,
+      ).timeout(_handshakeTimeout);
+      final acknowledgementRecord = await _reader
+          .readRecord(_maximumHandshakeRecordBytes)
+          .timeout(_handshakeTimeout);
+      final acknowledgementFrame = DirectEncryptedFrame.decode(
+        acknowledgementRecord,
+        maximumCiphertextBytes: _maximumHandshakeRecordBytes,
+      );
+      final acknowledgementValue = jsonDecode(
+        utf8.decode(await _cipher.decrypt(acknowledgementFrame)),
+      );
+      if (acknowledgementValue is! Map) {
+        throw const DirectTransportProtocolException(
+          'pairing acknowledgement must be a JSON object',
+        );
+      }
+      final acknowledgement = Map<String, Object?>.from(acknowledgementValue);
+      if (acknowledgement.keys.toSet().difference(const {
+            'protocolVersion',
+            'pairingId',
+            'awaitingHostConfirmation',
+          }).isNotEmpty ||
+          acknowledgement.length != 3 ||
+          acknowledgement['protocolVersion'] !=
+              directTransportProtocolVersion ||
+          acknowledgement['pairingId'] != pairingId ||
+          acknowledgement['awaitingHostConfirmation'] is! bool) {
+        throw const DirectTransportProtocolException(
+          'pairing acknowledgement context is invalid',
+        );
+      }
+      return PairingEnrollmentResult(
+        hostId: _offer.hostId,
+        hostname: _offer.hostname,
+        hostIdentityPublicKeyHex: _offer.hostIdentityPublicKeyHex,
+        address: _offer.directAddress,
+        port: _offer.directPort,
+        pairingId: pairingId,
+        awaitingHostConfirmation:
+            acknowledgement['awaitingHostConfirmation']! as bool,
+      );
+    } finally {
+      await close();
+    }
+  }
+
+  Future<void> close() async {
+    if (_closed) {
+      return;
+    }
+    _closed = true;
+    _cipher.destroy();
+    await _reader.cancel();
+    try {
+      await _socket.close();
+    } finally {
+      _socket.destroy();
+    }
+  }
+
+  void _ensureOpen() {
+    if (_closed) {
+      throw StateError('direct pairing session is closed');
+    }
+  }
+}
 
 class AuthenticatedDirectConnection {
   AuthenticatedDirectConnection._({

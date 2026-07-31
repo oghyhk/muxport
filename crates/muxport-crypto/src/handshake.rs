@@ -13,6 +13,8 @@ const INITIATOR_DOMAIN: &[u8] = b"muxport-initiator-hello-v1";
 const RESPONDER_DOMAIN: &[u8] = b"muxport-responder-hello-v1";
 const TRANSCRIPT_DOMAIN: &[u8] = b"muxport-authenticated-transcript-v1";
 const PAIRING_OFFER_DOMAIN: &[u8] = b"muxport-pairing-offer-v1";
+const PAIRING_CONNECTION_CHALLENGE_DOMAIN: &[u8] =
+    b"muxport-pairing-connection-challenge-v1";
 const MAX_PAIRING_OFFER_LIFETIME_MS: i64 = 10 * 60 * 1000;
 const PAIRING_OFFER_CLOCK_SKEW_MS: i64 = 60 * 1000;
 
@@ -243,6 +245,23 @@ pub fn create_initiator_hello(
     let claim = initiator_claim(&hello)?;
     hello.signature_hex = encode_hex(&identity.sign(&claim).to_bytes());
     Ok(hello)
+}
+
+/// Binds a one-time pairing token to the fresh, signed challenge emitted by
+/// the specific listener connection. This prevents a captured pairing hello
+/// from being replayed on a later connection while keeping the rendezvous
+/// token itself out of the signed initiator challenge field.
+pub fn pairing_connection_challenge(
+    rendezvous_token: &str,
+    server_challenge: &str,
+) -> Result<String, CryptoError> {
+    let token = parse_hex::<32>(rendezvous_token)?;
+    let challenge = parse_hex::<32>(server_challenge)?;
+    let mut bound = Vec::new();
+    push_field(&mut bound, PAIRING_CONNECTION_CHALLENGE_DOMAIN)?;
+    push_field(&mut bound, &token)?;
+    push_field(&mut bound, &challenge)?;
+    Ok(encode_hex(&Sha256::digest(bound)))
 }
 
 /// Verifies the initiator's self-asserted identity. This is suitable for the
@@ -503,6 +522,35 @@ mod tests {
         derive_session_keys, derive_shared_secret, generate_sas_code, KeyPair,
         PairedDeviceRecord, SessionCipher, SessionRole,
     };
+
+    #[test]
+    fn pairing_connection_challenge_binds_token_and_server_nonce() {
+        let token = encode_hex(&[1_u8; 32]);
+        let server = encode_hex(&[2_u8; 32]);
+        let challenge =
+            pairing_connection_challenge(&token, &server).unwrap();
+        assert_eq!(challenge.len(), 64);
+        assert_eq!(
+            challenge,
+            pairing_connection_challenge(&token, &server).unwrap()
+        );
+        assert_ne!(
+            challenge,
+            pairing_connection_challenge(
+                &encode_hex(&[3_u8; 32]),
+                &server,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            challenge,
+            pairing_connection_challenge(
+                &token,
+                &encode_hex(&[4_u8; 32]),
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn signed_handshake_derives_matching_directional_session() {

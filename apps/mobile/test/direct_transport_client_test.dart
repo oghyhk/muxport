@@ -8,12 +8,69 @@ import 'package:crypto/crypto.dart' as hashes;
 import 'package:cryptography/cryptography.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_protocol/wire_protocol.dart' as wire;
+import 'package:muxport_mobile/pairing/signed_pairing_offer.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:muxport_mobile/security/device_identity.dart';
 import 'package:muxport_mobile/transport/direct_transport_client.dart';
 import 'package:muxport_mobile/transport/direct_transport_protocol.dart';
 
 void main() {
+  test('mobile client completes encrypted pairing confirmation', () async {
+    final ed25519 = Ed25519();
+    final hostIdentity = await ed25519.newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 21),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final hostEphemeral = await X25519().newKeyPair();
+    final hostEphemeralPublic = await hostEphemeral.extractPublicKey();
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(5),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final offerJson = await _signedPairingOffer(
+      hostIdentity: hostIdentity,
+      hostPublicHex: _hex(hostPublic.bytes),
+      hostEphemeralPublicHex: _hex(hostEphemeralPublic.bytes),
+      directEndpoint: '${InternetAddress.loopbackIPv4.address}:${server.port}',
+    );
+    final offer = await SignedPairingOffer.parseAndVerify(
+      jsonEncode(offerJson),
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    final expectedSas = Completer<String>();
+    final serverTask = _servePairing(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostEphemeral: hostEphemeral,
+      hostPublicHex: _hex(hostPublic.bytes),
+      hostEphemeralPublicHex: _hex(hostEphemeralPublic.bytes),
+      rendezvousToken: offer.rendezvousToken,
+      expectedDeviceId: mobileIdentity.deviceId,
+      expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+      sas: expectedSas,
+    );
+
+    final pairing = await PendingDirectPairing.connect(
+      offer: offer,
+      identity: mobileIdentity,
+      deviceName: 'Test phone',
+    );
+    expect(pairing.sas, await expectedSas.future);
+    expect(pairing.sas, matches(RegExp(r'^\d{6}$')));
+    final enrollment = await pairing.confirm();
+
+    expect(enrollment.hostId, 'host-1');
+    expect(enrollment.pairingId, 'pairing-live-1');
+    expect(enrollment.awaitingHostConfirmation, isTrue);
+    expect(enrollment.pinnedHost.publicKeyHex, _hex(hostPublic.bytes));
+
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
   test('mobile client completes authenticated encrypted probe', () async {
     final ed25519 = Ed25519();
     final hostIdentity = await ed25519.newKeyPairFromSeed(
@@ -189,6 +246,200 @@ void main() {
   });
 }
 
+Future<Map<String, Object?>> _signedPairingOffer({
+  required SimpleKeyPair hostIdentity,
+  required String hostPublicHex,
+  required String hostEphemeralPublicHex,
+  required String directEndpoint,
+}) async {
+  final issuedAt = DateTime.now().millisecondsSinceEpoch;
+  final offer = <String, Object?>{
+    'protocolVersion': directTransportProtocolVersion,
+    'hostId': 'host-1',
+    'hostname': 'Test host',
+    'hostIdentityPublicKeyHex': hostPublicHex,
+    'directEndpoint': directEndpoint,
+    'rendezvousToken': _hex(List<int>.generate(32, (index) => index + 41)),
+    'ephemeralPublicKeyHex': hostEphemeralPublicHex,
+    'issuedAtMs': issuedAt,
+    'expiresAtMs': issuedAt + 60000,
+    'signatureHex': '',
+  };
+  final signed =
+      (BytesBuilder(copy: false)
+            ..add(_field(utf8.encode('muxport-pairing-offer-v1')))
+            ..add(_u32(offer['protocolVersion']! as int))
+            ..add(_field(utf8.encode(offer['hostId']! as String)))
+            ..add(_field(utf8.encode(offer['hostname']! as String)))
+            ..add(_field(_unhex(hostPublicHex)))
+            ..add(_field(utf8.encode(directEndpoint)))
+            ..add(_field(_unhex(offer['rendezvousToken']! as String)))
+            ..add(_field(_unhex(hostEphemeralPublicHex)))
+            ..add(_i64(issuedAt))
+            ..add(_i64(issuedAt + 60000)))
+          .takeBytes();
+  final signature = await Ed25519().sign(signed, keyPair: hostIdentity);
+  offer['signatureHex'] = _hex(signature.bytes);
+  return offer;
+}
+
+Future<void> _servePairing({
+  required ServerSocket server,
+  required SimpleKeyPair hostIdentity,
+  required SimpleKeyPair hostEphemeral,
+  required String hostPublicHex,
+  required String hostEphemeralPublicHex,
+  required String rendezvousToken,
+  required String expectedDeviceId,
+  required String expectedDevicePublicKeyHex,
+  required Completer<String> sas,
+}) async {
+  final socket = await server.first;
+  final reader = _TestRecordReader(socket);
+  try {
+    final challenge = await _signedChallenge(
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+    );
+    await _writeRecord(socket, utf8.encode(jsonEncode(challenge)));
+
+    final request = Map<String, Object?>.from(
+      jsonDecode(utf8.decode(await reader.readRecord())) as Map,
+    );
+    expect(request['kind'], 'pairing');
+    expect(request['rendezvousToken'], rendezvousToken);
+    final initiator = Map<String, Object?>.from(request['initiator']! as Map);
+    expect(initiator['deviceId'], expectedDeviceId);
+    expect(initiator['deviceIdentityPublicKeyHex'], expectedDevicePublicKeyHex);
+    expect(
+      initiator['challenge'],
+      _pairingChallenge(rendezvousToken, challenge['challenge']! as String),
+    );
+    expect(
+      await Ed25519().verify(
+        _initiatorClaim(initiator),
+        signature: Signature(
+          _unhex(initiator['signatureHex']! as String),
+          publicKey: SimplePublicKey(
+            _unhex(expectedDevicePublicKeyHex),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      ),
+      isTrue,
+    );
+
+    final responder = <String, Object?>{
+      'protocolVersion': directTransportProtocolVersion,
+      'hostId': 'host-1',
+      'deviceId': expectedDeviceId,
+      'hostIdentityPublicKeyHex': hostPublicHex,
+      'ephemeralPublicKeyHex': hostEphemeralPublicHex,
+      'nonceHex': _hex(List<int>.filled(32, 19)),
+      'initiatorHashHex': _hex(_initiatorHash(initiator)),
+      'signatureHex': '',
+    };
+    final responderSignature = await Ed25519().sign(
+      _responderClaim(responder),
+      keyPair: hostIdentity,
+    );
+    responder['signatureHex'] = _hex(responderSignature.bytes);
+    await _writeRecord(
+      socket,
+      utf8.encode(
+        jsonEncode({
+          'protocolVersion': directTransportProtocolVersion,
+          'pairingId': 'pairing-live-1',
+          'responder': responder,
+        }),
+      ),
+    );
+
+    final transcript = _transcript(initiator, responder);
+    final dh = await X25519().sharedSecretKey(
+      keyPair: hostEphemeral,
+      remotePublicKey: SimplePublicKey(
+        _unhex(initiator['ephemeralPublicKeyHex']! as String),
+        type: KeyPairType.x25519,
+      ),
+    );
+    final dhBytes = Uint8List.fromList(await dh.extractBytes());
+    dh.destroy();
+    hostEphemeral.destroy();
+    final transcriptHash = hashes.sha256.convert(transcript).bytes;
+    final dhInput = SecretKeyData(dhBytes, overwriteWhenDestroyed: true);
+    final shared = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
+      secretKey: dhInput,
+      nonce: transcriptHash,
+      info: utf8.encode('muxport-shared-secret-v1'),
+    );
+    dhInput.destroy();
+    dhBytes.fillRange(0, dhBytes.length, 0);
+    final sasKey = await Hkdf(hmac: Hmac.sha256(), outputLength: 4).deriveKey(
+      secretKey: shared,
+      nonce: transcriptHash,
+      info: utf8.encode('muxport-sas-v1'),
+    );
+    final sasBytes = Uint8List.fromList(await sasKey.extractBytes());
+    sasKey.destroy();
+    sas.complete(
+      (ByteData.sublistView(sasBytes).getUint32(0, Endian.big) % 1000000)
+          .toString()
+          .padLeft(6, '0'),
+    );
+    sasBytes.fillRange(0, sasBytes.length, 0);
+
+    final directional = await Hkdf(hmac: Hmac.sha256(), outputLength: 72)
+        .deriveKey(
+          secretKey: shared,
+          nonce: transcriptHash,
+          info: utf8.encode('muxport-directional-session-v1'),
+        );
+    shared.destroy();
+    final material = Uint8List.fromList(await directional.extractBytes());
+    directional.destroy();
+    final hostKeys = DirectSessionKeys(
+      sendKey: material.sublist(32, 64),
+      receiveKey: material.sublist(0, 32),
+      sendNoncePrefix: material.sublist(68, 72),
+      receiveNoncePrefix: material.sublist(64, 68),
+      aad: transcript,
+    );
+    material.fillRange(0, material.length, 0);
+    final cipher = DirectSessionCipher(hostKeys);
+    hostKeys.destroy();
+
+    final confirmationFrame = DirectEncryptedFrame.decode(
+      await reader.readRecord(),
+      maximumCiphertextBytes: 16 * 1024,
+    );
+    final confirmation = Map<String, Object?>.from(
+      jsonDecode(utf8.decode(await cipher.decrypt(confirmationFrame))) as Map,
+    );
+    expect(confirmation['protocolVersion'], directTransportProtocolVersion);
+    expect(confirmation['pairingId'], 'pairing-live-1');
+    expect(confirmation['confirmed'], isTrue);
+
+    final acknowledgement = await cipher.encrypt(
+      utf8.encode(
+        jsonEncode({
+          'protocolVersion': directTransportProtocolVersion,
+          'pairingId': 'pairing-live-1',
+          'awaitingHostConfirmation': true,
+        }),
+      ),
+    );
+    await _writeRecord(socket, acknowledgement.encode());
+    cipher.destroy();
+  } finally {
+    if (!sas.isCompleted) {
+      sas.completeError(StateError('pairing host stopped before SAS'));
+    }
+    await reader.cancel();
+    await socket.close();
+  }
+}
+
 Future<void> _serveProbe({
   required ServerSocket server,
   required SimpleKeyPair hostIdentity,
@@ -318,6 +569,18 @@ Future<void> _serveProbe({
     await reader.cancel();
     await socket.close();
   }
+}
+
+String _pairingChallenge(String token, String challenge) {
+  final bytes =
+      (BytesBuilder(copy: false)
+            ..add(
+              _field(utf8.encode('muxport-pairing-connection-challenge-v1')),
+            )
+            ..add(_field(_unhex(token)))
+            ..add(_field(_unhex(challenge))))
+          .takeBytes();
+  return _hex(hashes.sha256.convert(bytes).bytes);
 }
 
 Future<Map<String, Object?>> _signedChallenge({

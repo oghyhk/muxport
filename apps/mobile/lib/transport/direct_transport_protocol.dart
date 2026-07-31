@@ -203,6 +203,18 @@ Future<DirectSessionKeys> deriveInitiatorDirectSessionKeys({
       'session key derivation context is invalid',
     );
   }
+  return _deriveInitiatorSessionKeys(
+    sharedSecret: sharedSecret,
+    transcript: transcript,
+    aad: _sessionAad(hostId, deviceId, transcript),
+  );
+}
+
+Future<DirectSessionKeys> _deriveInitiatorSessionKeys({
+  required SecretKey sharedSecret,
+  required List<int> transcript,
+  required List<int> aad,
+}) async {
   final transcriptHash = hashes.sha256.convert(transcript).bytes;
   final directional = await Hkdf(hmac: Hmac.sha256(), outputLength: 72)
       .deriveKey(
@@ -222,7 +234,7 @@ Future<DirectSessionKeys> deriveInitiatorDirectSessionKeys({
       receiveKey: material.sublist(32, 64),
       sendNoncePrefix: material.sublist(64, 68),
       receiveNoncePrefix: material.sublist(68, 72),
-      aad: _sessionAad(hostId, deviceId, transcript),
+      aad: aad,
     );
   } finally {
     material.fillRange(0, material.length, 0);
@@ -378,6 +390,32 @@ class DirectSessionCipher {
       throw StateError('direct session cipher has been destroyed');
     }
   }
+}
+
+String pairingConnectionChallenge({
+  required String rendezvousToken,
+  required String serverChallenge,
+}) {
+  final token = _decodeHex(rendezvousToken, expectedBytes: 32);
+  final challenge = _decodeHex(serverChallenge, expectedBytes: 32);
+  final bound =
+      (BytesBuilder(copy: false)
+            ..add(
+              _lengthPrefixed(
+                utf8.encode('muxport-pairing-connection-challenge-v1'),
+              ),
+            )
+            ..add(_lengthPrefixed(token))
+            ..add(_lengthPrefixed(challenge)))
+          .takeBytes();
+  return _encodeHex(hashes.sha256.convert(bound).bytes);
+}
+
+class PairingSessionMaterial {
+  PairingSessionMaterial({required this.keys, required this.sas});
+
+  final DirectSessionKeys keys;
+  final String sas;
 }
 
 class DirectHandshakeInitiator {
@@ -617,6 +655,130 @@ class PendingDirectHandshake {
     } on Object catch (error) {
       throw DirectTransportProtocolException(
         'could not finish the authenticated handshake',
+        error,
+      );
+    } finally {
+      _ephemeral.destroy();
+    }
+  }
+
+  Future<PairingSessionMaterial> finishPairing(
+    Object? responderJson, {
+    required String expectedHostEphemeralPublicKeyHex,
+  }) async {
+    if (_consumed) {
+      throw StateError('direct handshake has already been consumed');
+    }
+    _consumed = true;
+    try {
+      final responder = ResponderHello.fromJson(responderJson);
+      final expectedInitiatorHash = _encodeHex(_initiatorHash(initiator));
+      final validContext =
+          responder.protocolVersion == directTransportProtocolVersion &&
+          responder.hostId == challenge.hostId &&
+          responder.deviceId == initiator.deviceId &&
+          responder.hostIdentityPublicKeyHex ==
+              challenge.hostIdentityPublicKeyHex &&
+          responder.initiatorHashHex == expectedInitiatorHash &&
+          responder.ephemeralPublicKeyHex == expectedHostEphemeralPublicKeyHex;
+      if (!validContext) {
+        throw const DirectTransportProtocolException(
+          'pairing responder does not match the signed offer and initiator',
+        );
+      }
+      _decodeHex(responder.nonceHex, expectedBytes: 32);
+      final responderEphemeral = _decodeHex(
+        responder.ephemeralPublicKeyHex,
+        expectedBytes: 32,
+      );
+      final signature = _decodeHex(responder.signatureHex, expectedBytes: 64);
+      final hostIdentity = _decodeHex(
+        responder.hostIdentityPublicKeyHex,
+        expectedBytes: 32,
+      );
+      final signatureValid = await _ed25519.verify(
+        _responderClaim(responder),
+        signature: Signature(
+          signature,
+          publicKey: SimplePublicKey(hostIdentity, type: KeyPairType.ed25519),
+        ),
+      );
+      if (!signatureValid) {
+        throw const DirectTransportProtocolException(
+          'pairing responder signature is invalid',
+        );
+      }
+
+      final transcript = _authenticatedTranscript(initiator, responder);
+      final dhKey = await _x25519.sharedSecretKey(
+        keyPair: _ephemeral,
+        remotePublicKey: SimplePublicKey(
+          responderEphemeral,
+          type: KeyPairType.x25519,
+        ),
+      );
+      late final Uint8List dhBytes;
+      try {
+        dhBytes = Uint8List.fromList(await dhKey.extractBytes());
+      } finally {
+        dhKey.destroy();
+      }
+      if (dhBytes.every((byte) => byte == 0)) {
+        dhBytes.fillRange(0, dhBytes.length, 0);
+        throw const DirectTransportProtocolException(
+          'host supplied a non-contributory pairing key',
+        );
+      }
+      try {
+        final transcriptHash = hashes.sha256.convert(transcript).bytes;
+        final dhInput = SecretKeyData(dhBytes, overwriteWhenDestroyed: true);
+        late final SecretKeyData sharedKey;
+        try {
+          sharedKey = await Hkdf(hmac: Hmac.sha256(), outputLength: 32)
+              .deriveKey(
+                secretKey: dhInput,
+                nonce: transcriptHash,
+                info: utf8.encode('muxport-shared-secret-v1'),
+              );
+        } finally {
+          dhInput.destroy();
+        }
+        try {
+          final keys = await _deriveInitiatorSessionKeys(
+            sharedSecret: sharedKey,
+            transcript: transcript,
+            aad: transcript,
+          );
+          final sasKey = await Hkdf(hmac: Hmac.sha256(), outputLength: 4)
+              .deriveKey(
+                secretKey: sharedKey,
+                nonce: transcriptHash,
+                info: utf8.encode('muxport-sas-v1'),
+              );
+          late final Uint8List sasBytes;
+          try {
+            sasBytes = Uint8List.fromList(await sasKey.extractBytes());
+          } finally {
+            sasKey.destroy();
+          }
+          final sasValue =
+              ByteData.sublistView(sasBytes).getUint32(0, Endian.big) % 1000000;
+          sasBytes.fillRange(0, sasBytes.length, 0);
+          return PairingSessionMaterial(
+            keys: keys,
+            sas: sasValue.toString().padLeft(6, '0'),
+          );
+        } finally {
+          sharedKey.destroy();
+        }
+      } finally {
+        dhBytes.fillRange(0, dhBytes.length, 0);
+      }
+    } on DirectTransportProtocolException {
+      rethrow;
+    } on Object catch (error) {
+      throw DirectTransportProtocolException(
+        'could not finish the authenticated pairing handshake',
         error,
       );
     } finally {

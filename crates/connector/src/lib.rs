@@ -7,7 +7,9 @@ mod secure_session;
 
 pub use command_router::{CommandDispatchError, CommandRouter};
 pub use direct_transport::{
-    DirectTransportError, DirectTransportService, ServerChallenge,
+    DirectTransportError, DirectTransportService, PairingHandshakeRequest,
+    PairingHandshakeResponse, PairingPhoneAcknowledgement,
+    PairingPhoneConfirmation, ServerChallenge,
 };
 pub use instance_lock::{InstanceLock, InstanceLockError};
 pub use pairing_coordinator::{
