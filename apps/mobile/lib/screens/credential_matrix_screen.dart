@@ -160,23 +160,33 @@ class CredentialMatrixScreen extends StatelessWidget {
               ),
             ),
             for (final runtime in runtimes)
-              ListTile(
-                leading: const Icon(Icons.terminal),
-                title: Text(
-                  _string(
-                    runtime['name'],
-                    fallback: _string(runtime['runtimeId']),
-                  ),
-                ),
-                subtitle: Text(
-                  [
-                    if (provider.isNotEmpty) provider,
-                    'current: ${_string(runtime['activeCredentialProfileId'], fallback: 'none')}',
-                  ].join(' • '),
-                ),
-                onTap: () => Navigator.of(
-                  sheetContext,
-                ).pop(_string(runtime['runtimeId'])),
+              Builder(
+                builder: (context) {
+                  final alreadyAssigned =
+                      runtime['activeCredentialProfileId'] == profileId;
+                  return ListTile(
+                    leading: const Icon(Icons.terminal),
+                    title: Text(
+                      _string(
+                        runtime['name'],
+                        fallback: _string(runtime['runtimeId']),
+                      ),
+                    ),
+                    subtitle: Text(
+                      [
+                        if (provider.isNotEmpty) provider,
+                        alreadyAssigned
+                            ? 'already assigned'
+                            : 'current: ${_string(runtime['activeCredentialProfileId'], fallback: 'none')}',
+                      ].join(' • '),
+                    ),
+                    onTap: alreadyAssigned
+                        ? null
+                        : () => Navigator.of(
+                            sheetContext,
+                          ).pop(_string(runtime['runtimeId'])),
+                  );
+                },
               ),
           ],
         ),
