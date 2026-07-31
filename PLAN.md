@@ -26,7 +26,7 @@ The plan is organized as an implementation checklist. A checkbox is complete onl
 - [x] Treat runtime session state on the host as the source of truth.
 - [x] Treat mobile caches and the connector event journal as reconstructible state.
 - [x] Apply account changes to new sessions only; never silently move an active turn to another identity.
-- [ ] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
+- [x] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
 
 ## 3. System architecture
 
@@ -781,7 +781,7 @@ Exit: one app operates OpenCode and Codex through one normalized UI without losi
 ### Phase 4 — Fleet, bulk switching, and rotation
 
 - [x] Pair multiple hosts.
-- [ ] Implement assignment precedence and operation impact planning.
+- [x] Implement assignment precedence and operation impact planning.
 - [ ] Implement bulk switching with partial results.
 - [ ] Implement rotation pools, cooldown, round robin, schedule, and guarded failover.
 - [ ] Add audit log and device/host revocation.
