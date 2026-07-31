@@ -848,7 +848,7 @@ Every incident runbook must preserve facts, hypotheses, unknowns, logs, file has
 
 - [ ] Phone, connector, relay, OpenCode, Codex, and host can each restart independently.
 - [ ] Connector recovers desired/observed state and pending-operation status.
-- [ ] Runtime crash loops stop automatically.
+- [x] Runtime crash loops stop automatically.
 - [ ] Interrupted updates roll back to a signed working version.
 
 ### Credential safety

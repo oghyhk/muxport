@@ -97,3 +97,8 @@ the same isolated profile root. This verifies current argument ordering,
 environment selection, stdio framing, account schema, and same-profile
 restart. It intentionally uses a signed-out disposable profile and does not
 exercise a real user credential.
+
+App Server starts are bounded independently from request retry. Six starts
+within sixty seconds latch the adapter in a crash-loop error until an operator
+restarts the connector. The guard has deterministic coverage and prevents a
+broken executable or profile from spawning indefinitely.

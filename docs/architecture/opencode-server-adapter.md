@@ -54,10 +54,11 @@ failure after mutation begins reactivates the prior secret. If rollback also
 fails, the result is explicitly `RollbackFailed` and the vault remains staged
 for recovery.
 
-A deterministic child-exit fixture verifies same-profile restart. Surviving
-child adoption after the connector itself is killed, graceful restart policy,
-provider/account validation before reopening mutations, and a hard crash-loop
-cutoff remain incomplete.
+A deterministic child-exit fixture verifies same-profile restart and the
+supervisor latches after five rapid restarts in sixty seconds. It requires an
+operator restart instead of continuing an infinite crash loop. Surviving child
+adoption after the connector itself is killed, graceful restart policy, and
+provider/account validation before reopening mutations remain incomplete.
 
 ## Restart and reconciliation rules
 
