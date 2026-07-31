@@ -194,6 +194,8 @@ variable is unset.
 
 For unattended VPS operation and the rootless container boundary, see the
 [Linux server deployment guide](docs/deployment/linux-server.md).
+For WAL-safe online backups and evidence-preserving restore steps, see the
+[state backup and restore runbook](docs/runbooks/state-backup-and-restore.md).
 
 ## Security
 

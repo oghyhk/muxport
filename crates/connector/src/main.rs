@@ -20,10 +20,11 @@ use muxport_protocol::{
 };
 use serde::Deserialize;
 use rand::Rng;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -1453,9 +1454,258 @@ async fn run_local_subcommand() -> Result<bool, DynError> {
                 manifest.runtimes.len()
             );
         }
+        "state-backup" => {
+            let output = arguments
+                .next()
+                .ok_or(
+                    "state-backup requires ABSOLUTE_OUTPUT_DIRECTORY [--include-vault]",
+                )?;
+            let include_vault = match arguments.next().as_deref() {
+                Some("--include-vault") => true,
+                Some(_) => {
+                    return Err(
+                        "state-backup optional argument must be --include-vault".into(),
+                    )
+                }
+                None => false,
+            };
+            if arguments.next().is_some() {
+                return Err(
+                    "state-backup accepts ABSOLUTE_OUTPUT_DIRECTORY and optional --include-vault"
+                        .into(),
+                );
+            }
+            let output = PathBuf::from(output);
+            create_state_backup(&output, include_vault)?;
+            println!(
+                "Verified state backup written to {}",
+                output.display()
+            );
+        }
         _ => return Err(format!("unknown connector command {command:?}").into()),
     }
     Ok(true)
+}
+
+fn create_state_backup(output: &Path, include_vault: bool) -> Result<(), DynError> {
+    let sqlite_sources = [
+        (
+            "state.db",
+            PathBuf::from(
+                std::env::var("MUXPORT_STATE_DB")
+                    .unwrap_or_else(|_| "muxport-state.db".into()),
+            ),
+        ),
+        (
+            "commands.db",
+            PathBuf::from(
+                std::env::var("MUXPORT_COMMAND_DB")
+                    .unwrap_or_else(|_| "muxport-commands.db".into()),
+            ),
+        ),
+        (
+            "pairing.db",
+            PathBuf::from(
+                std::env::var("MUXPORT_PAIRING_DB")
+                    .unwrap_or_else(|_| "muxport-pairing.db".into()),
+            ),
+        ),
+    ];
+    let vault_source = PathBuf::from(
+        std::env::var("MUXPORT_VAULT_FILE")
+            .unwrap_or_else(|_| "vault.sealed".into()),
+    );
+    create_state_backup_from_sources(
+        output,
+        &sqlite_sources,
+        &vault_source,
+        include_vault,
+    )
+}
+
+fn create_state_backup_from_sources(
+    output: &Path,
+    sqlite_sources: &[(&str, PathBuf)],
+    vault_source: &Path,
+    include_vault: bool,
+) -> Result<(), DynError> {
+    if !output.is_absolute() {
+        return Err("state-backup output directory must be absolute".into());
+    }
+    if output.exists() {
+        return Err("state-backup output directory already exists".into());
+    }
+    if !sqlite_sources
+        .iter()
+        .any(|(_, source)| source.exists())
+        && !(include_vault && vault_source.exists())
+    {
+        return Err("no connector state files were found to back up".into());
+    }
+
+    fs::create_dir(output)?;
+    harden_private_directory(output)?;
+    let mut files = Vec::new();
+    for (logical_name, source) in sqlite_sources {
+        if !source.exists() {
+            continue;
+        }
+        let destination = output.join(logical_name);
+        backup_sqlite(source, &destination)?;
+        files.push(backup_manifest_entry(logical_name, &destination, "sqlite")?);
+    }
+
+    if include_vault && vault_source.exists() {
+        let destination = output.join("vault.sealed");
+        let bytes = fs::read(&vault_source)?;
+        write_new_private_file(&destination, &bytes)?;
+        files.push(backup_manifest_entry(
+            "vault.sealed",
+            &destination,
+            "sealed_vault",
+        )?);
+    }
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "schemaVersion": 1,
+        "createdAtMs": chrono::Utc::now().timestamp_millis(),
+        "sqliteConsistency": "online_backup_api",
+        "vaultConsistency": "single_atomic_generation",
+        "sealedVaultIncluded": include_vault && vault_source.exists(),
+        "files": files,
+    }))?;
+    write_new_private_file(&output.join("manifest.json"), &manifest)?;
+    Ok(())
+}
+
+fn backup_sqlite(source: &Path, destination: &Path) -> Result<(), DynError> {
+    let source = rusqlite::Connection::open_with_flags(
+        source,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let source_integrity: String =
+        source.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if source_integrity != "ok" {
+        return Err(format!(
+            "source SQLite integrity check failed: {source_integrity}"
+        )
+        .into());
+    }
+    let mut destination = rusqlite::Connection::open_with_flags(
+        destination,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+    backup.run_to_completion(16, Duration::from_millis(25), None)?;
+    drop(backup);
+    let destination_integrity: String =
+        destination.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if destination_integrity != "ok" {
+        return Err(format!(
+            "backup SQLite integrity check failed: {destination_integrity}"
+        )
+        .into());
+    }
+    destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    Ok(())
+}
+
+fn backup_manifest_entry(
+    logical_name: &str,
+    path: &Path,
+    kind: &str,
+) -> Result<serde_json::Value, DynError> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::json!({
+        "name": logical_name,
+        "kind": kind,
+        "bytes": bytes.len(),
+        "sha256": format!("{:x}", Sha256::digest(&bytes)),
+    }))
+}
+
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn harden_private_directory(path: &Path) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "Windows SystemRoot is unavailable")
+            })?;
+        let system32 = system_root.join("System32");
+        let identity = std::process::Command::new(system32.join("whoami.exe"))
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()?;
+        if !identity.status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "could not resolve the current Windows user SID",
+            ));
+        }
+        let identity = String::from_utf8(identity.stdout).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows returned a non-UTF-8 user identity",
+            )
+        })?;
+        let sid = identity
+            .split(',')
+            .map(|field| field.trim().trim_matches('"'))
+            .find(|field| field.starts_with("S-1-"))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Windows user identity did not contain a SID",
+                )
+            })?;
+        let icacls = system32.join("icacls.exe");
+        for arguments in [
+            vec!["/reset".to_owned(), "/Q".to_owned()],
+            vec![
+                "/inheritance:r".to_owned(),
+                "/grant:r".to_owned(),
+                format!("*{sid}:(OI)(CI)F"),
+                "/grant:r".to_owned(),
+                "*S-1-5-18:(OI)(CI)F".to_owned(),
+                "/Q".to_owned(),
+            ],
+        ] {
+            let status = std::process::Command::new(&icacls)
+                .arg(path)
+                .args(arguments)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if !status.success() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "could not enforce private backup directory permissions",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_pairing_confirm(
@@ -1623,6 +1873,80 @@ mod tests {
     #[test]
     fn boot_epoch_fits_sqlite_integer() {
         assert!(new_boot_epoch() <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn online_backup_includes_committed_wal_state_and_passes_integrity_check() {
+        let root = std::env::temp_dir().join(format!(
+            "muxport-online-backup-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source_path = root.join("source.db");
+        let backup_path = root.join("backup.db");
+        let source = rusqlite::Connection::open(&source_path).unwrap();
+        source.pragma_update(None, "journal_mode", "WAL").unwrap();
+        source
+            .execute_batch(
+                "CREATE TABLE evidence (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO evidence (value) VALUES ('committed-in-wal');",
+            )
+            .unwrap();
+        assert!(source_path.with_extension("db-wal").exists());
+
+        backup_sqlite(&source_path, &backup_path).unwrap();
+
+        let restored = rusqlite::Connection::open(&backup_path).unwrap();
+        let value: String = restored
+            .query_row("SELECT value FROM evidence WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let integrity: String = restored
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "committed-in-wal");
+        assert_eq!(integrity, "ok");
+        drop(restored);
+
+        let vault_path = root.join("vault.sealed");
+        fs::write(&vault_path, b"sealed-vault-generation").unwrap();
+        let sources = [("state.db", source_path.clone())];
+        let default_output = root.join("default-backup");
+        create_state_backup_from_sources(
+            &default_output,
+            &sources,
+            &vault_path,
+            false,
+        )
+        .unwrap();
+        assert!(!default_output.join("vault.sealed").exists());
+        let default_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(default_output.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(default_manifest["sealedVaultIncluded"], false);
+
+        let recovery_output = root.join("recovery-backup");
+        create_state_backup_from_sources(
+            &recovery_output,
+            &sources,
+            &vault_path,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(recovery_output.join("vault.sealed")).unwrap(),
+            b"sealed-vault-generation"
+        );
+        let recovery_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(recovery_output.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovery_manifest["sealedVaultIncluded"], true);
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

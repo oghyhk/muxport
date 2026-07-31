@@ -229,9 +229,9 @@ state/
 ```
 
 - [x] Use SQLite transactions, foreign keys, integrity checks, and explicit schema migrations.
-- [ ] Treat SQLite WAL/SHM files as live data, never disposable cache during recovery.
-- [ ] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
-- [ ] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
+- [x] Treat SQLite WAL/SHM files as live data, never disposable cache during recovery.
+- [x] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
+- [x] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
 - [x] Keep `vault.sealed` independent of metadata and event-journal migrations.
 - [x] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
 - [x] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
@@ -637,10 +637,10 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### What to back up
 
 - [ ] Versioned connector configuration with secret references only.
-- [ ] Consistent metadata and audit SQLite snapshots.
-- [ ] Encrypted vault backup only when the user explicitly enables secret recovery.
-- [ ] Device and host registry with revocation state.
-- [ ] No raw OpenCode/Codex live SQLite/WAL/SHM files in Muxport backups.
+- [x] Consistent metadata and audit SQLite snapshots.
+- [x] Encrypted vault backup only when the user explicitly enables secret recovery.
+- [x] Device and host registry with revocation state.
+- [x] No raw OpenCode/Codex live SQLite/WAL/SHM files in Muxport backups.
 - [ ] Use vendor-supported export mechanisms separately for agent-session portability when available.
 
 ### Backup format
@@ -648,8 +648,8 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Authenticated, encrypted, versioned archive.
 - [ ] Manifest containing schema versions, hashes, timestamp, host ID, file sizes, record counts, and encryption parameters.
 - [ ] Recovery key/passphrase generated outside relay control.
-- [ ] Secrets excluded by default; UI must explain the consequence.
-- [ ] Never overwrite older generations automatically.
+- [x] Secrets excluded by default; the backup command and runbook explain the consequence.
+- [x] Never overwrite older generations automatically.
 
 ### Restore procedure
 
