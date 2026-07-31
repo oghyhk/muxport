@@ -278,6 +278,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onAssignCredential: _canAssignCredential
             ? _assignCredentialToRuntime
             : null,
+        onRotateCredential: _canAssignCredential
+            ? _rotateCredentialForRuntime
+            : null,
       ),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
@@ -433,6 +436,98 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       await _persistHost(unresolved, cacheStore);
       _showMessage(
         'Assignment outcome is unknown; verify host state before retrying: $error',
+      );
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  Future<void> _rotateCredentialForRuntime(
+    HostSyncState host,
+    String runtimeId,
+    String rotationPoolId,
+  ) async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (!host.canMutate ||
+        identity == null ||
+        cacheStore == null ||
+        runtimeId.trim().isEmpty ||
+        rotationPoolId.trim().isEmpty ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      _showMessage(
+        'This rotation is not safely routable from current host state.',
+      );
+      return;
+    }
+    final authorized = await _stepUpAuthenticator.authorize(
+      reason:
+          'Authorize credential rotation for $runtimeId on ${host.displayName}',
+    );
+    if (!authorized || !mounted) {
+      if (mounted) {
+        _showMessage(
+          'Device authentication is required. No rotation was sent.',
+        );
+      }
+      return;
+    }
+
+    final now = DateTime.now();
+    final operationId =
+        'rotation-${identity.deviceId}-${now.microsecondsSinceEpoch}';
+    final pending = PendingOperation.local(
+      idempotencyKey: operationId,
+      kind: 'rotation:$runtimeId',
+      createdAtMs: now.millisecondsSinceEpoch,
+      deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
+    );
+    final pendingHost = host.addPendingOperation(pending);
+    await _persistHost(pendingHost, cacheStore);
+
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.rotateCredential(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        rotationPoolId: rotationPoolId,
+        runtimeId: runtimeId,
+      );
+      final state =
+          result.state.value >= 0 &&
+              result.state.value < RemoteOpState.values.length
+          ? RemoteOpState.values[result.state.value]
+          : RemoteOpState.reconciliationRequired;
+      final resolved = (_hosts[host.hostId] ?? pendingHost).resolveOperation(
+        operationId,
+        state,
+      );
+      await _persistHost(resolved, cacheStore);
+      _showMessage(
+        result.success
+            ? 'Credential rotation completed for future work on $runtimeId.'
+            : 'Connector did not confirm rotation: ${result.errorMessage}',
+      );
+      unawaited(_syncAllHosts());
+    } on Object catch (error) {
+      final current = _hosts[host.hostId] ?? pendingHost;
+      final unresolved = current.resolveOperation(
+        operationId,
+        RemoteOpState.reconciliationRequired,
+      );
+      await _persistHost(unresolved, cacheStore);
+      _showMessage(
+        'Rotation outcome is unknown; verify host state before retrying: $error',
       );
     } finally {
       await connection?.close();

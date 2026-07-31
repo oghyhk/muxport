@@ -7,6 +7,7 @@ class CredentialMatrixScreen extends StatelessWidget {
     required this.hosts,
     this.onProvisionCredential,
     this.onAssignCredential,
+    this.onRotateCredential,
     super.key,
   });
 
@@ -18,6 +19,12 @@ class CredentialMatrixScreen extends StatelessWidget {
     String credentialProfileId,
   )?
   onAssignCredential;
+  final Future<void> Function(
+    HostSyncState host,
+    String runtimeId,
+    String rotationPoolId,
+  )?
+  onRotateCredential;
 
   @override
   Widget build(BuildContext context) {
@@ -100,15 +107,40 @@ class CredentialMatrixScreen extends StatelessWidget {
                             item.host,
                             profile,
                           ),
-                    trailing: Column(
+                    trailing: Row(
                       mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        Text(status),
-                        if (!item.host.canMutate)
-                          const Text(
-                            'STALE',
-                            style: TextStyle(color: Colors.amber, fontSize: 10),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(status),
+                            if (!item.host.canMutate)
+                              const Text(
+                                'STALE',
+                                style: TextStyle(
+                                  color: Colors.amber,
+                                  fontSize: 10,
+                                ),
+                              ),
+                          ],
+                        ),
+                        if (onRotateCredential != null &&
+                            item.host.canMutate &&
+                            assignments.isNotEmpty)
+                          PopupMenuButton<String>(
+                            tooltip: 'Credential actions',
+                            onSelected: (_) => _chooseRuntimeRotation(
+                              context,
+                              item.host,
+                              profileId,
+                            ),
+                            itemBuilder: (context) => const [
+                              PopupMenuItem(
+                                value: 'rotate',
+                                child: Text('Rotate an assigned runtime'),
+                              ),
+                            ],
                           ),
                       ],
                     ),
@@ -196,6 +228,109 @@ class CredentialMatrixScreen extends StatelessWidget {
       return;
     }
     await onAssignCredential!(host, selected, profileId);
+  }
+
+  Future<void> _chooseRuntimeRotation(
+    BuildContext context,
+    HostSyncState host,
+    String credentialProfileId,
+  ) async {
+    if (credentialProfileId.isEmpty || onRotateCredential == null) {
+      return;
+    }
+    final navigator = Navigator.of(context);
+    final assignedRuntimes = <Map<String, Object?>>[];
+    for (final raw in host.snapshot['runtimes'] as List? ?? const []) {
+      if (raw is! Map) {
+        continue;
+      }
+      final runtime = Map<String, Object?>.from(raw);
+      if (runtime['activeCredentialProfileId'] == credentialProfileId &&
+          _string(runtime['runtimeId']).isNotEmpty) {
+        assignedRuntimes.add(runtime);
+      }
+    }
+    final runtimeId = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('Rotate credential'),
+              subtitle: Text(
+                'Rotation only affects new work. A busy runtime is never '
+                'stopped or switched automatically.',
+              ),
+            ),
+            for (final runtime in assignedRuntimes)
+              ListTile(
+                leading: const Icon(Icons.sync_lock),
+                title: Text(
+                  _string(
+                    runtime['name'],
+                    fallback: _string(runtime['runtimeId']),
+                  ),
+                ),
+                subtitle: const Text(
+                  'Choose the configured rotation pool next',
+                ),
+                onTap: () => Navigator.of(
+                  sheetContext,
+                ).pop(_string(runtime['runtimeId'])),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (runtimeId == null || runtimeId.isEmpty) {
+      return;
+    }
+    if (!navigator.mounted) {
+      return;
+    }
+    final poolId = await _askForRotationPool(navigator.context);
+    if (poolId == null || poolId.isEmpty) {
+      return;
+    }
+    await onRotateCredential!(host, runtimeId, poolId);
+  }
+
+  Future<String?> _askForRotationPool(BuildContext context) async {
+    final controller = TextEditingController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Rotation pool'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: 'Configured pool ID',
+              helperText:
+                  'The connector validates the pool and never exposes its credentials.',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(controller.text.trim()),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
   }
 }
 
