@@ -245,7 +245,7 @@ state/
   - [x] macOS Keychain, hardware-backed when available.
   - [x] Windows DPAPI/Credential Manager under the connector user.
   - [x] Linux Secret Service when available.
-  - [ ] Headless Linux fallback: Argon2id-derived wrapping key from an operator passphrase, TPM/systemd credential integration, or an explicitly configured external secret manager.
+  - [x] Headless Linux fallback: Argon2id-derived wrapping key from an operator passphrase, TPM/systemd credential integration, or an explicitly configured external secret manager.
 - [x] Use a reviewed authenticated-encryption construction and a versioned envelope format.
 - [x] Bind ciphertext to profile ID, host ID, credential type, and schema version as authenticated data.
 - [x] Zeroize plaintext buffers and prevent them from entering panic reports.
