@@ -29,8 +29,20 @@ vault remains encrypted by its host-specific wrapping policy; the relay never
 receives a recovery key.
 
 The output directory is owner-private. `manifest.json` records a SHA-256
-digest and size for every output file without recording source paths or
-secrets. A missing source component is omitted rather than fabricated.
+digest, size, and SQLite schema version for every output file without
+recording source paths or secrets. A missing source component is omitted
+rather than fabricated.
+
+Verify a generation before relying on it:
+
+```text
+muxport-connector state-backup-verify /absolute/path/to/muxport-backup
+```
+
+Verification rejects unknown or duplicate files, future timestamps, size/hash
+mismatches, SQLite corruption, and schema-version mismatches. It does not turn
+the unencrypted metadata generation into an authenticated archive; protect the
+directory with trusted storage and its owner-only permissions.
 
 The host identity key remains in the configured OS credential store and is
 not exported. Restoring a pairing registry without its original host identity

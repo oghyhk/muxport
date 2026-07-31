@@ -1482,6 +1482,20 @@ async fn run_local_subcommand() -> Result<bool, DynError> {
                 output.display()
             );
         }
+        "state-backup-verify" => {
+            let input = arguments
+                .next()
+                .ok_or("state-backup-verify requires ABSOLUTE_BACKUP_DIRECTORY")?;
+            if arguments.next().is_some() {
+                return Err(
+                    "state-backup-verify accepts exactly ABSOLUTE_BACKUP_DIRECTORY"
+                        .into(),
+                );
+            }
+            let input = PathBuf::from(input);
+            verify_state_backup(&input)?;
+            println!("State backup verified: {}", input.display());
+        }
         _ => return Err(format!("unknown connector command {command:?}").into()),
     }
     Ok(true)
@@ -1618,12 +1632,132 @@ fn backup_manifest_entry(
     kind: &str,
 ) -> Result<serde_json::Value, DynError> {
     let bytes = fs::read(path)?;
-    Ok(serde_json::json!({
+    let mut entry = serde_json::json!({
         "name": logical_name,
         "kind": kind,
         "bytes": bytes.len(),
         "sha256": format!("{:x}", Sha256::digest(&bytes)),
-    }))
+    });
+    if kind == "sqlite" {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let schema_version: u32 =
+            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        entry["schemaVersion"] = serde_json::json!(schema_version);
+    }
+    Ok(entry)
+}
+
+fn verify_state_backup(input: &Path) -> Result<(), DynError> {
+    if !input.is_absolute() || !input.is_dir() {
+        return Err(
+            "state-backup-verify input must be an existing absolute directory"
+                .into(),
+        );
+    }
+    let manifest_path = input.join("manifest.json");
+    let manifest_size = fs::metadata(&manifest_path)?.len();
+    if manifest_size == 0 || manifest_size > 1024 * 1024 {
+        return Err("backup manifest is empty or exceeds 1 MiB".into());
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    if manifest.get("schemaVersion").and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err("unsupported backup manifest schema version".into());
+    }
+    let created_at_ms = manifest
+        .get("createdAtMs")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("backup manifest has no valid creation timestamp")?;
+    if created_at_ms <= 0
+        || created_at_ms
+            > chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_add(5 * 60 * 1000)
+    {
+        return Err("backup manifest creation timestamp is invalid".into());
+    }
+    let files = manifest
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("backup manifest has no file list")?;
+    if files.is_empty() || files.len() > 4 {
+        return Err("backup manifest file list is empty or oversized".into());
+    }
+    let mut seen = HashSet::new();
+    for entry in files {
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("backup file entry has no name")?;
+        if !matches!(
+            name,
+            "state.db" | "commands.db" | "pairing.db" | "vault.sealed"
+        ) || !seen.insert(name)
+        {
+            return Err("backup manifest contains an invalid or duplicate file".into());
+        }
+        let expected_size = entry
+            .get("bytes")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("backup file entry has no valid size")?;
+        let expected_hash = entry
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .filter(|hash| {
+                hash.len() == 64
+                    && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or("backup file entry has no valid SHA-256 digest")?;
+        let path = input.join(name);
+        let bytes = fs::read(&path)?;
+        if bytes.len() as u64 != expected_size
+            || format!("{:x}", Sha256::digest(&bytes)) != expected_hash
+        {
+            return Err(format!("backup file integrity mismatch: {name}").into());
+        }
+        let expected_kind = if name == "vault.sealed" {
+            "sealed_vault"
+        } else {
+            "sqlite"
+        };
+        if entry.get("kind").and_then(serde_json::Value::as_str)
+            != Some(expected_kind)
+        {
+            return Err(format!("backup file kind mismatch: {name}").into());
+        }
+        if expected_kind == "sqlite" {
+            let connection = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let integrity: String =
+                connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(
+                    format!("backup SQLite integrity check failed: {name}").into(),
+                );
+            }
+            let actual_schema: u32 =
+                connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if entry
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_u64)
+                != Some(actual_schema as u64)
+            {
+                return Err(
+                    format!("backup SQLite schema mismatch: {name}").into(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
@@ -1927,6 +2061,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(default_manifest["sealedVaultIncluded"], false);
+        assert_eq!(
+            default_manifest["files"][0]["schemaVersion"],
+            serde_json::json!(0)
+        );
+        verify_state_backup(&default_output).unwrap();
 
         let recovery_output = root.join("recovery-backup");
         create_state_backup_from_sources(
@@ -1945,6 +2084,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovery_manifest["sealedVaultIncluded"], true);
+        verify_state_backup(&recovery_output).unwrap();
+        fs::write(
+            recovery_output.join("vault.sealed"),
+            b"tampered-vault-generation",
+        )
+        .unwrap();
+        assert!(verify_state_backup(&recovery_output).is_err());
         drop(source);
         fs::remove_dir_all(root).unwrap();
     }
