@@ -1,10 +1,11 @@
 use adapter_api::{AdapterError, AgentAdapter};
 use connector_core::{
     switch_runtime_assignment, CommandLedger, CoreError, CredentialSwitchError,
+    RotationEligibility, RotationRequest, RotationTrigger,
 };
 use credential_vault::PersistentVault;
 use muxport_protocol::{
-    command, Command, CommandResult, RemoteOpState,
+    command, Command, CommandResult, CredentialStatus, RemoteOpState,
 };
 use prost::Message;
 use serde_json::{json, Value};
@@ -33,6 +34,7 @@ pub enum CommandDispatchError {
 /// adapter is invoked. A crash or cancellation after that point is never
 /// retried blindly; the next duplicate receives `ReconciliationRequired`.
 pub struct CommandRouter {
+    host_id: String,
     ledger: Mutex<CommandLedger>,
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
     vault: Option<Arc<Mutex<PersistentVault>>>,
@@ -45,11 +47,17 @@ impl CommandRouter {
         adapters: HashMap<String, Arc<dyn AgentAdapter>>,
     ) -> Self {
         Self {
+            host_id: "unconfigured-host".into(),
             ledger: Mutex::new(ledger),
             adapters,
             vault: None,
             in_flight: StdMutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_host_id(mut self, host_id: impl Into<String>) -> Self {
+        self.host_id = host_id.into();
+        self
     }
 
     pub fn open_sqlite(
@@ -65,6 +73,7 @@ impl CommandRouter {
         vault: Arc<Mutex<PersistentVault>>,
     ) -> Result<Self, CommandDispatchError> {
         Ok(Self {
+            host_id: "unconfigured-host".into(),
             ledger: Mutex::new(CommandLedger::open_sqlite(path)?),
             adapters,
             vault: Some(vault),
@@ -370,9 +379,124 @@ impl CommandRouter {
                     "activated_at_ms": result.activated_at_ms
                 }))
             }
-            Some(command::Inner::RotateCredential(_)) => Err(AdapterError::Unsupported(
-                "credential rotation is not connected to managed runtimes".into(),
-            )),
+            Some(command::Inner::RotateCredential(request)) => {
+                if request.force {
+                    return Err(AdapterError::Unsupported(
+                        "forced rotation requires an explicitly reviewed drain/restart workflow"
+                            .into(),
+                    ));
+                }
+                let adapter = self.adapter(&request.target_runtime_id)?;
+                let runtime_profile_id = adapter
+                    .managed_runtime_profile_id()
+                    .ok_or_else(|| {
+                        AdapterError::Unsupported(
+                            "credential rotation requires a connector-managed isolated runtime"
+                                .into(),
+                        )
+                    })?
+                    .to_owned();
+                if adapter
+                    .list_sessions()
+                    .await?
+                    .iter()
+                    .any(|session| session_status_is_active(&session.status))
+                {
+                    return Err(AdapterError::InvalidInput(
+                        "runtime has active work; drain or stop it before credential rotation"
+                            .into(),
+                    ));
+                }
+                let (current_profile_id, pool) = {
+                    let ledger = self.ledger.lock().await;
+                    let current = ledger
+                        .runtime_assignment(&request.target_runtime_id)
+                        .ok_or_else(|| {
+                            AdapterError::InvalidInput(
+                                "runtime has no durable current credential assignment".into(),
+                            )
+                        })?
+                        .to_owned();
+                    let pool = ledger
+                        .rotation_pool(&request.pool_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            AdapterError::InvalidInput(format!(
+                                "rotation pool {:?} does not exist",
+                                request.pool_id
+                            ))
+                        })?;
+                    (current, pool)
+                };
+                let vault = self.vault.as_ref().ok_or_else(|| {
+                    AdapterError::Unsupported("credential vault is unavailable or locked".into())
+                })?;
+                let vault = vault.lock().await;
+                let eligibility = pool
+                    .ordered_profile_ids
+                    .iter()
+                    .map(|profile_id| {
+                        let summary = vault.get_profile(profile_id);
+                        RotationEligibility {
+                            profile_id: profile_id.clone(),
+                            provider_id: summary
+                                .as_ref()
+                                .map(|profile| profile.provider.clone())
+                                .unwrap_or_default(),
+                            eligible: summary.as_ref().is_some_and(|profile| {
+                                profile.status == CredentialStatus::Active
+                            }),
+                            cooldown_until_ms: None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let decision = self
+                    .ledger
+                    .lock()
+                    .await
+                    .select_rotation(
+                        &request.pool_id,
+                        RotationRequest {
+                            host_id: &self.host_id,
+                            current_profile_id: &current_profile_id,
+                            now_ms: chrono::Utc::now().timestamp_millis(),
+                            trigger: RotationTrigger::Manual,
+                        },
+                        &eligibility,
+                    )
+                    .map_err(|error| AdapterError::InvalidInput(error.to_string()))?;
+                let result = switch_runtime_assignment(
+                    adapter.as_ref(),
+                    &vault,
+                    &runtime_profile_id,
+                    &current_profile_id,
+                    &decision.selected_profile_id,
+                    &pool.provider_id,
+                )
+                .await
+                .map_err(map_credential_switch_error)?;
+                drop(vault);
+                self.ledger
+                    .lock()
+                    .await
+                    .set_runtime_assignment(
+                        &request.target_runtime_id,
+                        &decision.selected_profile_id,
+                    )
+                    .map_err(|error| {
+                        AdapterError::OutcomeUnknown(format!(
+                            "rotation succeeded but durable assignment recording failed; reconcile before retrying: {error}"
+                        ))
+                    })?;
+                Ok(json!({
+                    "pool_id": decision.pool_id,
+                    "profile_id": result.profile_id,
+                    "provider_id": result.provider_id,
+                    "account_fingerprint": result.account_fingerprint,
+                    "activated_at_ms": result.activated_at_ms,
+                    "reason_code": decision.reason_code
+                }))
+            }
             None => Err(AdapterError::InvalidInput(
                 "command payload must not be empty".into(),
             )),
@@ -533,9 +657,11 @@ fn map_credential_switch_error(error: CredentialSwitchError) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use connector_core::{RotationMode, RotationPool};
     use credential_vault::{CredentialEnrollment, KeyEncryptionKey};
     use muxport_protocol::{
-        AgentType, ChangeAssignmentCmd, Command, QueryOperationCmd, StartSessionCmd,
+        AgentType, ChangeAssignmentCmd, Command, QueryOperationCmd, RotateCredentialCmd,
+        StartSessionCmd,
     };
     use std::sync::Arc;
     use test_harness::DeterministicFakeAdapter;
@@ -570,6 +696,18 @@ mod tests {
                 target_type: "runtime".into(),
                 target_id: "codex-test".into(),
                 new_credential_profile_id: profile_id.into(),
+            })),
+        }
+    }
+
+    fn rotation_command(pool_id: &str) -> Command {
+        Command {
+            command_id: "rotation-command-1".into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::RotateCredential(RotateCredentialCmd {
+                pool_id: pool_id.into(),
+                target_runtime_id: "codex-test".into(),
+                force: false,
             })),
         }
     }
@@ -856,6 +994,21 @@ mod tests {
             ledger
                 .set_runtime_assignment("codex-test", "profile-a")
                 .unwrap();
+            ledger
+                .upsert_rotation_pool(RotationPool {
+                    pool_id: "pool-a".into(),
+                    provider_id: "openai".into(),
+                    ordered_profile_ids: vec!["profile-a".into(), "profile-b".into()],
+                    mode: RotationMode::Manual,
+                    cooldown_ms: 0,
+                    max_switches_per_hour: 3,
+                    allowed_host_ids: vec!["host-test".into()],
+                    quota_failover_enabled: false,
+                    last_selection_cursor: None,
+                    last_selected_at_ms: None,
+                    recent_switches_ms: Vec::new(),
+                })
+                .unwrap();
         }
         let vault = Arc::new(Mutex::new(vault));
         let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
@@ -863,7 +1016,8 @@ mod tests {
         adapters.insert("codex-test".into(), adapter);
         let router =
             CommandRouter::open_sqlite_with_vault(&db_path, adapters, Arc::clone(&vault))
-                .unwrap();
+                .unwrap()
+                .with_host_id("host-test");
 
         let result = router
             .dispatch(
@@ -889,6 +1043,19 @@ mod tests {
                 .await
                 .runtime_assignment("codex-test"),
             Some("profile-b")
+        );
+        let rotated = router
+            .dispatch("rotation-idempotency-key", &rotation_command("pool-a"))
+            .await
+            .unwrap();
+        assert!(rotated.success, "{}", rotated.error_message);
+        assert_eq!(
+            router
+                .ledger
+                .lock()
+                .await
+                .runtime_assignment("codex-test"),
+            Some("profile-a")
         );
 
         let _ = std::fs::remove_file(&db_path);

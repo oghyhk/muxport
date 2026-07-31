@@ -489,15 +489,15 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Rotation pools
 
-- [ ] Define ordered pools of compatible credential profiles.
-- [ ] Store pool policy, eligibility, cooldown, host restrictions, and last-selection cursor as non-secret metadata.
+- [x] Define ordered pools of compatible credential profiles.
+- [x] Store pool policy, eligibility, cooldown, host restrictions, and last-selection cursor as non-secret metadata.
 - [ ] Support manual, scheduled, round-robin, and confirmed-failure failover modes.
 - [ ] Classify provider errors into authentication, permission, rate limit, quota, network, runtime crash, and unknown.
 - [ ] Trigger automatic failover only from adapter-tested signals, never from matching arbitrary error text alone.
-- [ ] Do not rotate on network failure, connector restart, malformed response, or agent crash.
-- [ ] Apply cooldown and maximum-switch-per-hour limits to prevent rotation storms.
+- [x] Do not rotate on network failure, connector restart, malformed response, or agent crash.
+- [x] Apply cooldown and maximum-switch-per-hour limits to prevent rotation storms.
 - [ ] Notify the user and record the reason for every automatic switch.
-- [ ] Feature-gate quota-triggered rotation until OpenCode Go behavior and applicable terms have been validated.
+- [x] Feature-gate quota-triggered rotation until OpenCode Go behavior and applicable terms have been validated.
 
 ### Credential replacement
 
@@ -674,7 +674,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [ ] State-machine transition tables.
 - [x] Assignment precedence.
-- [ ] Rotation selection, cooldown, and storm prevention.
+- [x] Rotation selection, cooldown, and storm prevention.
 - [x] Envelope encryption/decryption and replay rejection.
 - [x] Command idempotency and deadline handling.
 - [x] Event ordering, compaction, cursor gaps, and snapshot replacement.

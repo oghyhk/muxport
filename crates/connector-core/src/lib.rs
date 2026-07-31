@@ -1,8 +1,13 @@
 mod credential_switch;
+mod rotation;
 
 pub use credential_switch::{
     activate_staged_credential, switch_runtime_assignment, CredentialRuntime,
     CredentialSwitchError, CredentialSwitchResult,
+};
+pub use rotation::{
+    ProviderFailureClass, RotationDecision, RotationEligibility, RotationError,
+    RotationMode, RotationPool, RotationRequest, RotationTrigger,
 };
 
 use muxport_protocol::{ConnectorState, RemoteOpState, RuntimeState};
@@ -34,6 +39,14 @@ pub enum CoreError {
     EmptyAssignmentField(&'static str),
     #[error("Conflicting credential assignments exist at precedence {0}")]
     AmbiguousAssignment(u8),
+    #[error("Rotation pool does not exist: {0}")]
+    RotationPoolNotFound(String),
+    #[error("Rotation pool row id {row} does not match policy id {policy}")]
+    RotationPoolIdMismatch { row: String, policy: String },
+    #[error("Rotation policy serialization failed: {0}")]
+    RotationSerialization(#[from] serde_json::Error),
+    #[error(transparent)]
+    Rotation(#[from] RotationError),
     #[error("Command ledger database error: {0}")]
     Sql(#[from] rusqlite::Error),
 }
@@ -314,6 +327,7 @@ impl SwitchImpactPlan {
 pub struct CommandLedger {
     executed_commands: HashMap<String, CommandRecord>,
     runtime_assignments: HashMap<String, String>,
+    rotation_pools: HashMap<String, RotationPool>,
     conn: Option<rusqlite::Connection>,
 }
 
@@ -364,12 +378,13 @@ impl Default for CommandLedger {
 }
 
 impl CommandLedger {
-    const SCHEMA_VERSION: u32 = 3;
+    const SCHEMA_VERSION: u32 = 4;
 
     pub fn new() -> Self {
         Self {
             executed_commands: HashMap::new(),
             runtime_assignments: HashMap::new(),
+            rotation_pools: HashMap::new(),
             conn: None,
         }
     }
@@ -448,12 +463,22 @@ impl CommandLedger {
             )",
             [],
         )?;
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS rotation_pools (
+                pool_id TEXT PRIMARY KEY,
+                policy_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                CHECK (length(trim(pool_id)) > 0)
+            )",
+            [],
+        )?;
         transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         transaction.commit()?;
 
         let mut ledger = Self {
             executed_commands: HashMap::new(),
             runtime_assignments: HashMap::new(),
+            rotation_pools: HashMap::new(),
             conn: Some(conn),
         };
         ledger.load_from_db()?;
@@ -497,6 +522,26 @@ impl CommandLedger {
             for assignment in assignments {
                 let (runtime_id, profile_id) = assignment?;
                 self.runtime_assignments.insert(runtime_id, profile_id);
+            }
+            drop(assignment_stmt);
+            let mut pool_stmt = conn.prepare(
+                "SELECT pool_id, policy_json
+                 FROM rotation_pools",
+            )?;
+            let pools = pool_stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for pool in pools {
+                let (pool_id, policy_json) = pool?;
+                let policy: RotationPool = serde_json::from_str(&policy_json)?;
+                policy.validate()?;
+                if policy.pool_id != pool_id {
+                    return Err(CoreError::RotationPoolIdMismatch {
+                        row: pool_id,
+                        policy: policy.pool_id,
+                    });
+                }
+                self.rotation_pools.insert(pool_id, policy);
             }
         }
         Ok(())
@@ -662,6 +707,46 @@ impl CommandLedger {
         self.runtime_assignments
             .get(runtime_id)
             .map(String::as_str)
+    }
+
+    pub fn upsert_rotation_pool(&mut self, pool: RotationPool) -> Result<(), CoreError> {
+        pool.validate()?;
+        let policy_json = serde_json::to_string(&pool)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(ref conn) = self.conn {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO rotation_pools (pool_id, policy_json, updated_at_ms)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(pool_id) DO UPDATE SET
+                    policy_json = excluded.policy_json,
+                    updated_at_ms = excluded.updated_at_ms",
+                rusqlite::params![&pool.pool_id, &policy_json, now],
+            )?;
+            transaction.commit()?;
+        }
+        self.rotation_pools.insert(pool.pool_id.clone(), pool);
+        Ok(())
+    }
+
+    pub fn rotation_pool(&self, pool_id: &str) -> Option<&RotationPool> {
+        self.rotation_pools.get(pool_id)
+    }
+
+    pub fn select_rotation(
+        &mut self,
+        pool_id: &str,
+        request: RotationRequest<'_>,
+        eligibility: &[RotationEligibility],
+    ) -> Result<RotationDecision, CoreError> {
+        let mut updated = self
+            .rotation_pools
+            .get(pool_id)
+            .cloned()
+            .ok_or_else(|| CoreError::RotationPoolNotFound(pool_id.to_owned()))?;
+        let decision = updated.select(request, eligibility)?;
+        self.upsert_rotation_pool(updated)?;
+        Ok(decision)
     }
 }
 
@@ -1022,6 +1107,69 @@ mod tests {
                 ledger.runtime_assignment("codex-work"),
                 Some("profile-work")
             );
+        }
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn rotation_policy_cursor_and_storm_history_survive_restart() {
+        let db_path = std::env::temp_dir().join(format!(
+            "rotation-ledger-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let pool = RotationPool {
+            pool_id: "pool-a".into(),
+            provider_id: "opencode-go".into(),
+            ordered_profile_ids: vec!["profile-a".into(), "profile-b".into()],
+            mode: RotationMode::RoundRobin,
+            cooldown_ms: 500,
+            max_switches_per_hour: 3,
+            allowed_host_ids: vec!["host-a".into()],
+            quota_failover_enabled: false,
+            last_selection_cursor: None,
+            last_selected_at_ms: None,
+            recent_switches_ms: Vec::new(),
+        };
+        let candidates = vec![
+            RotationEligibility {
+                profile_id: "profile-a".into(),
+                provider_id: "opencode-go".into(),
+                eligible: true,
+                cooldown_until_ms: None,
+            },
+            RotationEligibility {
+                profile_id: "profile-b".into(),
+                provider_id: "opencode-go".into(),
+                eligible: true,
+                cooldown_until_ms: None,
+            },
+        ];
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            ledger.upsert_rotation_pool(pool).unwrap();
+            let decision = ledger
+                .select_rotation(
+                    "pool-a",
+                    RotationRequest {
+                        host_id: "host-a",
+                        current_profile_id: "profile-a",
+                        now_ms: 1_000,
+                        trigger: RotationTrigger::RoundRobin,
+                    },
+                    &candidates,
+                )
+                .unwrap();
+            assert_eq!(decision.selected_profile_id, "profile-b");
+        }
+        {
+            let ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            let restored = ledger.rotation_pool("pool-a").unwrap();
+            assert_eq!(restored.last_selection_cursor, Some(1));
+            assert_eq!(restored.last_selected_at_ms, Some(1_000));
+            assert_eq!(restored.recent_switches_ms, [1_000]);
         }
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

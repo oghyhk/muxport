@@ -385,16 +385,15 @@ async fn main() -> Result<(), DynError> {
         })
         .collect();
     let command_router = match credential_vault.as_ref() {
-        Some(vault) => Arc::new(CommandRouter::open_sqlite_with_vault(
+        Some(vault) => CommandRouter::open_sqlite_with_vault(
             &command_db,
             adapter_registry,
             Arc::clone(vault),
-        )?),
-        None => Arc::new(CommandRouter::open_sqlite(
-            &command_db,
-            adapter_registry,
-        )?),
-    };
+        )?,
+        None => CommandRouter::open_sqlite(&command_db, adapter_registry)?,
+    }
+    .with_host_id(host_id.clone());
+    let command_router = Arc::new(command_router);
     info!(path = %command_db, "persistent command ledger initialized");
     if let Some(vault) = credential_vault.as_ref() {
         let vault = vault.lock().await;
