@@ -1,7 +1,7 @@
 use adapter_api::{
     AdapterError, AgentAdapter, EventStream, ProjectInfo, SessionSummary,
 };
-use adapter_codex::CodexAdapter;
+use adapter_codex::{CodexAdapter, ManagedCodexProfile};
 use adapter_opencode::{ManagedOpenCodeProfile, OpenCodeAdapter};
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
@@ -173,15 +173,28 @@ async fn main() -> Result<(), DynError> {
         credential_profile_id: managed_opencode_profile_id.unwrap_or_default(),
     };
 
-    let codex_path = nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
+    let managed_codex_profile_id = nonempty_env("MUXPORT_CODEX_PROFILE_ID");
+    let (codex, default_codex_runtime_id): (Arc<dyn AgentAdapter>, String) =
+        if let Some(profile_id) = managed_codex_profile_id.as_deref() {
+            let profile = managed_codex_profile(profile_id)?;
+            info!(
+                profile_id,
+                profile_root = %profile.profile_root().display(),
+                "connector-managed isolated Codex App Server configured"
+            );
+            (Arc::new(profile.adapter()), format!("codex-managed-{profile_id}"))
+        } else {
+            let codex_path =
+                nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
+            (Arc::new(CodexAdapter::new(codex_path)), "codex-local".into())
+        };
     let codex_config = RuntimeConfig {
         runtime_id: nonempty_env("MUXPORT_CODEX_RUNTIME_ID")
-            .unwrap_or_else(|| "codex-local".into()),
+            .unwrap_or(default_codex_runtime_id),
         agent_type: AgentType::Codex,
         runtime_name: "Codex",
-        credential_profile_id: String::new(),
+        credential_profile_id: managed_codex_profile_id.unwrap_or_default(),
     };
-    let codex: Arc<dyn AgentAdapter> = Arc::new(CodexAdapter::new(codex_path));
 
     let runtimes = vec![
         (opencode_config, opencode),
@@ -861,6 +874,24 @@ fn managed_opencode_profile(
         executable,
         project_directory,
         port,
+    )?)
+}
+
+fn managed_codex_profile(profile_id: &str) -> Result<ManagedCodexProfile, DynError> {
+    let executable = nonempty_env("MUXPORT_CODEX_PATH")
+        .map(PathBuf::from)
+        .ok_or("MUXPORT_CODEX_PATH is required for a managed Codex profile")?;
+    let project_directory = nonempty_env("MUXPORT_CODEX_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let profiles_root = nonempty_env("MUXPORT_PROFILES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?.join("profiles"));
+    Ok(ManagedCodexProfile::prepare(
+        profiles_root,
+        profile_id,
+        executable,
+        project_directory,
     )?)
 }
 

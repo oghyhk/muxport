@@ -1,16 +1,18 @@
+mod managed;
 mod jsonrpc;
 
+pub use managed::{ManagedCodexError, ManagedCodexProfile};
 use adapter_api::{
-    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialMaterial,
+    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialKind, CredentialMaterial,
     CredentialValidation, EventStream, ProjectInfo, SessionSummary,
 };
 use async_trait::async_trait;
-use jsonrpc::{Incoming, JsonRpcPeer};
+use jsonrpc::{Incoming, JsonRpcPeer, ProcessConfig};
 use muxport_protocol::{
-    event, AgentType, ApprovalRequestedEvent, ApprovalResolvedEvent, Event, SessionUpdatedEvent,
-    StreamDeltaEvent,
+    event, AgentType, ApprovalRequestedEvent, ApprovalResolvedEvent, CredentialStatus, Event,
+    SessionUpdatedEvent, StreamDeltaEvent,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -31,17 +33,55 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// per-profile process and state isolation with rollback.
 #[derive(Clone)]
 pub struct CodexAdapter {
-    cmd_path: String,
+    process: ProcessConfig,
+    profile_id: String,
     client: Arc<Mutex<Option<Arc<JsonRpcPeer>>>>,
     state: Arc<CodexState>,
     observed_version: Arc<RwLock<Option<String>>>,
 }
 
 struct CodexState {
+    profile_id: String,
     events: broadcast::Sender<AdapterMessage>,
     sessions: RwLock<HashMap<String, SessionContext>>,
     active_turns: RwLock<HashMap<String, ActiveTurn>>,
     pending_approvals: RwLock<HashMap<String, PendingApproval>>,
+    account: RwLock<Option<CodexAccount>>,
+    rate_limits: RwLock<Option<Value>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum CodexAccount {
+    ApiKey,
+    Chatgpt {
+        email: Option<String>,
+        #[serde(rename = "planType")]
+        plan_type: Option<String>,
+    },
+    AmazonBedrock {
+        #[serde(rename = "credentialSource")]
+        credential_source: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountRead {
+    pub account: Option<CodexAccount>,
+    pub requires_openai_auth: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum CodexLoginStart {
+    ApiKey,
+    Chatgpt { login_id: String, auth_url: String },
+    ChatgptDeviceCode {
+        login_id: String,
+        verification_url: String,
+        user_code: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -90,15 +130,27 @@ struct CodexThread {
 
 impl CodexAdapter {
     pub fn new(cmd_path: impl Into<String>) -> Self {
+        Self::with_process(ProcessConfig::inherited(cmd_path.into()), String::new())
+    }
+
+    pub(crate) fn new_managed(process: ProcessConfig, profile_id: String) -> Self {
+        Self::with_process(process, profile_id)
+    }
+
+    fn with_process(process: ProcessConfig, profile_id: String) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
-            cmd_path: cmd_path.into(),
+            process,
+            profile_id,
             client: Arc::new(Mutex::new(None)),
             state: Arc::new(CodexState {
+                profile_id: profile_id.clone(),
                 events,
                 sessions: RwLock::new(HashMap::new()),
                 active_turns: RwLock::new(HashMap::new()),
                 pending_approvals: RwLock::new(HashMap::new()),
+                account: RwLock::new(None),
+                rate_limits: RwLock::new(None),
             }),
             observed_version: Arc::new(RwLock::new(None)),
         }
@@ -138,7 +190,7 @@ impl CodexAdapter {
             let _ = stale.shutdown().await;
         }
 
-        let (client, incoming) = JsonRpcPeer::connect_process(&self.cmd_path).await?;
+        let (client, incoming) = JsonRpcPeer::connect_process(&self.process).await?;
         let state = Arc::clone(&self.state);
         let reader_client = Arc::downgrade(&client);
         let peer_id = client.instance_id().to_owned();
@@ -152,7 +204,11 @@ impl CodexAdapter {
     async fn record_version(&self) -> Result<(), AdapterError> {
         let output = tokio::time::timeout(
             VERSION_TIMEOUT,
-            Command::new(&self.cmd_path).arg("--version").output(),
+            {
+                let mut command = Command::new(self.process.cmd_path());
+                self.process.configure(&mut command);
+                command.arg("--version").output()
+            },
         )
         .await
         .map_err(|_| AdapterError::InitFailed("Codex version probe timed out".into()))?
@@ -160,7 +216,8 @@ impl CodexAdapter {
         if !output.status.success() {
             return Err(AdapterError::InitFailed(format!(
                 "`{} --version` exited with {}",
-                self.cmd_path, output.status
+                self.process.cmd_path().display(),
+                output.status
             )));
         }
         let version = String::from_utf8(output.stdout)
@@ -174,6 +231,101 @@ impl CodexAdapter {
             .map_err(|_| AdapterError::Internal("Codex version state lock was poisoned".into()))? =
             Some(version);
         Ok(())
+    }
+
+    pub async fn read_account(&self, refresh_token: bool) -> Result<CodexAccountRead, AdapterError> {
+        let client = self.ensure_client().await?;
+        let response = client
+            .request(
+                "account/read",
+                json!({"refreshToken": refresh_token}),
+                false,
+            )
+            .await?;
+        let account: CodexAccountRead = serde_json::from_value(response).map_err(|error| {
+            AdapterError::Protocol(format!(
+                "Codex account/read returned an invalid response: {error}"
+            ))
+        })?;
+        *self
+            .state
+            .account
+            .write()
+            .map_err(|_| AdapterError::Internal("Codex account state lock was poisoned".into()))? =
+            account.account.clone();
+        Ok(account)
+    }
+
+    pub async fn start_chatgpt_login(&self) -> Result<CodexLoginStart, AdapterError> {
+        self.require_managed_profile("ChatGPT login")?;
+        self.start_login(json!({
+            "type": "chatgpt",
+            "useHostedLoginSuccessPage": true,
+            "appBrand": "codex"
+        }))
+        .await
+    }
+
+    pub async fn start_device_code_login(&self) -> Result<CodexLoginStart, AdapterError> {
+        self.require_managed_profile("ChatGPT device-code login")?;
+        self.start_login(json!({"type": "chatgptDeviceCode"})).await
+    }
+
+    async fn start_login(&self, params: Value) -> Result<CodexLoginStart, AdapterError> {
+        let client = self.ensure_client().await?;
+        let response = client
+            .request("account/login/start", params, true)
+            .await?;
+        serde_json::from_value(response).map_err(|error| {
+            AdapterError::Protocol(format!(
+                "Codex account/login/start returned an invalid response: {error}"
+            ))
+        })
+    }
+
+    pub async fn cancel_login(&self, login_id: &str) -> Result<(), AdapterError> {
+        Self::validate_nonempty(login_id, "login id")?;
+        self.require_managed_profile("login cancellation")?;
+        self.ensure_client()
+            .await?
+            .request(
+                "account/login/cancel",
+                json!({"loginId": login_id}),
+                true,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn logout(&self) -> Result<(), AdapterError> {
+        self.require_managed_profile("logout")?;
+        self.ensure_client()
+            .await?
+            .request("account/logout", json!({}), true)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn read_rate_limits(&self) -> Result<Value, AdapterError> {
+        let response = self
+            .ensure_client()
+            .await?
+            .request("account/rateLimits/read", json!({}), false)
+            .await?;
+        *self.state.rate_limits.write().map_err(|_| {
+            AdapterError::Internal("Codex rate-limit state lock was poisoned".into())
+        })? = Some(response.clone());
+        Ok(response)
+    }
+
+    fn require_managed_profile(&self, operation: &str) -> Result<(), AdapterError> {
+        if self.profile_id.is_empty() {
+            Err(Self::unsupported(&format!(
+                "{operation} requires an isolated managed profile"
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     async fn list_all_threads(
@@ -284,8 +436,8 @@ impl AgentAdapter for CodexAdapter {
             can_approve_commands: true,
             can_approve_edits: true,
             can_interrupt: true,
-            can_switch_credentials_live: false,
-            can_read_usage: false,
+            can_switch_credentials_live: !self.profile_id.is_empty(),
+            can_read_usage: !self.profile_id.is_empty(),
         })
     }
 
@@ -311,7 +463,7 @@ impl AgentAdapter for CodexAdapter {
         self.list_all_threads(&client)
             .await?
             .into_iter()
-            .map(thread_to_summary)
+            .map(|thread| thread_to_summary(thread, &self.profile_id))
             .collect()
     }
 
@@ -351,10 +503,11 @@ impl AgentAdapter for CodexAdapter {
                 "project path must be absolute".into(),
             ));
         }
-        if !profile_id.trim().is_empty() {
-            return Err(Self::unsupported(
-                "profile-bound session creation requires isolated managed processes",
-            ));
+        if profile_id != self.profile_id {
+            return Err(AdapterError::InvalidInput(format!(
+                "Codex session profile {profile_id:?} does not match adapter profile {:?}",
+                self.profile_id
+            )));
         }
 
         let client = self.ensure_client().await?;
@@ -508,21 +661,82 @@ impl AgentAdapter for CodexAdapter {
 
     async fn validate_credential(
         &self,
-        _credential: &CredentialMaterial,
+        credential: &CredentialMaterial,
     ) -> Result<CredentialValidation, AdapterError> {
-        Err(Self::unsupported("credential validation"))
+        self.require_managed_profile("credential validation")?;
+        if credential.provider_id() != "openai" || credential.kind() != CredentialKind::ApiKey {
+            return Err(AdapterError::CredentialInvalid(
+                "Codex managed profiles accept only OpenAI API keys".into(),
+            ));
+        }
+        let secret = credential.secret_utf8()?;
+        if secret.trim() != secret || secret.len() < 8 || secret.chars().any(char::is_whitespace) {
+            return Err(AdapterError::CredentialInvalid(
+                "OpenAI API key has an invalid shape".into(),
+            ));
+        }
+        Ok(CredentialValidation {
+            status: CredentialStatus::Staged,
+            provider_id: "openai".into(),
+            account_fingerprint: None,
+        })
     }
 
     async fn activate_credential(
         &self,
-        _profile_id: &str,
-        _credential: &CredentialMaterial,
+        profile_id: &str,
+        credential: &CredentialMaterial,
     ) -> Result<(), AdapterError> {
-        Err(Self::unsupported("credential activation"))
+        self.require_managed_profile("credential activation")?;
+        if profile_id != self.profile_id {
+            return Err(AdapterError::InvalidInput(format!(
+                "credential activation profile {profile_id:?} does not match adapter profile {:?}",
+                self.profile_id
+            )));
+        }
+        self.validate_credential(credential).await?;
+        let response = self
+            .ensure_client()
+            .await?
+            .request(
+                "account/login/start",
+                json!({"type": "apiKey", "apiKey": credential.secret_utf8()?}),
+                true,
+            )
+            .await?;
+        let login: CodexLoginStart = serde_json::from_value(response).map_err(|error| {
+            AdapterError::OutcomeUnknown(format!(
+                "Codex accepted account/login/start but returned an invalid response: {error}"
+            ))
+        })?;
+        if login != CodexLoginStart::ApiKey {
+            return Err(AdapterError::OutcomeUnknown(
+                "Codex API-key login returned an unexpected login type".into(),
+            ));
+        }
+        Ok(())
     }
 
-    async fn read_account_state(&self, _provider_id: &str) -> Result<AccountState, AdapterError> {
-        Err(Self::unsupported("account state"))
+    async fn read_account_state(&self, provider_id: &str) -> Result<AccountState, AdapterError> {
+        self.require_managed_profile("account state")?;
+        if provider_id != "openai" {
+            return Err(AdapterError::InvalidInput(
+                "Codex account provider must be openai".into(),
+            ));
+        }
+        let account = self.read_account(false).await?;
+        let connected = matches!(
+            account.account.as_ref(),
+            Some(CodexAccount::ApiKey | CodexAccount::Chatgpt { .. })
+        );
+        Ok(AccountState {
+            provider_id: provider_id.to_owned(),
+            connected,
+            account_fingerprint: match account.account.as_ref() {
+                Some(CodexAccount::Chatgpt { email, .. }) => email.clone(),
+                _ => None,
+            },
+        })
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
@@ -692,6 +906,7 @@ impl CodexState {
                     &thread_title(&parsed),
                     thread_status(&parsed.status)?,
                     &parsed.cwd,
+                    &self.profile_id,
                     now_ms(),
                 )])
             }
@@ -707,6 +922,7 @@ impl CodexState {
                     &context.title,
                     status,
                     &context.project_path,
+                    &self.profile_id,
                     now_ms(),
                 )])
             }
@@ -723,6 +939,7 @@ impl CodexState {
                     &context.title,
                     &context.status,
                     &context.project_path,
+                    &self.profile_id,
                     now_ms(),
                 )])
             }
@@ -736,6 +953,7 @@ impl CodexState {
                     &context.title,
                     status,
                     &context.project_path,
+                    &self.profile_id,
                     now_ms(),
                 )])
             }
@@ -759,6 +977,7 @@ impl CodexState {
                     &context.title,
                     "inProgress",
                     &context.project_path,
+                    &self.profile_id,
                     timestamp_seconds_to_ms(
                         turn.get("startedAt").and_then(Value::as_i64),
                     ),
@@ -792,6 +1011,7 @@ impl CodexState {
                         &context.title,
                         status,
                         &context.project_path,
+                        &self.profile_id,
                         timestamp,
                     ),
                 ])
@@ -824,6 +1044,46 @@ impl CodexState {
                     .retain(|_, approval| {
                         approval.peer_id != peer_id || approval.request_id != *request_id
                     });
+                Ok(Vec::new())
+            }
+            "account/updated" => {
+                let auth_mode = params.get("authMode").and_then(Value::as_str);
+                let account = match auth_mode {
+                    None => None,
+                    Some("apikey") => Some(CodexAccount::ApiKey),
+                    Some("chatgpt") | Some("chatgptAuthTokens") => {
+                        let prior_email = self
+                            .account
+                            .read()
+                            .map_err(|_| {
+                                AdapterError::Internal(
+                                    "Codex account state lock was poisoned".into(),
+                                )
+                            })?
+                            .as_ref()
+                            .and_then(|account| match account {
+                                CodexAccount::Chatgpt { email, .. } => email.clone(),
+                                _ => None,
+                            });
+                        Some(CodexAccount::Chatgpt {
+                            email: prior_email,
+                            plan_type: params
+                                .get("planType")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        })
+                    }
+                    Some(_) => return Ok(Vec::new()),
+                };
+                *self.account.write().map_err(|_| {
+                    AdapterError::Internal("Codex account state lock was poisoned".into())
+                })? = account;
+                Ok(Vec::new())
+            }
+            "account/rateLimits/updated" => {
+                *self.rate_limits.write().map_err(|_| {
+                    AdapterError::Internal("Codex rate-limit state lock was poisoned".into())
+                })? = Some(params.clone());
                 Ok(Vec::new())
             }
             _ => Ok(Vec::new()),
@@ -976,7 +1236,10 @@ async fn fail_peer(peer: &Weak<JsonRpcPeer>, state: &CodexState, detail: String)
     }
 }
 
-fn thread_to_summary(thread: CodexThread) -> Result<SessionSummary, AdapterError> {
+fn thread_to_summary(
+    thread: CodexThread,
+    profile_id: &str,
+) -> Result<SessionSummary, AdapterError> {
     let title = thread_title(&thread);
     let status = thread_status(&thread.status)?.to_owned();
     Ok(SessionSummary {
@@ -984,7 +1247,7 @@ fn thread_to_summary(thread: CodexThread) -> Result<SessionSummary, AdapterError
         project_path: thread.cwd,
         title,
         status,
-        credential_profile_id: String::new(),
+        credential_profile_id: profile_id.to_owned(),
         created_at_ms: thread.created_at.saturating_mul(1000),
     })
 }
@@ -1053,6 +1316,7 @@ fn session_event(
     title: &str,
     status: &str,
     project_path: &str,
+    profile_id: &str,
     timestamp_ms: i64,
 ) -> Event {
     new_event(
@@ -1062,7 +1326,7 @@ fn session_event(
             runtime_id: String::new(),
             title: title.to_owned(),
             status: status.to_owned(),
-            credential_profile_id: String::new(),
+            credential_profile_id: profile_id.to_owned(),
             updated_at_ms: timestamp_ms,
             project_path: project_path.to_owned(),
         }),
@@ -1099,7 +1363,7 @@ mod tests {
     fn maps_thread_and_notification_state() {
         let adapter = CodexAdapter::new("codex");
         let thread: CodexThread = serde_json::from_value(sample_thread()).unwrap();
-        let summary = thread_to_summary(thread).unwrap();
+        let summary = thread_to_summary(thread, "").unwrap();
         assert_eq!(summary.session_id, "thread-1");
         assert_eq!(summary.project_path, "/srv/app");
         assert_eq!(summary.title, "Build feature");

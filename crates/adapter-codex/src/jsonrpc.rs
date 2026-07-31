@@ -1,6 +1,8 @@
 use adapter_api::AdapterError;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -16,6 +18,71 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 type PendingMap = HashMap<u64, oneshot::Sender<Result<Value, ReplyError>>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessConfig {
+    cmd_path: PathBuf,
+    current_dir: Option<PathBuf>,
+    clear_env: bool,
+    args: Vec<OsString>,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl ProcessConfig {
+    pub(crate) fn inherited(cmd_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cmd_path: cmd_path.into(),
+            current_dir: None,
+            clear_env: false,
+            args: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    pub(crate) fn isolated(
+        cmd_path: impl Into<PathBuf>,
+        current_dir: impl Into<PathBuf>,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+    ) -> Self {
+        Self {
+            cmd_path: cmd_path.into(),
+            current_dir: Some(current_dir.into()),
+            clear_env: true,
+            args,
+            env,
+        }
+    }
+
+    pub(crate) fn cmd_path(&self) -> &Path {
+        &self.cmd_path
+    }
+
+    pub(crate) fn configure(&self, command: &mut Command) {
+        if self.clear_env {
+            command.env_clear();
+        }
+        if let Some(current_dir) = self.current_dir.as_ref() {
+            command.current_dir(current_dir);
+        }
+        command.args(&self.args);
+        for (name, value) in &self.env {
+            command.env(name, value);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn environment_value(&self, name: &str) -> Option<&OsStr> {
+        self.env
+            .iter()
+            .find_map(|(key, value)| (key == name).then_some(value.as_os_str()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clears_environment(&self) -> bool {
+        self.clear_env
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum Incoming {
@@ -48,9 +115,10 @@ pub(crate) struct JsonRpcPeer {
 
 impl JsonRpcPeer {
     pub(crate) async fn connect_process(
-        cmd_path: &str,
+        process: &ProcessConfig,
     ) -> Result<(Arc<Self>, mpsc::Receiver<Incoming>), AdapterError> {
-        let mut command = Command::new(cmd_path);
+        let mut command = Command::new(process.cmd_path());
+        process.configure(&mut command);
         command
             .arg("app-server")
             .stdin(Stdio::piped())
