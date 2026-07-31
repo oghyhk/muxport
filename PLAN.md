@@ -420,7 +420,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Mobile restart checklist
 
 - [x] Persist host list, non-secret labels, last snapshot, cursors, pending local operation IDs, and device identity through atomic storage.
-- [ ] On launch, render cached state with a clear “reconnecting” marker.
+- [x] On launch, render cached state with a clear “reconnecting” marker.
 - [x] Re-establish transport and verify host identity before accepting events.
 - [ ] Query status of every locally pending operation by idempotency key.
 - [ ] Resolve each operation to succeeded, failed, expired, or reconciliation required.
@@ -594,7 +594,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Mobile lifecycle
 
 - [ ] Handle foreground, background, suspension, process death, network change, and low-memory events.
-- [ ] Persist sync cursor before background suspension.
+- [x] Persist sync cursor before background suspension.
 - [ ] Use push as a wake-up hint, never as authoritative state.
 - [ ] Fetch the current approval from the connector before rendering an action button from a notification.
 - [x] Prevent double approval from repeated taps or duplicate pushes.

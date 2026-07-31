@@ -12,6 +12,7 @@ import 'screens/diagnostics_screen.dart';
 import 'state/app_bootstrap.dart';
 import 'state/host_sync_orchestrator.dart';
 import 'state/mobile_cache_store.dart';
+import 'state/mobile_lifecycle.dart';
 import 'state/mobile_sync_state.dart';
 import 'transport/direct_transport_client.dart';
 import 'transport/direct_transport_protocol.dart';
@@ -135,30 +136,102 @@ class MainNavigationScreen extends StatefulWidget {
   State<MainNavigationScreen> createState() => _MainNavigationScreenState();
 }
 
-class _MainNavigationScreenState extends State<MainNavigationScreen> {
+class _MainNavigationScreenState extends State<MainNavigationScreen>
+    with WidgetsBindingObserver {
   int _currentIndex = 0;
   late Map<String, HostSyncState> _hosts;
   bool _pairingInProgress = false;
   bool _syncInProgress = false;
   Timer? _syncTimer;
+  bool _isForeground = true;
   final HostSyncOrchestrator _syncOrchestrator = const HostSyncOrchestrator();
 
   @override
   void initState() {
     super.initState();
     _hosts = Map.of(widget.bootstrap.cache.hosts);
+    WidgetsBinding.instance.addObserver(this);
+    _markReconnectableHostsReconnecting();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_syncAllHosts());
     });
+    _startSyncTimer();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _syncTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _isForeground = true;
+        _markReconnectableHostsReconnecting(notify: true);
+        _startSyncTimer();
+        unawaited(_syncAllHosts());
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _isForeground = false;
+        _syncTimer?.cancel();
+        _syncTimer = null;
+        unawaited(_persistBeforeSuspension());
+        break;
+    }
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    unawaited(_persistCurrentCache());
+  }
+
+  void _startSyncTimer() {
+    if (!_isForeground || _syncTimer?.isActive == true) {
+      return;
+    }
     _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       unawaited(_syncAllHosts());
     });
   }
 
-  @override
-  void dispose() {
-    _syncTimer?.cancel();
-    super.dispose();
+  void _markReconnectableHostsReconnecting({bool notify = false}) {
+    final nextHosts = MobileLifecycleReducer.prepareForeground(
+      hosts: _hosts.values,
+      canAuthenticateTransport: widget.bootstrap.canAuthenticateTransport,
+    );
+    if (notify && mounted) {
+      setState(() {
+        _hosts = nextHosts;
+      });
+    } else {
+      _hosts = nextHosts;
+    }
+  }
+
+  Future<void> _persistBeforeSuspension() async {
+    final nextHosts = MobileLifecycleReducer.prepareSuspension(_hosts.values);
+    if (mounted) {
+      setState(() {
+        _hosts = nextHosts;
+      });
+    } else {
+      _hosts = nextHosts;
+    }
+    await _persistCurrentCache();
+  }
+
+  Future<void> _persistCurrentCache() async {
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (cacheStore == null) {
+      return;
+    }
+    await cacheStore.save(MobileCacheSnapshot(hosts: _hosts.values));
   }
 
   @override
@@ -389,6 +462,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     final identity = widget.bootstrap.identity;
     final cacheStore = widget.bootstrap.cacheStore;
     if (!mounted ||
+        !_isForeground ||
         _syncInProgress ||
         identity == null ||
         cacheStore == null ||
