@@ -1,6 +1,11 @@
+mod bulk_switch;
 mod credential_switch;
 mod rotation;
 
+pub use bulk_switch::{
+    BulkSwitchError, BulkSwitchOperation, BulkSwitchSummary, BulkSwitchTarget,
+    BulkSwitchTargetState,
+};
 pub use credential_switch::{
     activate_staged_credential, switch_runtime_assignment, CredentialRuntime,
     CredentialSwitchError, CredentialSwitchResult,
