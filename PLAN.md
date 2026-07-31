@@ -432,7 +432,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Acquire a single-instance lock without deleting another process's lock blindly.
 - [x] Open stores read-only first, verify schema and integrity, then migrate one subsystem at a time.
 - [x] Load desired runtime configuration and operation ledger.
-- [ ] Unlock vault or enter `vault_locked`.
+- [x] Unlock vault or enter `vault_locked`.
 - [x] Generate a new connector boot epoch.
 - [ ] Discover existing managed child processes using verifiable PID, executable path, start time, and profile markers; do not trust PID alone.
 - [ ] Probe every source API and obtain authoritative snapshots.

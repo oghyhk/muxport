@@ -366,6 +366,14 @@ async fn main() -> Result<(), DynError> {
             None
         }
     };
+    let vault_available = credential_vault.is_some();
+    if !vault_available {
+        mirror.set_connector_state(ConnectorState::VaultLocked);
+        mirror.save_snapshot(&journal)?;
+        warn!(
+            "connector entered vault_locked; non-credential recovery may continue but credential mutations are disabled"
+        );
+    }
     let command_db = std::env::var("MUXPORT_COMMAND_DB")
         .unwrap_or_else(|_| "muxport-commands.db".into());
     let adapter_registry = runtimes
@@ -443,7 +451,9 @@ async fn main() -> Result<(), DynError> {
                     bind_address = %local_address,
                     "authenticated direct command transport listening"
                 );
-                mirror.set_connector_state(ConnectorState::Ready);
+                if vault_available {
+                    mirror.set_connector_state(ConnectorState::Ready);
+                }
                 mirror.save_snapshot(&journal)?;
                 Some(tokio::spawn(service.serve(
                     listener,
@@ -481,7 +491,9 @@ async fn main() -> Result<(), DynError> {
             "authenticated snapshot replay and live event polling are available"
         );
     } else {
-        mirror.set_connector_state(ConnectorState::Degraded);
+        if vault_available {
+            mirror.set_connector_state(ConnectorState::Degraded);
+        }
         mirror.save_snapshot(&journal)?;
         warn!(
             "mobile sync transport is unavailable; connector remains degraded"
@@ -586,7 +598,6 @@ fn apply_source_update(
                     &config.runtime_id,
                     &config.credential_profile_id,
                 );
-                mirror.set_connector_state(ConnectorState::Degraded);
                 mirror.save_snapshot(journal)?;
                 info!(
                     runtime_id = %config.runtime_id,

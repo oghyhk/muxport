@@ -149,14 +149,15 @@ impl RuntimeMirror {
                 project_paths: Vec::new(),
             }),
         }
-        self.snapshot.connector_state = if state == RuntimeState::Degraded
+        let connector_state = self.connector_state();
+        if (state == RuntimeState::Degraded
             || state == RuntimeState::Crashed
-            || state == RuntimeState::CrashLoop
+            || state == RuntimeState::CrashLoop)
+            && connector_state != ConnectorState::VaultLocked
+            && connector_state != ConnectorState::FatalError
         {
-            ConnectorState::Degraded as i32
-        } else {
-            self.snapshot.connector_state
-        };
+            self.snapshot.connector_state = ConnectorState::Degraded as i32;
+        }
     }
 
     pub fn set_runtime_active_profile(&mut self, runtime_id: &str, profile_id: &str) {
@@ -554,6 +555,34 @@ mod tests {
         assert_eq!(snapshot.active_sessions[0].title, "Existing");
         assert_eq!(snapshot.active_sessions[0].project_path, "/repo");
         assert_eq!(snapshot.active_sessions[0].status, "busy");
+    }
+
+    #[test]
+    fn runtime_failures_do_not_hide_vault_locked_or_fatal_connector_state() {
+        for connector_state in [
+            ConnectorState::VaultLocked,
+            ConnectorState::FatalError,
+        ] {
+            let mut mirror =
+                RuntimeMirror::new("host", "hostname", connector_state, 0);
+            mirror.mark_runtime_state(
+                "opencode-1",
+                AgentType::Opencode,
+                "OpenCode",
+                RuntimeState::Crashed,
+            );
+            assert_eq!(mirror.connector_state(), connector_state);
+        }
+
+        let mut recovering =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Recovering, 0);
+        recovering.mark_runtime_state(
+            "opencode-1",
+            AgentType::Opencode,
+            "OpenCode",
+            RuntimeState::Crashed,
+        );
+        assert_eq!(recovering.connector_state(), ConnectorState::Degraded);
     }
 
     #[test]
