@@ -255,6 +255,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
 
   @override
   void didHaveMemoryPressure() {
+    // Treat memory pressure like a privacy boundary as well as a durability
+    // signal: no short-lived credential input or diagnostics artifact should
+    // survive simply because the OS may soon terminate the process.
+    _sensitiveInputs.clear();
+    unawaited(_clearSensitiveArtifacts());
     unawaited(_persistCurrentCache());
   }
 
