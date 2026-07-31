@@ -4,8 +4,8 @@ pub use managed::{ManagedOpenCodeError, ManagedOpenCodeProfile};
 
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
-    CredentialKind, CredentialMaterial, CredentialValidation, EventStream, ProjectInfo,
-    SessionSummary, UsageSnapshot, ADAPTER_CAPABILITY_VERSION,
+    CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialValidation,
+    EventStream, ProjectInfo, SessionSummary, UsageSnapshot, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -20,7 +20,7 @@ use reqwest::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 const SSE_CHANNEL_CAPACITY: usize = 128;
+const COMPATIBILITY_DIAGNOSTIC_CAPACITY: usize = 128;
 
 /// OpenCode server adapter backed by the documented HTTP and global SSE APIs.
 ///
@@ -43,6 +44,7 @@ pub struct OpenCodeAdapter {
     observed_version: Arc<RwLock<Option<String>>>,
     sessions: Arc<RwLock<HashMap<String, SessionContext>>>,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    compatibility_diagnostics: Arc<RwLock<VecDeque<CompatibilityDiagnostic>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +139,7 @@ impl OpenCodeAdapter {
             observed_version: Arc::new(RwLock::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
+            compatibility_diagnostics: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -694,7 +697,21 @@ impl OpenCodeAdapter {
                     }),
                 )))
             }
-            _ => Ok(None),
+            _ => {
+                let mut diagnostics = self.compatibility_diagnostics.write().map_err(|_| {
+                    AdapterError::Internal(
+                        "OpenCode compatibility diagnostic lock was poisoned".into(),
+                    )
+                })?;
+                if diagnostics.len() == COMPATIBILITY_DIAGNOSTIC_CAPACITY {
+                    diagnostics.pop_front();
+                }
+                diagnostics.push_back(CompatibilityDiagnostic::unknown_event(
+                    event_type,
+                    now_ms(),
+                ));
+                Ok(None)
+            }
         }
     }
 }
@@ -1185,6 +1202,17 @@ impl AgentAdapter for OpenCodeAdapter {
         ))
     }
 
+    fn compatibility_diagnostics(&self) -> Result<Vec<CompatibilityDiagnostic>, AdapterError> {
+        self.compatibility_diagnostics
+            .read()
+            .map(|diagnostics| diagnostics.iter().cloned().collect())
+            .map_err(|_| {
+                AdapterError::Internal(
+                    "OpenCode compatibility diagnostic lock was poisoned".into(),
+                )
+            })
+    }
+
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
         // This adapter observes an externally managed HTTP server and owns no
         // child process. Dropping its event stream and client handles is the
@@ -1401,6 +1429,23 @@ mod tests {
                 .directory,
             "/srv/app"
         );
+    }
+
+    #[test]
+    fn retains_only_bounded_unknown_event_type_diagnostics() {
+        let adapter = OpenCodeAdapter::new("http://127.0.0.1:9", None);
+        for index in 0..130 {
+            let event = format!(
+                r#"{{"directory":"/srv/app","payload":{{"type":"future.event-{index}","properties":{{"secret":"must-not-leak"}}}}}}"#
+            );
+            assert!(adapter.normalize_global_event(&event).unwrap().is_none());
+        }
+        let diagnostics = adapter.compatibility_diagnostics().unwrap();
+        assert_eq!(diagnostics.len(), COMPATIBILITY_DIAGNOSTIC_CAPACITY);
+        assert_eq!(diagnostics[0].source_event_type, "future.event-2");
+        let encoded = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!encoded.contains("must-not-leak"));
+        assert!(!encoded.contains("/srv/app"));
     }
 
     #[tokio::test]

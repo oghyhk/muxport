@@ -546,7 +546,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Stream thread, turn, item, message delta, command, file-change, diff, usage, warning, and completion notifications.
 - [x] Implement server-initiated command/edit approval requests and correlated responses.
 - [x] Implement account read, login start/cancel, logout, update notifications, and rate-limit reads.
-- [ ] Preserve unknown notifications for compatibility diagnostics without displaying untrusted raw payloads as privileged UI.
+- [x] Preserve unknown notifications for compatibility diagnostics without displaying untrusted raw payloads as privileged UI.
 - [x] Keep stderr tracing separate from JSON-RPC stdout.
 - [ ] Apply bounded queues and backpressure; coalesce UI deltas before mobile transmission.
 - [x] Do not expose App Server directly to the network.

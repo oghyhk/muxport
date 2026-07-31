@@ -60,6 +60,33 @@ pub struct AdapterProbe {
     pub health: AdapterHealth,
 }
 
+const MAX_DIAGNOSTIC_EVENT_TYPE_CHARS: usize = 128;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityDiagnostic {
+    pub source_event_type: String,
+    pub observed_at_ms: i64,
+}
+
+impl CompatibilityDiagnostic {
+    pub fn unknown_event(source_event_type: &str, observed_at_ms: i64) -> Self {
+        let source_event_type = source_event_type.trim();
+        let safe = !source_event_type.is_empty()
+            && source_event_type.len() <= MAX_DIAGNOSTIC_EVENT_TYPE_CHARS
+            && source_event_type
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || b"./_-".contains(&value));
+        Self {
+            source_event_type: if safe {
+                source_event_type.to_owned()
+            } else {
+                "<invalid-event-type>".into()
+            },
+            observed_at_ms,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProjectInfo {
     pub path: String,
@@ -212,5 +239,22 @@ pub trait AgentAdapter: Send + Sync {
     ) -> Result<(), AdapterError>;
     async fn read_account_state(&self, provider_id: &str) -> Result<AccountState, AdapterError>;
     async fn read_usage(&self) -> Result<UsageSnapshot, AdapterError>;
+    fn compatibility_diagnostics(&self) -> Result<Vec<CompatibilityDiagnostic>, AdapterError>;
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatibility_diagnostic_never_retains_untrusted_payload_text() {
+        let safe = CompatibilityDiagnostic::unknown_event("thread/new-kind", 10);
+        assert_eq!(safe.source_event_type, "thread/new-kind");
+
+        let unsafe_value =
+            CompatibilityDiagnostic::unknown_event("new-kind\nsecret=bearer-value", 11);
+        assert_eq!(unsafe_value.source_event_type, "<invalid-event-type>");
+        assert!(!format!("{unsafe_value:?}").contains("bearer-value"));
+    }
 }

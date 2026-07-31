@@ -4,8 +4,9 @@ mod jsonrpc;
 pub use managed::{ManagedCodexError, ManagedCodexProfile};
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
-    CredentialKind, CredentialMaterial, CredentialValidation, EventStream, ProjectInfo,
-    SessionSummary, UsageBucket, UsageSnapshot, UsageWindow, ADAPTER_CAPABILITY_VERSION,
+    CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialValidation,
+    EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot, UsageWindow,
+    ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use jsonrpc::{Incoming, JsonRpcPeer, ProcessConfig};
@@ -28,6 +29,7 @@ const MAX_THREAD_PAGES: usize = 100;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const APP_SERVER_START_WINDOW: Duration = Duration::from_secs(10 * 60);
 const MAX_APP_SERVER_STARTS_PER_WINDOW: usize = 5;
+const COMPATIBILITY_DIAGNOSTIC_CAPACITY: usize = 128;
 
 /// Codex adapter backed by the stable App Server JSONL/JSON-RPC API.
 ///
@@ -88,6 +90,7 @@ struct CodexState {
     rate_limits: RwLock<Option<Value>>,
     login_completions: RwLock<HashMap<String, Result<(), String>>>,
     login_completion_changed: Notify,
+    compatibility_diagnostics: RwLock<VecDeque<CompatibilityDiagnostic>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -195,6 +198,7 @@ impl CodexAdapter {
                 rate_limits: RwLock::new(None),
                 login_completions: RwLock::new(HashMap::new()),
                 login_completion_changed: Notify::new(),
+                compatibility_diagnostics: RwLock::new(VecDeque::new()),
             }),
             observed_version: Arc::new(RwLock::new(None)),
             starts: Arc::new(Mutex::new(AppServerStartGuard::default())),
@@ -912,6 +916,18 @@ impl AgentAdapter for CodexAdapter {
         })
     }
 
+    fn compatibility_diagnostics(&self) -> Result<Vec<CompatibilityDiagnostic>, AdapterError> {
+        self.state
+            .compatibility_diagnostics
+            .read()
+            .map(|diagnostics| diagnostics.iter().cloned().collect())
+            .map_err(|_| {
+                AdapterError::Internal(
+                    "Codex compatibility diagnostic lock was poisoned".into(),
+                )
+            })
+    }
+
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
         let client = self.client.lock().await.take();
         match client {
@@ -1291,7 +1307,18 @@ impl CodexState {
                 })? = Some(params.clone());
                 Ok(Vec::new())
             }
-            _ => Ok(Vec::new()),
+            _ => {
+                let mut diagnostics = self.compatibility_diagnostics.write().map_err(|_| {
+                    AdapterError::Internal(
+                        "Codex compatibility diagnostic lock was poisoned".into(),
+                    )
+                })?;
+                if diagnostics.len() == COMPATIBILITY_DIAGNOSTIC_CAPACITY {
+                    diagnostics.pop_front();
+                }
+                diagnostics.push_back(CompatibilityDiagnostic::unknown_event(method, now_ms()));
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -1822,6 +1849,23 @@ mod tests {
             adapter.state.rate_limits.read().unwrap().as_ref(),
             Some(&json!({"rateLimits": {"limitId": "codex"}}))
         );
+        adapter
+            .state
+            .notification_events(
+                "future/notification",
+                &json!({"accessToken": "must-not-leak"}),
+                "peer-a",
+            )
+            .unwrap();
+        let diagnostics = adapter.compatibility_diagnostics().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].source_event_type,
+            "future/notification"
+        );
+        assert!(!serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("must-not-leak"));
     }
 
     #[test]

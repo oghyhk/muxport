@@ -1,7 +1,7 @@
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
-    CredentialMaterial, CredentialValidation, EventStream, ProjectInfo, SessionSummary,
-    UsageBucket, UsageSnapshot, UsageWindow, ADAPTER_CAPABILITY_VERSION,
+    CompatibilityDiagnostic, CredentialMaterial, CredentialValidation, EventStream, ProjectInfo,
+    SessionSummary, UsageBucket, UsageSnapshot, UsageWindow, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -186,6 +186,10 @@ impl AgentAdapter for DeterministicFakeAdapter {
                 secondary: None,
             }],
         })
+    }
+
+    fn compatibility_diagnostics(&self) -> Result<Vec<CompatibilityDiagnostic>, AdapterError> {
+        Ok(Vec::new())
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
