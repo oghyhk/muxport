@@ -234,7 +234,7 @@ state/
 - [ ] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
 - [ ] Keep `vault.sealed` independent of metadata and event-journal migrations.
 - [x] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
-- [ ] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
+- [x] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
 
 ## 8. Credential security architecture
 

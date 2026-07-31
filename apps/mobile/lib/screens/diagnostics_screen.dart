@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../diagnostics/redacted_diagnostic_export.dart';
 import '../state/app_bootstrap.dart';
 import '../state/mobile_sync_state.dart';
 
@@ -74,12 +75,83 @@ class DiagnosticsScreen extends StatelessWidget {
           const SizedBox(height: 16),
           FilledButton.icon(
             icon: const Icon(Icons.download),
-            label: const Text('Diagnostics export not implemented'),
-            onPressed: null,
+            label: const Text('Export redacted diagnostics'),
+            onPressed: bootstrap.sensitiveArtifactStore == null
+                ? null
+                : () => _confirmAndExport(context),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _confirmAndExport(BuildContext context) async {
+    final store = bootstrap.sensitiveArtifactStore;
+    if (store == null) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Export redacted diagnostics?'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Included files:'),
+              for (final file in redactedDiagnosticFileNames) Text('• $file'),
+              const SizedBox(height: 12),
+              const Text('Always excluded:'),
+              for (final exclusion in redactedDiagnosticExclusions)
+                Text('• $exclusion'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Create export'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) {
+      return;
+    }
+    try {
+      final export = await RedactedDiagnosticExporter(
+        store,
+      ).create(bootstrap: bootstrap, hosts: hosts);
+      if (!context.mounted) {
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Diagnostics export created'),
+          content: SelectableText(export.directory.path),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+    } on Object {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Diagnostics export failed without deleting cache.'),
+          ),
+        );
+      }
+    }
   }
 
   static String _cacheLabel(CacheBootstrapStatus status) {
