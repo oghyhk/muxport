@@ -170,7 +170,7 @@ Define a versioned `AgentAdapter` interface with:
 - [ ] Adopt compatible externally launched runtimes when a stable endpoint is supplied.
 - [x] Normalize and journal source events.
 - [x] Deduplicate and execute remote commands.
-- [ ] Store credentials and assignments.
+- [x] Store credentials and assignments.
 - [ ] Reconcile after every connector, runtime, host, or network restart.
 - [ ] Produce local, redacted diagnostics and audit events.
 
@@ -673,7 +673,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Unit tests
 
 - [ ] State-machine transition tables.
-- [ ] Assignment precedence.
+- [x] Assignment precedence.
 - [ ] Rotation selection, cooldown, and storm prevention.
 - [x] Envelope encryption/decryption and replay rejection.
 - [x] Command idempotency and deadline handling.

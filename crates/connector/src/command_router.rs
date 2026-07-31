@@ -322,6 +322,16 @@ impl CommandRouter {
                 )
                 .await
                 .map_err(map_credential_switch_error)?;
+                drop(vault);
+                self.ledger
+                    .lock()
+                    .await
+                    .set_runtime_assignment(&request.target_id, profile_id)
+                    .map_err(|error| {
+                        AdapterError::OutcomeUnknown(format!(
+                            "credential activation succeeded but durable assignment recording failed; reconcile before retrying: {error}"
+                        ))
+                    })?;
                 Ok(json!({
                     "profile_id": result.profile_id,
                     "provider_id": result.provider_id,
@@ -800,6 +810,14 @@ mod tests {
                 .unwrap()
                 .expose_secret(),
             b"new-secret-key"
+        );
+        assert_eq!(
+            router
+                .ledger
+                .lock()
+                .await
+                .runtime_assignment("codex-test"),
+            Some("profile-a")
         );
 
         let _ = std::fs::remove_file(&db_path);

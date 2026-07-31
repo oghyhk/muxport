@@ -30,6 +30,10 @@ pub enum CoreError {
     IntegrityCheckFailed(String),
     #[error("Command ledger schema version {found} is newer than supported version {supported}")]
     UnsupportedSchemaVersion { found: u32, supported: u32 },
+    #[error("Assignment field {0} must not be empty")]
+    EmptyAssignmentField(&'static str),
+    #[error("Conflicting credential assignments exist at precedence {0}")]
+    AmbiguousAssignment(u8),
     #[error("Command ledger database error: {0}")]
     Sql(#[from] rusqlite::Error),
 }
@@ -142,8 +146,174 @@ impl DesiredObservedReconciler {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentScope {
+    Global,
+    Host {
+        host_id: String,
+    },
+    Runtime {
+        host_id: String,
+        runtime_id: String,
+    },
+    Project {
+        host_id: String,
+        runtime_id: String,
+        project_path: String,
+    },
+}
+
+impl AssignmentScope {
+    fn precedence(&self) -> u8 {
+        match self {
+            Self::Global => 0,
+            Self::Host { .. } => 1,
+            Self::Runtime { .. } => 2,
+            Self::Project { .. } => 3,
+        }
+    }
+
+    fn matches(&self, target: &AssignmentTarget<'_>) -> bool {
+        match self {
+            Self::Global => true,
+            Self::Host { host_id } => host_id == target.host_id,
+            Self::Runtime {
+                host_id,
+                runtime_id,
+            } => host_id == target.host_id && runtime_id == target.runtime_id,
+            Self::Project {
+                host_id,
+                runtime_id,
+                project_path,
+            } => {
+                host_id == target.host_id
+                    && runtime_id == target.runtime_id
+                    && target.project_path == Some(project_path.as_str())
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAssignment {
+    pub profile_id: String,
+    pub scope: AssignmentScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssignmentTarget<'a> {
+    pub host_id: &'a str,
+    pub runtime_id: &'a str,
+    pub project_path: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAssignment {
+    pub profile_id: String,
+    pub scope: AssignmentScope,
+}
+
+pub fn resolve_assignment(
+    assignments: &[CredentialAssignment],
+    target: AssignmentTarget<'_>,
+) -> Result<Option<ResolvedAssignment>, CoreError> {
+    let mut selected: Option<&CredentialAssignment> = None;
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.scope.matches(&target))
+    {
+        if assignment.profile_id.trim().is_empty() {
+            return Err(CoreError::EmptyAssignmentField("profile_id"));
+        }
+        match selected {
+            None => selected = Some(assignment),
+            Some(current) if assignment.scope.precedence() > current.scope.precedence() => {
+                selected = Some(assignment);
+            }
+            Some(current)
+                if assignment.scope.precedence() == current.scope.precedence()
+                    && assignment.profile_id != current.profile_id =>
+            {
+                return Err(CoreError::AmbiguousAssignment(
+                    assignment.scope.precedence(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(selected.map(|assignment| ResolvedAssignment {
+        profile_id: assignment.profile_id.clone(),
+        scope: assignment.scope.clone(),
+    }))
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SwitchImpactTarget {
+    pub runtime_id: String,
+    pub provider_compatible: bool,
+    pub online: bool,
+    pub credential_unlocked: bool,
+    pub managed: bool,
+    pub active_turns: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SwitchImpactPlan {
+    pub ready: Vec<String>,
+    pub incompatible: Vec<String>,
+    pub offline: Vec<String>,
+    pub locked: Vec<String>,
+    pub busy: Vec<String>,
+    pub unmanaged: Vec<String>,
+}
+
+impl SwitchImpactPlan {
+    pub fn build(targets: &[SwitchImpactTarget]) -> Self {
+        let mut plan = Self::default();
+        for target in targets {
+            let id = target.runtime_id.clone();
+            if !target.provider_compatible {
+                plan.incompatible.push(id.clone());
+            }
+            if !target.online {
+                plan.offline.push(id.clone());
+            }
+            if !target.credential_unlocked {
+                plan.locked.push(id.clone());
+            }
+            if target.active_turns > 0 {
+                plan.busy.push(id.clone());
+            }
+            if !target.managed {
+                plan.unmanaged.push(id.clone());
+            }
+            if target.provider_compatible
+                && target.online
+                && target.credential_unlocked
+                && target.managed
+                && target.active_turns == 0
+            {
+                plan.ready.push(id);
+            }
+        }
+        for group in [
+            &mut plan.ready,
+            &mut plan.incompatible,
+            &mut plan.offline,
+            &mut plan.locked,
+            &mut plan.busy,
+            &mut plan.unmanaged,
+        ] {
+            group.sort();
+            group.dedup();
+        }
+        plan
+    }
+}
+
 pub struct CommandLedger {
     executed_commands: HashMap<String, CommandRecord>,
+    runtime_assignments: HashMap<String, String>,
     conn: Option<rusqlite::Connection>,
 }
 
@@ -194,11 +364,12 @@ impl Default for CommandLedger {
 }
 
 impl CommandLedger {
-    const SCHEMA_VERSION: u32 = 2;
+    const SCHEMA_VERSION: u32 = 3;
 
     pub fn new() -> Self {
         Self {
             executed_commands: HashMap::new(),
+            runtime_assignments: HashMap::new(),
             conn: None,
         }
     }
@@ -267,11 +438,22 @@ impl CommandLedger {
                 [],
             )?;
         }
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_assignments (
+                runtime_id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                CHECK (length(trim(runtime_id)) > 0),
+                CHECK (length(trim(profile_id)) > 0)
+            )",
+            [],
+        )?;
         transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         transaction.commit()?;
 
         let mut ledger = Self {
             executed_commands: HashMap::new(),
+            runtime_assignments: HashMap::new(),
             conn: Some(conn),
         };
         ledger.load_from_db()?;
@@ -303,6 +485,18 @@ impl CommandLedger {
                         fingerprint,
                     },
                 );
+            }
+            drop(stmt);
+            let mut assignment_stmt = conn.prepare(
+                "SELECT runtime_id, profile_id
+                 FROM runtime_assignments",
+            )?;
+            let assignments = assignment_stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for assignment in assignments {
+                let (runtime_id, profile_id) = assignment?;
+                self.runtime_assignments.insert(runtime_id, profile_id);
             }
         }
         Ok(())
@@ -432,6 +626,43 @@ impl CommandLedger {
             .get(idempotency_key)
             .map(|record| (record.state, record.result_json.clone())))
     }
+
+    pub fn set_runtime_assignment(
+        &mut self,
+        runtime_id: &str,
+        profile_id: &str,
+    ) -> Result<(), CoreError> {
+        let runtime_id = runtime_id.trim();
+        let profile_id = profile_id.trim();
+        if runtime_id.is_empty() {
+            return Err(CoreError::EmptyAssignmentField("runtime_id"));
+        }
+        if profile_id.is_empty() {
+            return Err(CoreError::EmptyAssignmentField("profile_id"));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(ref conn) = self.conn {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO runtime_assignments (runtime_id, profile_id, updated_at_ms)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(runtime_id) DO UPDATE SET
+                    profile_id = excluded.profile_id,
+                    updated_at_ms = excluded.updated_at_ms",
+                rusqlite::params![runtime_id, profile_id, now],
+            )?;
+            transaction.commit()?;
+        }
+        self.runtime_assignments
+            .insert(runtime_id.to_owned(), profile_id.to_owned());
+        Ok(())
+    }
+
+    pub fn runtime_assignment(&self, runtime_id: &str) -> Option<&str> {
+        self.runtime_assignments
+            .get(runtime_id)
+            .map(String::as_str)
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +712,121 @@ mod tests {
         let actions = DesiredObservedReconciler::reconcile(&desired, &observed);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], "switch_profile:opencode-1:profile-b");
+    }
+
+    #[test]
+    fn assignment_resolution_uses_project_runtime_host_global_precedence() {
+        let assignments = vec![
+            CredentialAssignment {
+                profile_id: "global".into(),
+                scope: AssignmentScope::Global,
+            },
+            CredentialAssignment {
+                profile_id: "host".into(),
+                scope: AssignmentScope::Host {
+                    host_id: "host-a".into(),
+                },
+            },
+            CredentialAssignment {
+                profile_id: "runtime".into(),
+                scope: AssignmentScope::Runtime {
+                    host_id: "host-a".into(),
+                    runtime_id: "runtime-a".into(),
+                },
+            },
+            CredentialAssignment {
+                profile_id: "project".into(),
+                scope: AssignmentScope::Project {
+                    host_id: "host-a".into(),
+                    runtime_id: "runtime-a".into(),
+                    project_path: "/repo".into(),
+                },
+            },
+        ];
+
+        let resolved = resolve_assignment(
+            &assignments,
+            AssignmentTarget {
+                host_id: "host-a",
+                runtime_id: "runtime-a",
+                project_path: Some("/repo"),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved.profile_id, "project");
+        assert!(matches!(resolved.scope, AssignmentScope::Project { .. }));
+
+        let runtime = resolve_assignment(
+            &assignments,
+            AssignmentTarget {
+                host_id: "host-a",
+                runtime_id: "runtime-a",
+                project_path: Some("/other"),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(runtime.profile_id, "runtime");
+    }
+
+    #[test]
+    fn conflicting_assignments_at_one_precedence_fail_closed() {
+        let assignments = vec![
+            CredentialAssignment {
+                profile_id: "profile-a".into(),
+                scope: AssignmentScope::Runtime {
+                    host_id: "host-a".into(),
+                    runtime_id: "runtime-a".into(),
+                },
+            },
+            CredentialAssignment {
+                profile_id: "profile-b".into(),
+                scope: AssignmentScope::Runtime {
+                    host_id: "host-a".into(),
+                    runtime_id: "runtime-a".into(),
+                },
+            },
+        ];
+        assert!(matches!(
+            resolve_assignment(
+                &assignments,
+                AssignmentTarget {
+                    host_id: "host-a",
+                    runtime_id: "runtime-a",
+                    project_path: None,
+                }
+            ),
+            Err(CoreError::AmbiguousAssignment(2))
+        ));
+    }
+
+    #[test]
+    fn switch_impact_plan_separates_every_unsafe_dimension() {
+        let plan = SwitchImpactPlan::build(&[
+            SwitchImpactTarget {
+                runtime_id: "ready".into(),
+                provider_compatible: true,
+                online: true,
+                credential_unlocked: true,
+                managed: true,
+                active_turns: 0,
+            },
+            SwitchImpactTarget {
+                runtime_id: "multi-risk".into(),
+                provider_compatible: false,
+                online: false,
+                credential_unlocked: false,
+                managed: false,
+                active_turns: 2,
+            },
+        ]);
+        assert_eq!(plan.ready, ["ready"]);
+        assert_eq!(plan.incompatible, ["multi-risk"]);
+        assert_eq!(plan.offline, ["multi-risk"]);
+        assert_eq!(plan.locked, ["multi-risk"]);
+        assert_eq!(plan.busy, ["multi-risk"]);
+        assert_eq!(plan.unmanaged, ["multi-risk"]);
     }
 
     #[test]
@@ -654,6 +1000,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_assignment_is_atomic_and_survives_restart() {
+        let db_path = std::env::temp_dir().join(format!(
+            "assignment-ledger-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            ledger
+                .set_runtime_assignment("codex-work", "profile-work")
+                .unwrap();
+            assert_eq!(
+                ledger.runtime_assignment("codex-work"),
+                Some("profile-work")
+            );
+        }
+        {
+            let ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            assert_eq!(
+                ledger.runtime_assignment("codex-work"),
+                Some("profile-work")
+            );
+        }
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
     fn sqlite_reservation_failure_is_reported_and_not_cached() {
         let db_path = std::env::temp_dir().join(format!(
             "cmd-ledger-failure-{}-{}.db",
@@ -801,8 +1176,8 @@ mod tests {
             CommandLedger::open_sqlite(&db_path),
             Err(CoreError::UnsupportedSchemaVersion {
                 found: 999,
-                supported: 2
-            })
+                supported
+            }) if supported == CommandLedger::SCHEMA_VERSION
         ));
         let conn = rusqlite::Connection::open_with_flags(
             &db_path,
