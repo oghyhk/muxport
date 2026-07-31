@@ -11,14 +11,18 @@ class BulkCredentialSwitchPlan {
   const BulkCredentialSwitchPlan({
     required this.ready,
     required this.alreadyAssigned,
+    required this.incompatible,
     required this.offline,
+    required this.locked,
     required this.busy,
     required this.missingProfile,
   });
 
   final List<BulkCredentialSwitchTarget> ready;
   final List<BulkCredentialSwitchTarget> alreadyAssigned;
+  final List<BulkCredentialSwitchTarget> incompatible;
   final List<BulkCredentialSwitchTarget> offline;
+  final List<BulkCredentialSwitchTarget> locked;
   final List<BulkCredentialSwitchTarget> busy;
   final List<BulkCredentialSwitchTarget> missingProfile;
 
@@ -31,7 +35,9 @@ class BulkCredentialSwitchPlan {
   }) {
     final ready = <BulkCredentialSwitchTarget>[];
     final alreadyAssigned = <BulkCredentialSwitchTarget>[];
+    final incompatible = <BulkCredentialSwitchTarget>[];
     final offline = <BulkCredentialSwitchTarget>[];
+    final locked = <BulkCredentialSwitchTarget>[];
     final busy = <BulkCredentialSwitchTarget>[];
     final missingProfile = <BulkCredentialSwitchTarget>[];
     for (final host in hosts) {
@@ -65,6 +71,10 @@ class BulkCredentialSwitchPlan {
           missingProfile.add(target);
         } else if (!host.canMutate) {
           offline.add(target);
+        } else if (_isCredentialLocked(host, runtime, profile)) {
+          locked.add(target);
+        } else if (!_isProviderCompatible(host, runtime, provider)) {
+          incompatible.add(target);
         } else if (runtime['activeCredentialProfileId'] == profileId) {
           alreadyAssigned.add(target);
         } else if (_hasActiveWork(host, runtimeId)) {
@@ -77,11 +87,48 @@ class BulkCredentialSwitchPlan {
     return BulkCredentialSwitchPlan(
       ready: List.unmodifiable(ready),
       alreadyAssigned: List.unmodifiable(alreadyAssigned),
+      incompatible: List.unmodifiable(incompatible),
       offline: List.unmodifiable(offline),
+      locked: List.unmodifiable(locked),
       busy: List.unmodifiable(busy),
       missingProfile: List.unmodifiable(missingProfile),
     );
   }
+}
+
+bool _isCredentialLocked(
+  HostSyncState host,
+  Map<String, Object?> runtime,
+  Map<String, Object?>? profile,
+) {
+  // These numeric values are canonical protocol enums and do not include
+  // provider text. A locked vault/runtime never becomes dispatchable based on
+  // stale client assumptions.
+  if (host.snapshot['connectorState'] == 2 || runtime['state'] == 12) {
+    return true;
+  }
+  return profile?['status'] == 5 || profile?['status'] == 6;
+}
+
+bool _isProviderCompatible(
+  HostSyncState host,
+  Map<String, Object?> runtime,
+  String targetProvider,
+) {
+  final currentProfileId = runtime['activeCredentialProfileId'];
+  if (currentProfileId is! String || currentProfileId.isEmpty) {
+    // The connector remains the final authority for a runtime with no
+    // projected profile; do not turn missing metadata into a false rejection.
+    return true;
+  }
+  for (final raw in host.snapshot['credentialProfiles'] as List? ?? const []) {
+    if (raw is! Map || raw['profileId'] != currentProfileId) continue;
+    final provider = raw['provider'];
+    return provider is! String ||
+        provider.isEmpty ||
+        provider == targetProvider;
+  }
+  return true;
 }
 
 bool _hasActiveWork(HostSyncState host, String runtimeId) {

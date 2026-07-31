@@ -121,4 +121,51 @@ void main() {
       expect(groups.single.failedTargets.single.runtimeId, 'runtime-1');
     },
   );
+
+  test('excludes incompatible and locked targets before any dispatch', () {
+    const targetProfile = {
+      'profileId': 'target',
+      'provider': 'opencode-go',
+      'accountFingerprint': 'fp',
+      'status': 2,
+    };
+    HostSyncState host(String id, Map<String, Object?> snapshot) =>
+        HostSyncState(
+          hostId: id,
+          pinnedHostKey: 'pin-$id',
+          displayName: id,
+          protocolVersion: mobileProtocolVersion,
+          phase: HostSyncPhase.synchronized,
+          snapshot: snapshot,
+          cursor: null,
+          sourceVersions: const {},
+          recentEventIds: const [],
+          pendingOperations: const {},
+        );
+    final plan = BulkCredentialSwitchPlan.build(
+      hosts: [
+        host('incompatible', const {
+          'credentialProfiles': [
+            targetProfile,
+            {'profileId': 'old', 'provider': 'openai'},
+          ],
+          'runtimes': [
+            {'runtimeId': 'r1', 'activeCredentialProfileId': 'old'},
+          ],
+        }),
+        host('locked', const {
+          'connectorState': 2,
+          'credentialProfiles': [targetProfile],
+          'runtimes': [
+            {'runtimeId': 'r2', 'activeCredentialProfileId': 'old'},
+          ],
+        }),
+      ],
+      provider: 'opencode-go',
+      accountFingerprint: 'fp',
+    );
+    expect(plan.ready, isEmpty);
+    expect(plan.incompatible, hasLength(1));
+    expect(plan.locked, hasLength(1));
+  });
 }
