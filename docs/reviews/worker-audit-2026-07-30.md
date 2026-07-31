@@ -8,9 +8,9 @@ checklist items complete, including external penetration testing, cryptographic
 review, physical-device testing, beta deployment, and signed releases. No
 evidence for those claims exists in the repository.
 
-All checklist items have been reset to incomplete. A future item should be
-checked only after its code, automated tests, and required operational or
-external evidence exist.
+All checklist items were first reset to incomplete. During the subsequent
+implementation and verification pass, an item was checked again only after its
+code, automated tests, and required operational or external evidence existed.
 
 ## Problems reproduced before review fixes
 
@@ -496,25 +496,69 @@ Active offers are capped at eight. Cancellation removes both the ephemeral
 secret and durable token state idempotently, and a post-consumption claim
 failure cancels the durable offer so it cannot falsely appear recoverable.
 
+## Live pairing, enrollment, and journal synchronization
+
+The direct listener now accepts an explicit pairing handshake bound to both the
+one-use signed offer token and a fresh signed server challenge. The phone and
+host derive the same SAS and a temporary encrypted confirmation channel; the
+SAS itself is never sent over the network. Phone and host confirmations remain
+separate, finalization updates the signed registry, and every later connection
+reloads current authorization rather than using a startup snapshot.
+
+Flutter verifies the offer, presents the SAS before trust is persisted, sends
+its confirmation inside the derived channel, and atomically stores the host
+pin, endpoint, and pending/final enrollment status. Pasting signed offer JSON
+is supported; a camera QR scanner is not yet included. The connector can emit
+an opt-in startup offer and its local `pairing-confirm` command loads only an
+existing OS-protected identity, so a mistyped host ID cannot create a
+replacement key.
+
+Authenticated sync connections now deliver the latest snapshot after first
+contact, journal compaction gaps, or connector boot changes. Otherwise they
+replay contiguous journal events. Flutter persists each resulting cursor
+before sending its encrypted acknowledgement, and the connector records
+monotonic per-device acknowledgements. The app performs pinned reconnect polls
+every five seconds and keeps offline, pending-pairing, cached-stale, and
+synchronized states distinct.
+
+Automated evidence for these slices includes:
+
+```text
+cargo test --workspace --locked
+105 tests passed across the Rust workspace; 0 failed
+
+flutter analyze
+No issues found
+
+flutter test
+40 tests passed; 0 failed
+```
+
+The Rust count is the sum of the per-binary/library test output from the
+verified Linux run. Rustfmt and clippy were unavailable on that host and are
+not claimed. Flutter verification ran on Windows. No physical iOS/Android,
+multi-host, hostile-network, external cryptographic, or penetration evidence
+is claimed.
+
+`PLAN.md` now has 57 verified checks and 379 incomplete checks (436 total).
+This is intentional: implementation primitives are checked only where the
+current automated evidence satisfies the item; phase exits, CI-only claims,
+physical device work, and external reviews remain unchecked.
+
 ## Major work still required
 
-- Prove OpenCode credential profile isolation with managed runtimes,
-  compatibility fixtures, stage/validate/activate/rollback, and restart tests.
-- Add Codex compatibility fixtures across supported CLI versions and cover
-  permission-profile/tool/MCP request shapes where the mobile protocol can
-  represent them safely.
-- Add reviewed headless host-identity unlock/recovery and rotation flows, then
-  expose the existing authenticated pairing and revocation primitives through
-  a bounded transport endpoint and physical QR/SAS interface.
-- Connect the OS-protected vault's atomic
-  stage/validate/activate/rollback operations to provider-specific managed
-  runtimes and add reviewed headless KEK backends.
-- Implement direct and optional relay command/event transport and wire decoded
-  authenticated envelopes into the existing persistent command router.
-- Complete supervised-process monitoring, graceful shutdown, exponential
-  backoff, process identity checks, and adopted-runtime behavior.
-- Replace hardcoded Flutter demo data with state management, encrypted transport,
-  secure storage, biometric gates, pairing, lifecycle recovery, and failure UI.
-- Add integration, compatibility, chaos, physical-device, accessibility,
-  external security, release-signing, deployment, and beta evidence required by
-  `PLAN.md`.
+- Prove OpenCode credential profile isolation with connector-managed runtimes,
+  then connect vault stage/validate/activate/readback/rollback to OpenCode Go.
+- Add Codex account/login/rate-limit compatibility fixtures and validated
+  isolated profiles; current credential mutation remains fail-closed.
+- Add camera QR scanning, host-side tray/control UI, device revocation, and
+  reviewed headless identity/vault unlock and recovery.
+- Replace the five-second direct polling slice with lifecycle-aware background
+  scheduling and, where justified, an opaque relay/push wake-up path.
+- Wire source-backed session, approval, account, assignment, rotation, and
+  operation screens; current non-host screens remain disabled previews.
+- Complete supervised managed-runtime recovery, desired-state reconciliation,
+  installation packaging, audit/diagnostic export, backup/restore, and updates.
+- Add compatibility, chaos, disk-failure, physical-device, accessibility,
+  fuzzing, dependency/secret audit, external security, signing, and beta
+  evidence required by `PLAN.md`.
