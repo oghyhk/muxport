@@ -6,11 +6,18 @@ class CredentialMatrixScreen extends StatelessWidget {
   const CredentialMatrixScreen({
     required this.hosts,
     this.onProvisionCredential,
+    this.onAssignCredential,
     super.key,
   });
 
   final Iterable<HostSyncState> hosts;
   final VoidCallback? onProvisionCredential;
+  final Future<void> Function(
+    HostSyncState host,
+    String runtimeId,
+    String credentialProfileId,
+  )?
+  onAssignCredential;
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +93,13 @@ class CredentialMatrixScreen extends StatelessWidget {
                           'assigned to ${assignments.join(', ')}',
                       ].join(' • '),
                     ),
+                    onTap: onAssignCredential == null || !item.host.canMutate
+                        ? null
+                        : () => _chooseRuntimeAssignment(
+                            context,
+                            item.host,
+                            profile,
+                          ),
                     trailing: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.end,
@@ -103,6 +117,75 @@ class CredentialMatrixScreen extends StatelessWidget {
               },
             ),
     );
+  }
+
+  Future<void> _chooseRuntimeAssignment(
+    BuildContext context,
+    HostSyncState host,
+    Map<String, Object?> profile,
+  ) async {
+    final profileId = _string(profile['profileId']);
+    final provider = _string(profile['provider']);
+    if (profileId.isEmpty || onAssignCredential == null) {
+      return;
+    }
+    final runtimes = <Map<String, Object?>>[];
+    for (final raw in host.snapshot['runtimes'] as List? ?? const []) {
+      if (raw is Map) {
+        final runtime = Map<String, Object?>.from(raw);
+        if (_string(runtime['runtimeId']).isNotEmpty) {
+          runtimes.add(runtime);
+        }
+      }
+    }
+    if (runtimes.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This host has no runtime to assign.')),
+      );
+      return;
+    }
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              title: Text(
+                'Assign ${_string(profile['displayName'], fallback: profileId)}',
+              ),
+              subtitle: const Text(
+                'Applies to future work only. Active sessions are never moved.',
+              ),
+            ),
+            for (final runtime in runtimes)
+              ListTile(
+                leading: const Icon(Icons.terminal),
+                title: Text(
+                  _string(
+                    runtime['name'],
+                    fallback: _string(runtime['runtimeId']),
+                  ),
+                ),
+                subtitle: Text(
+                  [
+                    if (provider.isNotEmpty) provider,
+                    'current: ${_string(runtime['activeCredentialProfileId'], fallback: 'none')}',
+                  ].join(' • '),
+                ),
+                onTap: () => Navigator.of(
+                  sheetContext,
+                ).pop(_string(runtime['runtimeId'])),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || selected.isEmpty) {
+      return;
+    }
+    await onAssignCredential!(host, selected, profileId);
   }
 }
 

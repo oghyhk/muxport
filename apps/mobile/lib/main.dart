@@ -275,6 +275,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onProvisionCredential: _canProvisionCredential
             ? _openCredentialProvisioning
             : null,
+        onAssignCredential: _canAssignCredential
+            ? _assignCredentialToRuntime
+            : null,
       ),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
@@ -316,6 +319,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
             host.directPort != null,
       );
 
+  bool get _canAssignCredential =>
+      widget.bootstrap.identity != null &&
+      widget.bootstrap.canAuthenticateTransport &&
+      widget.bootstrap.cacheStore != null;
+
   Future<void> _openCredentialProvisioning() async {
     final identity = widget.bootstrap.identity;
     if (identity == null || !_canProvisionCredential) {
@@ -337,6 +345,98 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         ),
       ),
     );
+  }
+
+  Future<void> _assignCredentialToRuntime(
+    HostSyncState host,
+    String runtimeId,
+    String credentialProfileId,
+  ) async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (!host.canMutate ||
+        identity == null ||
+        cacheStore == null ||
+        runtimeId.trim().isEmpty ||
+        credentialProfileId.trim().isEmpty ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      _showMessage(
+        'This assignment is not safely routable from current host state.',
+      );
+      return;
+    }
+    final authorized = await _stepUpAuthenticator.authorize(
+      reason:
+          'Authorize assigning a credential to $runtimeId on ${host.displayName}',
+    );
+    if (!authorized || !mounted) {
+      if (mounted) {
+        _showMessage(
+          'Device authentication is required. No assignment was sent.',
+        );
+      }
+      return;
+    }
+
+    final now = DateTime.now();
+    final operationId =
+        'assignment-${identity.deviceId}-${now.microsecondsSinceEpoch}';
+    final pending = PendingOperation.local(
+      idempotencyKey: operationId,
+      kind: 'assignment:$runtimeId',
+      createdAtMs: now.millisecondsSinceEpoch,
+      deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
+    );
+    final pendingHost = host.addPendingOperation(pending);
+    await _persistHost(pendingHost, cacheStore);
+
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.changeRuntimeAssignment(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: runtimeId,
+        credentialProfileId: credentialProfileId,
+      );
+      final state =
+          result.state.value >= 0 &&
+              result.state.value < RemoteOpState.values.length
+          ? RemoteOpState.values[result.state.value]
+          : RemoteOpState.reconciliationRequired;
+      final resolved = (_hosts[host.hostId] ?? pendingHost).resolveOperation(
+        operationId,
+        state,
+      );
+      await _persistHost(resolved, cacheStore);
+      _showMessage(
+        result.success
+            ? 'Credential assigned to future work on $runtimeId.'
+            : 'Connector did not confirm assignment: ${result.errorMessage}',
+      );
+      unawaited(_syncAllHosts());
+    } on Object catch (error) {
+      final current = _hosts[host.hostId] ?? pendingHost;
+      final unresolved = current.resolveOperation(
+        operationId,
+        RemoteOpState.reconciliationRequired,
+      );
+      await _persistHost(unresolved, cacheStore);
+      _showMessage(
+        'Assignment outcome is unknown; verify host state before retrying: $error',
+      );
+    } finally {
+      await connection?.close();
+    }
   }
 
   Future<void> _pairHost() async {

@@ -267,6 +267,52 @@ void main() {
     },
   );
 
+  test('mobile client submits a future-work credential assignment', () async {
+    final hostIdentity = await Ed25519().newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 71),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final hostPublicHex = _hex(hostPublic.bytes);
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(37),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final serverTask = _serveProbe(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+      expectedDeviceId: mobileIdentity.deviceId,
+      expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+      expectedAssignmentRuntime: 'opencode-managed-work',
+      expectedAssignmentProfile: 'profile-personal',
+    );
+
+    final connection = await AuthenticatedDirectConnection.connect(
+      address: InternetAddress.loopbackIPv4.address,
+      port: server.port,
+      pinnedHost: PinnedHostIdentity(
+        hostId: 'host-1',
+        publicKeyHex: hostPublicHex,
+      ),
+      identity: mobileIdentity,
+    );
+    final result = await connection.changeRuntimeAssignment(
+      commandId: 'assignment-command-1',
+      idempotencyKey: 'assignment-idempotency-1',
+      runtimeId: 'opencode-managed-work',
+      credentialProfileId: 'profile-personal',
+    );
+    expect(result.success, isTrue);
+    expect(result.commandId, 'assignment-command-1');
+
+    await connection.close();
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
   test(
     'mobile client rejects a challenge outside the pinned identity',
     () async {
@@ -849,6 +895,8 @@ Future<void> _serveProbe({
   required String expectedDevicePublicKeyHex,
   bool expectApproval = false,
   String? expectedQueryTarget,
+  String? expectedAssignmentRuntime,
+  String? expectedAssignmentProfile,
 }) async {
   final socket = await server.first;
   final reader = _TestRecordReader(socket);
@@ -952,6 +1000,19 @@ Future<void> _serveProbe({
       expect(request.command.approveAction.approvalId, 'approval-1');
       expect(request.command.approveAction.approved, isFalse);
       expect(request.command.approveAction.decisionReason, 'Rejected in test');
+    } else if (expectedAssignmentRuntime != null) {
+      expect(request.command.commandId, 'assignment-command-1');
+      expect(request.header.idempotencyKey, 'assignment-idempotency-1');
+      expect(request.command.hasChangeAssignment(), isTrue);
+      expect(request.command.changeAssignment.targetType, 'runtime');
+      expect(
+        request.command.changeAssignment.targetId,
+        expectedAssignmentRuntime,
+      );
+      expect(
+        request.command.changeAssignment.newCredentialProfileId,
+        expectedAssignmentProfile,
+      );
     } else if (expectedQueryTarget != null) {
       expect(request.command.commandId, 'query-command-1');
       expect(request.header.idempotencyKey, 'query-idempotency-1');

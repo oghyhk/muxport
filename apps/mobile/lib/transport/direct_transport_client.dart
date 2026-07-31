@@ -721,6 +721,37 @@ class AuthenticatedDirectConnection {
     );
   }
 
+  /// Changes the credential assignment for future work on one managed
+  /// runtime. The connector rejects this if the runtime has active work; this
+  /// client never tries to terminate or migrate a live session to make it fit.
+  Future<wire.CommandResult> changeRuntimeAssignment({
+    required String commandId,
+    required String idempotencyKey,
+    required String runtimeId,
+    required String credentialProfileId,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        runtimeId.trim().isEmpty ||
+        credentialProfileId.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'runtime assignment requires a runtime, credential profile, and positive deadline',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        changeAssignment: wire.ChangeAssignmentCmd(
+          targetType: 'runtime',
+          targetId: runtimeId,
+          newCredentialProfileId: credentialProfileId,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
   /// Consumes and clears [secret] after encrypting it with the dedicated
   /// provisioning key. The plaintext never enters a normal command field.
   Future<wire.CommandResult> provisionCredential({
