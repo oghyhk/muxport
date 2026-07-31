@@ -531,9 +531,11 @@ class CredentialMatrixScreen extends StatelessWidget {
       );
       return;
     }
-    final selected = {
-      for (final profile in candidates) _string(profile['profileId']),
-    }..remove('');
+    final selectedOrder = [
+      for (final profile in candidates)
+        if (_string(profile['profileId']).isNotEmpty)
+          _string(profile['profileId']),
+    ];
     final poolId = TextEditingController(
       text: '${provider.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '-')}-rotation',
     );
@@ -587,27 +589,73 @@ class CredentialMatrixScreen extends StatelessWidget {
                     const SizedBox(height: 8),
                     const Text('Active accounts in priority order'),
                     for (final profile in candidates)
-                      CheckboxListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        value: selected.contains(_string(profile['profileId'])),
-                        title: Text(
-                          _string(
-                            profile['displayName'],
-                            fallback: _string(profile['profileId']),
-                          ),
-                        ),
-                        subtitle: Text(
-                          _maskedFingerprint(profile['accountFingerprint']),
-                        ),
-                        onChanged: (checked) => setDialogState(() {
+                      Builder(
+                        builder: (context) {
                           final id = _string(profile['profileId']);
-                          if (checked == true) {
-                            selected.add(id);
-                          } else {
-                            selected.remove(id);
-                          }
-                        }),
+                          final selectedIndex = selectedOrder.indexOf(id);
+                          return CheckboxListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            value: selectedIndex >= 0,
+                            title: Text(
+                              _string(profile['displayName'], fallback: id),
+                            ),
+                            subtitle: Text(
+                              _maskedFingerprint(profile['accountFingerprint']),
+                            ),
+                            secondary: selectedIndex < 0
+                                ? null
+                                : Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: 'Higher priority',
+                                        onPressed: selectedIndex == 0
+                                            ? null
+                                            : () => setDialogState(() {
+                                                final before =
+                                                    selectedOrder[selectedIndex -
+                                                        1];
+                                                selectedOrder[selectedIndex -
+                                                        1] =
+                                                    id;
+                                                selectedOrder[selectedIndex] =
+                                                    before;
+                                              }),
+                                        icon: const Icon(Icons.arrow_upward),
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Lower priority',
+                                        onPressed:
+                                            selectedIndex ==
+                                                selectedOrder.length - 1
+                                            ? null
+                                            : () => setDialogState(() {
+                                                final after =
+                                                    selectedOrder[selectedIndex +
+                                                        1];
+                                                selectedOrder[selectedIndex +
+                                                        1] =
+                                                    id;
+                                                selectedOrder[selectedIndex] =
+                                                    after;
+                                              }),
+                                        icon: const Icon(Icons.arrow_downward),
+                                      ),
+                                    ],
+                                  ),
+                            onChanged: (checked) => setDialogState(() {
+                              if (checked == true && id.isNotEmpty) {
+                                if (!selectedOrder.contains(id)) {
+                                  selectedOrder.add(id);
+                                }
+                              } else {
+                                selectedOrder.remove(id);
+                              }
+                            }),
+                          );
+                        },
                       ),
                   ],
                 ),
@@ -618,16 +666,13 @@ class CredentialMatrixScreen extends StatelessWidget {
                   child: const Text('Cancel'),
                 ),
                 FilledButton(
-                  onPressed: selected.length < 2
+                  onPressed: selectedOrder.length < 2
                       ? null
                       : () => Navigator.of(dialogContext).pop(
                           RotationPoolDraft(
                             poolId: poolId.text.trim(),
                             providerId: provider,
-                            orderedProfileIds: candidates
-                                .map((profile) => _string(profile['profileId']))
-                                .where(selected.contains)
-                                .toList(growable: false),
+                            orderedProfileIds: List.unmodifiable(selectedOrder),
                             mode: mode,
                             cooldownMs: 60000,
                             maxSwitchesPerHour: 3,
