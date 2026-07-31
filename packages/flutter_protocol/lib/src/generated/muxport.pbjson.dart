@@ -319,6 +319,15 @@ const Command$json = {
       '9': 0,
       '10': 'probeHost'
     },
+    {
+      '1': 'query_operation',
+      '3': 11,
+      '4': 1,
+      '5': 11,
+      '6': '.muxport.protocol.v1.QueryOperationCmd',
+      '9': 0,
+      '10': 'queryOperation'
+    },
   ],
   '8': [
     {'1': 'inner'},
@@ -339,7 +348,8 @@ final $typed_data.Uint8List commandDescriptor = $convert.base64Decode(
     'Fzc2lnbm1lbnQSVwoRcm90YXRlX2NyZWRlbnRpYWwYCSABKAsyKC5tdXhwb3J0LnByb3RvY29s'
     'LnYxLlJvdGF0ZUNyZWRlbnRpYWxDbWRIAFIQcm90YXRlQ3JlZGVudGlhbBJCCgpwcm9iZV9ob3'
     'N0GAogASgLMiEubXV4cG9ydC5wcm90b2NvbC52MS5Qcm9iZUhvc3RDbWRIAFIJcHJvYmVIb3N0'
-    'QgcKBWlubmVy');
+    'ElEKD3F1ZXJ5X29wZXJhdGlvbhgLIAEoCzImLm11eHBvcnQucHJvdG9jb2wudjEuUXVlcnlPcG'
+    'VyYXRpb25DbWRIAFIOcXVlcnlPcGVyYXRpb25CBwoFaW5uZXI=');
 
 @$core.Deprecated('Use startSessionCmdDescriptor instead')
 const StartSessionCmd$json = {
@@ -474,6 +484,19 @@ const ProbeHostCmd$json = {
 /// Descriptor for `ProbeHostCmd`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List probeHostCmdDescriptor =
     $convert.base64Decode('CgxQcm9iZUhvc3RDbWQ=');
+
+@$core.Deprecated('Use queryOperationCmdDescriptor instead')
+const QueryOperationCmd$json = {
+  '1': 'QueryOperationCmd',
+  '2': [
+    {'1': 'idempotency_key', '3': 1, '4': 1, '5': 9, '10': 'idempotencyKey'},
+  ],
+};
+
+/// Descriptor for `QueryOperationCmd`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List queryOperationCmdDescriptor = $convert.base64Decode(
+    'ChFRdWVyeU9wZXJhdGlvbkNtZBInCg9pZGVtcG90ZW5jeV9rZXkYASABKAlSDmlkZW1wb3Rlbm'
+    'N5S2V5');
 
 @$core.Deprecated('Use commandResultDescriptor instead')
 const CommandResult$json = {

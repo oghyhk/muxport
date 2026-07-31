@@ -221,6 +221,53 @@ void main() {
   });
 
   test(
+    'mobile client queries a pending operation by idempotency key',
+    () async {
+      final hostIdentity = await Ed25519().newKeyPairFromSeed(
+        List<int>.generate(32, (index) => index + 51),
+      );
+      final hostPublic = await hostIdentity.extractPublicKey();
+      final hostPublicHex = _hex(hostPublic.bytes);
+      final mobileIdentity = await DeviceIdentityManager(
+        secureStore: _MemorySecureStore(),
+        random: Random(27),
+      ).loadOrCreate();
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final serverTask = _serveProbe(
+        server: server,
+        hostIdentity: hostIdentity,
+        hostPublicHex: hostPublicHex,
+        expectedDeviceId: mobileIdentity.deviceId,
+        expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+        expectedQueryTarget: 'pending-operation-1',
+      );
+
+      final connection = await AuthenticatedDirectConnection.connect(
+        address: InternetAddress.loopbackIPv4.address,
+        port: server.port,
+        pinnedHost: PinnedHostIdentity(
+          hostId: 'host-1',
+          publicKeyHex: hostPublicHex,
+        ),
+        identity: mobileIdentity,
+      );
+      final result = await connection.queryOperation(
+        commandId: 'query-command-1',
+        idempotencyKey: 'query-idempotency-1',
+        targetIdempotencyKey: 'pending-operation-1',
+      );
+      expect(result.success, isTrue);
+      expect(jsonDecode(result.resultJson), {'found': true, 'state': 6});
+
+      await connection.close();
+      await serverTask;
+      await mobileIdentity.destroy();
+      hostIdentity.destroy();
+      await server.close();
+    },
+  );
+
+  test(
     'mobile client rejects a challenge outside the pinned identity',
     () async {
       final ed25519 = Ed25519();
@@ -723,6 +770,7 @@ Future<void> _serveProbe({
   required String expectedDeviceId,
   required String expectedDevicePublicKeyHex,
   bool expectApproval = false,
+  String? expectedQueryTarget,
 }) async {
   final socket = await server.first;
   final reader = _TestRecordReader(socket);
@@ -825,6 +873,14 @@ Future<void> _serveProbe({
       expect(request.command.approveAction.approvalId, 'approval-1');
       expect(request.command.approveAction.approved, isFalse);
       expect(request.command.approveAction.decisionReason, 'Rejected in test');
+    } else if (expectedQueryTarget != null) {
+      expect(request.command.commandId, 'query-command-1');
+      expect(request.header.idempotencyKey, 'query-idempotency-1');
+      expect(request.command.hasQueryOperation(), isTrue);
+      expect(
+        request.command.queryOperation.idempotencyKey,
+        expectedQueryTarget,
+      );
     } else {
       expect(request.command.commandId, 'probe-1');
       expect(request.command.hasProbeHost(), isTrue);
@@ -846,7 +902,9 @@ Future<void> _serveProbe({
         state: wire.RemoteOpState.REMOTE_OP_STATE_SUCCEEDED,
         success: true,
         completedAtMs: Int64(DateTime.now().millisecondsSinceEpoch),
-        resultJson: '{"status":"ok"}',
+        resultJson: expectedQueryTarget == null
+            ? '{"status":"ok"}'
+            : '{"found":true,"state":6}',
       ),
     );
     final encryptedResponse = await cipher.encrypt(response.writeToBuffer());

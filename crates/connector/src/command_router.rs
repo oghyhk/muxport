@@ -237,6 +237,39 @@ impl CommandRouter {
                 Ok(json!({}))
             }
             Some(command::Inner::ProbeHost(_)) => Ok(json!({"reachable": true})),
+            Some(command::Inner::QueryOperation(request)) => {
+                let idempotency_key = request.idempotency_key.trim();
+                if idempotency_key.is_empty() {
+                    return Err(AdapterError::InvalidInput(
+                        "queried idempotency key must not be empty".into(),
+                    ));
+                }
+                let prior = self
+                    .ledger
+                    .lock()
+                    .await
+                    .lookup_command(idempotency_key)
+                    .map_err(|error| AdapterError::Internal(error.to_string()))?;
+                let Some((stored_state, stored_result)) = prior else {
+                    return Ok(json!({
+                        "found": false,
+                        "state": RemoteOpState::Failed as i32
+                    }));
+                };
+                let in_flight = self
+                    .in_flight_notification(idempotency_key)
+                    .map_err(|error| AdapterError::Internal(error.to_string()))?
+                    .is_some();
+                let state = if stored_result.is_empty()
+                    && is_reconcilable_incomplete(stored_state)
+                    && !in_flight
+                {
+                    RemoteOpState::ReconciliationRequired
+                } else {
+                    stored_state
+                };
+                Ok(json!({"found": true, "state": state as i32}))
+            }
             Some(command::Inner::ChangeAssignment(request)) => {
                 if request.target_type != "runtime" {
                     return Err(AdapterError::Unsupported(
@@ -435,7 +468,9 @@ fn map_credential_switch_error(error: CredentialSwitchError) -> AdapterError {
 mod tests {
     use super::*;
     use credential_vault::{CredentialEnrollment, KeyEncryptionKey};
-    use muxport_protocol::{AgentType, ChangeAssignmentCmd, Command, StartSessionCmd};
+    use muxport_protocol::{
+        AgentType, ChangeAssignmentCmd, Command, QueryOperationCmd, StartSessionCmd,
+    };
     use std::sync::Arc;
     use test_harness::DeterministicFakeAdapter;
 
@@ -484,6 +519,74 @@ mod tests {
         assert!(first.success);
         assert_eq!(first.result_json, second.result_json);
         assert_eq!(adapter.start_session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn operation_query_reports_terminal_missing_and_restart_unknown_states() {
+        let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
+        let active_router = router(Arc::clone(&adapter), CommandLedger::new());
+        active_router
+            .dispatch("completed-operation", &start_command("build it"))
+            .await
+            .unwrap();
+
+        let query = |command_id: &str, key: &str| Command {
+            command_id: command_id.into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::QueryOperation(QueryOperationCmd {
+                idempotency_key: key.into(),
+            })),
+        };
+        let completed = active_router
+            .dispatch(
+                "query-completed",
+                &query("query-command-1", "completed-operation"),
+            )
+            .await
+            .unwrap();
+        let completed_json: Value = serde_json::from_str(&completed.result_json).unwrap();
+        assert_eq!(completed_json["found"], true);
+        assert_eq!(
+            completed_json["state"],
+            RemoteOpState::Succeeded as i32
+        );
+
+        let missing = active_router
+            .dispatch(
+                "query-missing",
+                &query("query-command-2", "missing-operation"),
+            )
+            .await
+            .unwrap();
+        let missing_json: Value = serde_json::from_str(&missing.result_json).unwrap();
+        assert_eq!(missing_json["found"], false);
+        assert_eq!(missing_json["state"], RemoteOpState::Failed as i32);
+
+        let mut interrupted_ledger = CommandLedger::new();
+        interrupted_ledger
+            .reserve_command("interrupted-operation", i64::MAX, "fingerprint")
+            .unwrap();
+        interrupted_ledger
+            .record_result(
+                "interrupted-operation".into(),
+                RemoteOpState::Dispatched,
+                String::new(),
+            )
+            .unwrap();
+        let restarted = router(adapter, interrupted_ledger);
+        let interrupted = restarted
+            .dispatch(
+                "query-interrupted",
+                &query("query-command-3", "interrupted-operation"),
+            )
+            .await
+            .unwrap();
+        let interrupted_json: Value =
+            serde_json::from_str(&interrupted.result_json).unwrap();
+        assert_eq!(
+            interrupted_json["state"],
+            RemoteOpState::ReconciliationRequired as i32
+        );
     }
 
     #[tokio::test]

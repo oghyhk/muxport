@@ -347,6 +347,7 @@ enum Command_Inner {
   changeAssignment,
   rotateCredential,
   probeHost,
+  queryOperation,
   notSet
 }
 
@@ -363,6 +364,7 @@ class Command extends $pb.GeneratedMessage {
     ChangeAssignmentCmd? changeAssignment,
     RotateCredentialCmd? rotateCredential,
     ProbeHostCmd? probeHost,
+    QueryOperationCmd? queryOperation,
   }) {
     final result = create();
     if (commandId != null) result.commandId = commandId;
@@ -375,6 +377,7 @@ class Command extends $pb.GeneratedMessage {
     if (changeAssignment != null) result.changeAssignment = changeAssignment;
     if (rotateCredential != null) result.rotateCredential = rotateCredential;
     if (probeHost != null) result.probeHost = probeHost;
+    if (queryOperation != null) result.queryOperation = queryOperation;
     return result;
   }
 
@@ -396,6 +399,7 @@ class Command extends $pb.GeneratedMessage {
     8: Command_Inner.changeAssignment,
     9: Command_Inner.rotateCredential,
     10: Command_Inner.probeHost,
+    11: Command_Inner.queryOperation,
     0: Command_Inner.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -403,7 +407,7 @@ class Command extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
       createEmptyInstance: create)
-    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10])
+    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11])
     ..aOS(1, _omitFieldNames ? '' : 'commandId')
     ..aInt64(2, _omitFieldNames ? '' : 'deadlineMs')
     ..aOM<StartSessionCmd>(3, _omitFieldNames ? '' : 'startSession',
@@ -422,6 +426,8 @@ class Command extends $pb.GeneratedMessage {
         subBuilder: RotateCredentialCmd.create)
     ..aOM<ProbeHostCmd>(10, _omitFieldNames ? '' : 'probeHost',
         subBuilder: ProbeHostCmd.create)
+    ..aOM<QueryOperationCmd>(11, _omitFieldNames ? '' : 'queryOperation',
+        subBuilder: QueryOperationCmd.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -450,6 +456,7 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(8)
   @$pb.TagNumber(9)
   @$pb.TagNumber(10)
+  @$pb.TagNumber(11)
   Command_Inner whichInner() => _Command_InnerByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -459,6 +466,7 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(8)
   @$pb.TagNumber(9)
   @$pb.TagNumber(10)
+  @$pb.TagNumber(11)
   void clearInner() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -566,6 +574,17 @@ class Command extends $pb.GeneratedMessage {
   void clearProbeHost() => $_clearField(10);
   @$pb.TagNumber(10)
   ProbeHostCmd ensureProbeHost() => $_ensure(9);
+
+  @$pb.TagNumber(11)
+  QueryOperationCmd get queryOperation => $_getN(10);
+  @$pb.TagNumber(11)
+  set queryOperation(QueryOperationCmd value) => $_setField(11, value);
+  @$pb.TagNumber(11)
+  $core.bool hasQueryOperation() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearQueryOperation() => $_clearField(11);
+  @$pb.TagNumber(11)
+  QueryOperationCmd ensureQueryOperation() => $_ensure(10);
 }
 
 class StartSessionCmd extends $pb.GeneratedMessage {
@@ -1196,6 +1215,61 @@ class ProbeHostCmd extends $pb.GeneratedMessage {
   static ProbeHostCmd getDefault() => _defaultInstance ??=
       $pb.GeneratedMessage.$_defaultFor<ProbeHostCmd>(create);
   static ProbeHostCmd? _defaultInstance;
+}
+
+class QueryOperationCmd extends $pb.GeneratedMessage {
+  factory QueryOperationCmd({
+    $core.String? idempotencyKey,
+  }) {
+    final result = create();
+    if (idempotencyKey != null) result.idempotencyKey = idempotencyKey;
+    return result;
+  }
+
+  QueryOperationCmd._();
+
+  factory QueryOperationCmd.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory QueryOperationCmd.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'QueryOperationCmd',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'idempotencyKey')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  QueryOperationCmd clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  QueryOperationCmd copyWith(void Function(QueryOperationCmd) updates) =>
+      super.copyWith((message) => updates(message as QueryOperationCmd))
+          as QueryOperationCmd;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static QueryOperationCmd create() => QueryOperationCmd._();
+  @$core.override
+  QueryOperationCmd createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static QueryOperationCmd getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<QueryOperationCmd>(create);
+  static QueryOperationCmd? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get idempotencyKey => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set idempotencyKey($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasIdempotencyKey() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearIdempotencyKey() => $_clearField(1);
 }
 
 /// Command Result

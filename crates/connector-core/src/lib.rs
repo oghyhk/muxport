@@ -320,6 +320,19 @@ impl CommandLedger {
             });
         Ok(())
     }
+
+    pub fn lookup_command(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<(RemoteOpState, String)>, CoreError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(CoreError::EmptyIdempotencyKey);
+        }
+        Ok(self
+            .executed_commands
+            .get(idempotency_key)
+            .map(|record| (record.state, record.result_json.clone())))
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +401,33 @@ mod tests {
         assert_eq!(
             ledger.check_or_record("expired-command", 0).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn command_ledger_lookup_is_read_only_and_validated() {
+        let mut ledger = CommandLedger::new();
+        assert_eq!(ledger.lookup_command("missing").unwrap(), None);
+        assert!(matches!(
+            ledger.lookup_command(""),
+            Err(CoreError::EmptyIdempotencyKey)
+        ));
+        ledger
+            .reserve_command("operation-1", 0, "fingerprint")
+            .unwrap();
+        ledger
+            .record_result(
+                "operation-1".into(),
+                RemoteOpState::Succeeded,
+                r#"{"success":true}"#.into(),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.lookup_command("operation-1").unwrap(),
+            Some((
+                RemoteOpState::Succeeded,
+                r#"{"success":true}"#.into()
+            ))
         );
     }
 

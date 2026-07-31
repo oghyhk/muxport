@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_protocol/flutter_protocol.dart';
 
 import 'pairing/signed_pairing_offer.dart';
+import 'security/device_identity.dart';
 import 'screens/host_fleet_screen.dart';
 import 'screens/session_timeline_screen.dart';
 import 'screens/approval_inbox_screen.dart';
@@ -483,11 +485,16 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
             cacheStore: cacheStore,
             allHosts: _hosts.values.toList(growable: false),
           );
+          final reconciled = await _reconcilePendingOperations(
+            synchronized,
+            identity,
+            cacheStore,
+          );
           if (!mounted) {
             return;
           }
           setState(() {
-            _hosts = {..._hosts, hostId: synchronized};
+            _hosts = {..._hosts, hostId: reconciled};
           });
         } on Object {
           if (!mounted) {
@@ -596,6 +603,73 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       );
     } finally {
       await connection?.close();
+    }
+  }
+
+  Future<HostSyncState> _reconcilePendingOperations(
+    HostSyncState host,
+    MobileDeviceIdentity identity,
+    GenerationMobileCacheStore cacheStore,
+  ) async {
+    final operationIds = host.operationIdsRequiringStatusQuery;
+    if (operationIds.isEmpty ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      return host;
+    }
+    final connection = await AuthenticatedDirectConnection.connect(
+      address: host.directAddress!,
+      port: host.directPort!,
+      pinnedHost: PinnedHostIdentity(
+        hostId: host.hostId,
+        publicKeyHex: host.pinnedHostKey,
+      ),
+      identity: identity,
+    );
+    var current = host;
+    try {
+      for (var index = 0; index < operationIds.length; index += 1) {
+        final operationId = operationIds[index];
+        final queryId =
+            'query-${identity.deviceId}-${DateTime.now().microsecondsSinceEpoch}-$index';
+        final result = await connection.queryOperation(
+          commandId: queryId,
+          idempotencyKey: queryId,
+          targetIdempotencyKey: operationId,
+        );
+        if (!result.success) {
+          current = current.resolveOperation(
+            operationId,
+            RemoteOpState.reconciliationRequired,
+          );
+          continue;
+        }
+        final decoded = jsonDecode(result.resultJson);
+        if (decoded is! Map || decoded['state'] is! int) {
+          current = current.resolveOperation(
+            operationId,
+            RemoteOpState.reconciliationRequired,
+          );
+          continue;
+        }
+        final stateCode = decoded['state']! as int;
+        final remoteState =
+            stateCode >= 0 && stateCode < RemoteOpState.values.length
+            ? RemoteOpState.values[stateCode]
+            : RemoteOpState.reconciliationRequired;
+        current = current.resolveOperation(operationId, remoteState);
+      }
+      await cacheStore.save(
+        MobileCacheSnapshot(
+          hosts: [
+            for (final cachedHost in _hosts.values)
+              if (cachedHost.hostId == current.hostId) current else cachedHost,
+          ],
+        ),
+      );
+      return current;
+    } finally {
+      await connection.close();
     }
   }
 

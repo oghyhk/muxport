@@ -101,6 +101,7 @@ message Command {
     ChangeAssignmentCmd change_assignment = 8;
     RotateCredentialCmd rotate_credential = 9;
     ProbeHostCmd probe_host = 10;
+    QueryOperationCmd query_operation = 11;
   }
 }
 
@@ -151,6 +152,10 @@ message RotateCredentialCmd {
 }
 
 message ProbeHostCmd {}
+
+message QueryOperationCmd {
+  string idempotency_key = 1;
+}
 
 // Command Result
 message CommandResult {

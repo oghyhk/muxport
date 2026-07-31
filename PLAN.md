@@ -422,8 +422,8 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Persist host list, non-secret labels, last snapshot, cursors, pending local operation IDs, and device identity through atomic storage.
 - [x] On launch, render cached state with a clear “reconnecting” marker.
 - [x] Re-establish transport and verify host identity before accepting events.
-- [ ] Query status of every locally pending operation by idempotency key.
-- [ ] Resolve each operation to succeeded, failed, expired, or reconciliation required.
+- [x] Query status of every locally pending operation by idempotency key.
+- [x] Resolve each operation to succeeded, failed, expired, or reconciliation required.
 - [ ] Clear local plaintext inputs and temporary attachment files left by an OS kill.
 - [ ] Re-register push token only after E2EE identity is restored.
 
