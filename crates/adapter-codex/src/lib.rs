@@ -1105,16 +1105,45 @@ impl CodexState {
         Ok(())
     }
 
-    fn clear_peer_state(&self, peer_id: &str) -> Result<(), AdapterError> {
-        self.active_turns
-            .write()
-            .map_err(|_| AdapterError::Internal("Codex turn state lock was poisoned".into()))?
-            .retain(|_, turn| turn.peer_id != peer_id);
+    /// Forget state tied to an App Server instance that can no longer report a
+    /// terminal turn notification.  A process loss is not evidence that a turn
+    /// failed (or completed), so make the uncertainty visible until the next
+    /// authoritative `thread/list` reconciliation overwrites it.
+    fn mark_peer_state_outcome_unknown(&self, peer_id: &str) -> Result<Vec<Event>, AdapterError> {
+        let affected_sessions = {
+            let mut turns = self
+                .active_turns
+                .write()
+                .map_err(|_| AdapterError::Internal("Codex turn state lock was poisoned".into()))?;
+            let affected_sessions = turns
+                .iter()
+                .filter(|(_, turn)| turn.peer_id == peer_id)
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            turns.retain(|_, turn| turn.peer_id != peer_id);
+            affected_sessions
+        };
         self.pending_approvals
             .write()
             .map_err(|_| AdapterError::Internal("Codex approval state lock was poisoned".into()))?
             .retain(|_, approval| approval.peer_id != peer_id);
-        Ok(())
+
+        let timestamp_ms = now_ms();
+        affected_sessions
+            .into_iter()
+            .map(|session_id| {
+                self.remember_session(&session_id, "", "", "outcomeUnknown")?;
+                let context = self.session_context(&session_id)?;
+                Ok(session_event(
+                    &session_id,
+                    &context.title,
+                    "outcomeUnknown",
+                    &context.project_path,
+                    &context.credential_profile_id,
+                    timestamp_ms,
+                ))
+            })
+            .collect()
     }
 
     fn notification_events(
@@ -1431,18 +1460,16 @@ async fn run_incoming(
     state: Arc<CodexState>,
     mut incoming: mpsc::Receiver<Incoming>,
 ) {
+    let mut terminal_failure = None;
     while let Some(message) = incoming.recv().await {
         match message {
             Incoming::Message(value) => {
                 let method = match value.get("method").and_then(Value::as_str) {
                     Some(method) => method,
                     None => {
-                        fail_peer(
-                            &peer,
-                            &state,
-                            "Codex incoming message had no method".into(),
-                        )
-                        .await;
+                        let detail = "Codex incoming message had no method".to_owned();
+                        fail_peer(&peer, detail.clone()).await;
+                        terminal_failure = Some(detail);
                         break;
                     }
                 };
@@ -1467,7 +1494,9 @@ async fn run_incoming(
                                 )
                                 .await
                             {
-                                state.fail(error.to_string());
+                                let detail = error.to_string();
+                                fail_peer(&peer, detail.clone()).await;
+                                terminal_failure = Some(detail);
                                 break;
                             }
                         }
@@ -1475,7 +1504,9 @@ async fn run_incoming(
                             let _ = active_peer
                                 .respond_error(request_id, -32602, "Invalid approval request")
                                 .await;
-                            fail_peer(&peer, &state, error.to_string()).await;
+                            let detail = error.to_string();
+                            fail_peer(&peer, detail.clone()).await;
+                            terminal_failure = Some(detail);
                             break;
                         }
                     }
@@ -1488,26 +1519,41 @@ async fn run_incoming(
                             }
                         }
                         Err(error) => {
-                            fail_peer(&peer, &state, error.to_string()).await;
+                            let detail = error.to_string();
+                            fail_peer(&peer, detail.clone()).await;
+                            terminal_failure = Some(detail);
                             break;
                         }
                     }
                 }
             }
             Incoming::Failure(detail) => {
-                state.fail(detail);
+                terminal_failure = Some(detail);
                 break;
             }
-            Incoming::Closed => break,
+            Incoming::Closed => {
+                terminal_failure = Some("Codex App Server event stream closed; resynchronize".into());
+                break;
+            }
         }
     }
-    if let Err(error) = state.clear_peer_state(&peer_id) {
-        state.fail(error.to_string());
+    let terminal_failure = terminal_failure
+        .unwrap_or_else(|| "Codex App Server event stream disconnected; resynchronize".into());
+    match state.mark_peer_state_outcome_unknown(&peer_id) {
+        Ok(events) => {
+            for event in events {
+                state.emit(event);
+            }
+        }
+        Err(error) => {
+            state.fail(error.to_string());
+            return;
+        }
     }
+    state.fail(terminal_failure);
 }
 
-async fn fail_peer(peer: &Weak<JsonRpcPeer>, state: &CodexState, detail: String) {
-    state.fail(detail.clone());
+async fn fail_peer(peer: &Weak<JsonRpcPeer>, detail: String) {
     if let Some(peer) = peer.upgrade() {
         peer.invalidate(detail).await;
     }
@@ -1684,6 +1730,54 @@ mod tests {
                 ..
             })) if delta_text == "hello"
         ));
+    }
+
+    #[test]
+    fn app_server_loss_marks_in_flight_turn_unknown_until_reconciliation() {
+        let adapter = CodexAdapter::new("codex");
+        adapter
+            .state
+            .remember_session("thread-1", "/srv/app", "Build feature", "inProgress")
+            .unwrap();
+        adapter
+            .state
+            .set_active_turn(
+                "thread-1",
+                ActiveTurn {
+                    turn_id: "turn-1".into(),
+                    peer_id: "peer-1".into(),
+                },
+            )
+            .unwrap();
+
+        let events = adapter
+            .state
+            .mark_peer_state_outcome_unknown("peer-1")
+            .unwrap();
+        assert!(adapter.state.active_turn("thread-1").unwrap().is_none());
+        assert!(matches!(
+            events.as_slice(),
+            [Event {
+                inner: Some(event::Inner::SessionUpdated(SessionUpdatedEvent {
+                    status,
+                    ..
+                })),
+                ..
+            }] if status == "outcomeUnknown"
+        ));
+        assert_eq!(
+            adapter.state.session_context("thread-1").unwrap().status,
+            "outcomeUnknown"
+        );
+
+        adapter
+            .state
+            .remember_session("thread-1", "", "", "completed")
+            .unwrap();
+        assert_eq!(
+            adapter.state.session_context("thread-1").unwrap().status,
+            "completed"
+        );
     }
 
     #[tokio::test]

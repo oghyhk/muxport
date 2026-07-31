@@ -35,6 +35,7 @@ class SessionTimelineScreen extends StatelessWidget {
                 final item = sessions[index];
                 final session = item.session;
                 final status = _text(session['status'], fallback: 'unknown');
+                final statusLabel = _sessionStatusLabel(status);
                 final profile = _text(session['credentialProfileId']);
                 return Card(
                   child: ListTile(
@@ -43,6 +44,8 @@ class SessionTimelineScreen extends StatelessWidget {
                           ? Icons.gavel
                           : status == 'running' || status == 'inProgress'
                           ? Icons.sync
+                          : status == 'outcomeUnknown'
+                          ? Icons.warning_amber_rounded
                           : Icons.forum_outlined,
                     ),
                     title: Text(
@@ -65,7 +68,7 @@ class SessionTimelineScreen extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                     trailing: _StatusBadge(
-                      status: status,
+                      status: statusLabel,
                       stale: !item.host.canMutate,
                     ),
                   ),
@@ -116,6 +119,13 @@ class _StatusBadge extends StatelessWidget {
       ],
     );
   }
+}
+
+String _sessionStatusLabel(String status) {
+  return switch (status) {
+    'outcomeUnknown' => 'OUTCOME UNKNOWN · RESYNCING',
+    _ => status,
+  };
 }
 
 String _text(Object? value, {String fallback = ''}) {
