@@ -8,6 +8,7 @@
 .pub-cache/
 .pub/
 build/
+/.tools/
 
 # OS / Editor
 .DS_Store

@@ -724,7 +724,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ## 19. CI/CD and release engineering
 
 - [ ] Pin toolchains and generate lockfiles.
-- [ ] Reproduce protocol generation in CI and fail on uncommitted schema output.
+- [x] Reproduce protocol generation in CI and fail on uncommitted schema output.
 - [ ] Build/test Rust on Windows, macOS, and Linux.
 - [ ] Build/test Flutter on iOS and Android with physical-device smoke testing before release.
 - [ ] Sign connector binaries, installers, mobile applications, and update manifests.
