@@ -56,7 +56,7 @@ pub trait CredentialRuntime: Send + Sync {
 #[async_trait::async_trait]
 impl<T> CredentialRuntime for T
 where
-    T: AgentAdapter + Send + Sync,
+    T: AgentAdapter + Send + Sync + ?Sized,
 {
     async fn validate(
         &self,
@@ -84,7 +84,7 @@ where
 /// On every failure after runtime mutation begins, the prior encrypted secret
 /// is reactivated. A rollback failure is reported explicitly and the vault
 /// remains staged so a restart reconciler can retry from durable state.
-pub async fn activate_staged_credential<R: CredentialRuntime>(
+pub async fn activate_staged_credential<R: CredentialRuntime + ?Sized>(
     runtime: &R,
     vault: &mut PersistentVault,
     profile_id: &str,
@@ -186,7 +186,7 @@ pub async fn activate_staged_credential<R: CredentialRuntime>(
     })
 }
 
-async fn rollback_after_failure<R: CredentialRuntime>(
+async fn rollback_after_failure<R: CredentialRuntime + ?Sized>(
     runtime: &R,
     profile_id: &str,
     prior: &CredentialMaterial,

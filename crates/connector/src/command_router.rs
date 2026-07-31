@@ -1,5 +1,6 @@
 use adapter_api::{AdapterError, AgentAdapter};
-use connector_core::{CommandLedger, CoreError};
+use connector_core::{activate_staged_credential, CommandLedger, CoreError, CredentialSwitchError};
+use credential_vault::PersistentVault;
 use muxport_protocol::{
     command, Command, CommandResult, RemoteOpState,
 };
@@ -32,6 +33,7 @@ pub enum CommandDispatchError {
 pub struct CommandRouter {
     ledger: Mutex<CommandLedger>,
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
+    vault: Option<Arc<Mutex<PersistentVault>>>,
     in_flight: StdMutex<HashMap<String, Arc<Notify>>>,
 }
 
@@ -43,6 +45,7 @@ impl CommandRouter {
         Self {
             ledger: Mutex::new(ledger),
             adapters,
+            vault: None,
             in_flight: StdMutex::new(HashMap::new()),
         }
     }
@@ -52,6 +55,19 @@ impl CommandRouter {
         adapters: HashMap<String, Arc<dyn AgentAdapter>>,
     ) -> Result<Self, CommandDispatchError> {
         Ok(Self::new(CommandLedger::open_sqlite(path)?, adapters))
+    }
+
+    pub fn open_sqlite_with_vault(
+        path: impl AsRef<Path>,
+        adapters: HashMap<String, Arc<dyn AgentAdapter>>,
+        vault: Arc<Mutex<PersistentVault>>,
+    ) -> Result<Self, CommandDispatchError> {
+        Ok(Self {
+            ledger: Mutex::new(CommandLedger::open_sqlite(path)?),
+            adapters,
+            vault: Some(vault),
+            in_flight: StdMutex::new(HashMap::new()),
+        })
     }
 
     pub async fn dispatch(
@@ -221,9 +237,47 @@ impl CommandRouter {
                 Ok(json!({}))
             }
             Some(command::Inner::ProbeHost(_)) => Ok(json!({"reachable": true})),
-            Some(command::Inner::ChangeAssignment(_)) => Err(AdapterError::Unsupported(
-                "credential assignment changes are not connected to the vault".into(),
-            )),
+            Some(command::Inner::ChangeAssignment(request)) => {
+                if request.target_type != "runtime" {
+                    return Err(AdapterError::Unsupported(
+                        "project credential assignments require the desired-state registry"
+                            .into(),
+                    ));
+                }
+                let adapter = self.adapter(&request.target_id)?;
+                let profile_id = request.new_credential_profile_id.trim();
+                if profile_id.is_empty() {
+                    return Err(AdapterError::InvalidInput(
+                        "new credential profile id must not be empty".into(),
+                    ));
+                }
+                let vault = self.vault.as_ref().ok_or_else(|| {
+                    AdapterError::Unsupported("credential vault is unavailable or locked".into())
+                })?;
+                let mut vault = vault.lock().await;
+                let provider = vault
+                    .get_profile(profile_id)
+                    .map(|profile| profile.provider)
+                    .ok_or_else(|| {
+                        AdapterError::InvalidInput(format!(
+                            "credential profile {profile_id:?} does not exist"
+                        ))
+                    })?;
+                let result = activate_staged_credential(
+                    adapter.as_ref(),
+                    &mut vault,
+                    profile_id,
+                    &provider,
+                )
+                .await
+                .map_err(map_credential_switch_error)?;
+                Ok(json!({
+                    "profile_id": result.profile_id,
+                    "provider_id": result.provider_id,
+                    "account_fingerprint": result.account_fingerprint,
+                    "activated_at_ms": result.activated_at_ms
+                }))
+            }
             Some(command::Inner::RotateCredential(_)) => Err(AdapterError::Unsupported(
                 "credential rotation is not connected to managed runtimes".into(),
             )),
@@ -359,10 +413,29 @@ fn outcome_requires_reconciliation(error: &AdapterError) -> bool {
     )
 }
 
+fn map_credential_switch_error(error: CredentialSwitchError) -> AdapterError {
+    let detail = error.to_string();
+    match error {
+        CredentialSwitchError::RollbackFailed { .. } => {
+            AdapterError::OutcomeUnknown(detail)
+        }
+        CredentialSwitchError::Adapter(AdapterError::ConnectionLost)
+        | CredentialSwitchError::Adapter(AdapterError::ConnectionLostWithDetail(_))
+        | CredentialSwitchError::Adapter(AdapterError::OutcomeUnknown(_)) => {
+            AdapterError::OutcomeUnknown(detail)
+        }
+        CredentialSwitchError::ActivationRolledBack(_) => {
+            AdapterError::CredentialInvalid(detail)
+        }
+        _ => AdapterError::InvalidInput(detail),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use muxport_protocol::{AgentType, Command, StartSessionCmd};
+    use credential_vault::{CredentialEnrollment, KeyEncryptionKey};
+    use muxport_protocol::{AgentType, ChangeAssignmentCmd, Command, StartSessionCmd};
     use std::sync::Arc;
     use test_harness::DeterministicFakeAdapter;
 
@@ -386,6 +459,18 @@ mod tests {
         let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
         adapters.insert("codex-test".into(), adapter);
         CommandRouter::new(ledger, adapters)
+    }
+
+    fn assignment_command(profile_id: &str) -> Command {
+        Command {
+            command_id: "assignment-command-1".into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::ChangeAssignment(ChangeAssignmentCmd {
+                target_type: "runtime".into(),
+                target_id: "codex-test".into(),
+                new_credential_profile_id: profile_id.into(),
+            })),
+        }
     }
 
     #[tokio::test]
@@ -528,5 +613,68 @@ mod tests {
             RemoteOpState::Expired
         );
         assert_eq!(adapter.start_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_assignment_activates_staged_vault_secret_transactionally() {
+        let db_path = std::env::temp_dir().join(format!(
+            "muxport-router-assignment-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let vault_path = db_path.with_extension("vault");
+        let mut vault = PersistentVault::open_or_create(
+            &vault_path,
+            "host-test",
+            KeyEncryptionKey::generate(),
+        )
+        .unwrap();
+        vault
+            .enroll_credential(
+                CredentialEnrollment {
+                    profile_id: "profile-a".into(),
+                    display_name: "Profile A".into(),
+                    provider: "openai".into(),
+                    credential_type: "api_key".into(),
+                    account_fingerprint: "account-a".into(),
+                    created_at_ms: 1,
+                    last_validated_at_ms: 1,
+                },
+                b"old-secret-key",
+            )
+            .unwrap();
+        vault
+            .stage_credential("profile-a", b"new-secret-key")
+            .unwrap();
+        let vault = Arc::new(Mutex::new(vault));
+        let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("codex-test".into(), adapter);
+        let router =
+            CommandRouter::open_sqlite_with_vault(&db_path, adapters, Arc::clone(&vault))
+                .unwrap();
+
+        let result = router
+            .dispatch(
+                "assignment-idempotency-key",
+                &assignment_command("profile-a"),
+            )
+            .await
+            .unwrap();
+        assert!(result.success, "{}", result.error_message);
+        assert_eq!(
+            vault
+                .lock()
+                .await
+                .decrypt_active_secret("profile-a")
+                .unwrap()
+                .expose_secret(),
+            b"new-secret-key"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(vault_path);
     }
 }

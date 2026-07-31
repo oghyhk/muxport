@@ -200,17 +200,6 @@ async fn main() -> Result<(), DynError> {
         (opencode_config, opencode),
         (codex_config, codex),
     ];
-    let command_db = std::env::var("MUXPORT_COMMAND_DB")
-        .unwrap_or_else(|_| "muxport-commands.db".into());
-    let adapter_registry = runtimes
-        .iter()
-        .map(|(config, adapter)| {
-            (config.runtime_id.clone(), Arc::clone(adapter))
-        })
-        .collect();
-    let command_router =
-        Arc::new(CommandRouter::open_sqlite(&command_db, adapter_registry)?);
-    info!(path = %command_db, "persistent command ledger initialized");
     let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
         .unwrap_or_else(|_| "muxport-pairing.db".into());
     let mut pairing_store = PairingStore::open_sqlite(&pairing_db)?;
@@ -257,7 +246,7 @@ async fn main() -> Result<(), DynError> {
         std::env::var("MUXPORT_VAULT_FILE").unwrap_or_else(|_| "vault.sealed".into());
     let vault_key =
         VaultKeyManager::new(OsVaultKeyStore::new()).load_or_create(&host_id);
-    let _credential_vault = match vault_key {
+    let credential_vault = match vault_key {
         Ok(vault_key) => {
             let key_created = vault_key.was_created();
             match PersistentVault::open_or_create(
@@ -271,7 +260,7 @@ async fn main() -> Result<(), DynError> {
                         key_created,
                         "OS-protected credential vault is available"
                     );
-                    Some(vault)
+                    Some(Arc::new(tokio::sync::Mutex::new(vault)))
                 }
                 Err(error) => {
                     warn!(
@@ -291,6 +280,26 @@ async fn main() -> Result<(), DynError> {
             None
         }
     };
+    let command_db = std::env::var("MUXPORT_COMMAND_DB")
+        .unwrap_or_else(|_| "muxport-commands.db".into());
+    let adapter_registry = runtimes
+        .iter()
+        .map(|(config, adapter)| {
+            (config.runtime_id.clone(), Arc::clone(adapter))
+        })
+        .collect();
+    let command_router = match credential_vault {
+        Some(vault) => Arc::new(CommandRouter::open_sqlite_with_vault(
+            &command_db,
+            adapter_registry,
+            vault,
+        )?),
+        None => Arc::new(CommandRouter::open_sqlite(
+            &command_db,
+            adapter_registry,
+        )?),
+    };
+    info!(path = %command_db, "persistent command ledger initialized");
 
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
