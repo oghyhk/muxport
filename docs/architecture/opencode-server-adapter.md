@@ -80,9 +80,13 @@ for recovery.
 - Usage/quota reads
 
 The repository has deterministic managed-launch, auth-schema, activation,
-readback, and rollback tests. A live-version compatibility fixture with real
-OpenCode and non-production provider credentials is still required before this
-path can be used for production rotation.
+readback, and rollback tests. The live OpenCode 1.18.10 fixture confirms that a
+runtime-advertised API-key provider survives two starts under one isolated
+profile. It also found that OpenCode Go's `opencode` provider is not advertised
+by `/provider/auth` on that version. Muxport therefore keeps Go activation
+fail-closed instead of hard-coding the ID or bypassing schema discovery.
+OpenCode Go validation with a non-production authorized key remains required
+before this path can be used for Go rotation.
 
 ## Normalization boundary
 

@@ -475,9 +475,7 @@ mod tests {
                 .unwrap();
         let password = "live-fixture-server-password";
 
-        let credential =
-            CredentialMaterial::api_key("opencode", b"muxport-live-fixture-not-a-real-key")
-                .unwrap();
+        let discovery_adapter = profile.adapter(password).unwrap();
         for cycle in 0..2 {
             let mut child = profile.spawn(password).unwrap();
             let adapter = profile.adapter(password).unwrap();
@@ -495,14 +493,34 @@ mod tests {
             assert!(healthy, "managed OpenCode did not become healthy");
             assert!(child.try_wait().unwrap().is_none());
             if cycle == 0 {
+                let provider_id = discovery_adapter
+                    .auth_methods()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|(provider_id, methods)| {
+                        methods
+                            .iter()
+                            .any(|method| method.kind == "api")
+                            .then_some(provider_id)
+                    })
+                    .expect("installed OpenCode exposed no API-key auth method");
+                fs::write(root.join("discovered-provider-id"), &provider_id).unwrap();
+                let credential = CredentialMaterial::api_key(
+                    provider_id,
+                    b"muxport-live-fixture-not-a-real-key",
+                )
+                .unwrap();
                 adapter
                     .activate_credential("profile-a", &credential)
                     .await
                     .unwrap();
             } else {
+                let provider_id =
+                    fs::read_to_string(root.join("discovered-provider-id")).unwrap();
                 assert!(
                     adapter
-                        .read_account_state("opencode")
+                        .read_account_state(&provider_id)
                         .await
                         .unwrap()
                         .connected,
