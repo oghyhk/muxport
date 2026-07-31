@@ -228,7 +228,7 @@ state/
 └─ diagnostics/            # redacted rotating logs
 ```
 
-- [ ] Use SQLite transactions, foreign keys, integrity checks, and explicit schema migrations.
+- [x] Use SQLite transactions, foreign keys, integrity checks, and explicit schema migrations.
 - [ ] Treat SQLite WAL/SHM files as live data, never disposable cache during recovery.
 - [ ] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
 - [ ] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
@@ -430,7 +430,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Connector restart checklist
 
 - [x] Acquire a single-instance lock without deleting another process's lock blindly.
-- [ ] Open stores read-only first, verify schema and integrity, then migrate one subsystem at a time.
+- [x] Open stores read-only first, verify schema and integrity, then migrate one subsystem at a time.
 - [x] Load desired runtime configuration and operation ledger.
 - [ ] Unlock vault or enter `vault_locked`.
 - [x] Generate a new connector boot epoch.

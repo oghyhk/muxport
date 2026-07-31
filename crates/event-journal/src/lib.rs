@@ -31,6 +31,8 @@ pub enum JournalError {
     InvalidSnapshotBoundary { snapshot: u64, current: u64 },
     #[error("Event journal integrity check failed: {0}")]
     IntegrityCheckFailed(String),
+    #[error("Event journal schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: u32, supported: u32 },
     #[error("Invalid event journal retention policy: {0}")]
     InvalidRetentionPolicy(String),
 }
@@ -60,6 +62,8 @@ pub struct EventJournal {
 }
 
 impl EventJournal {
+    const SCHEMA_VERSION: u32 = 2;
+
     pub fn open_in_memory(boot_epoch: u64) -> Result<Self, JournalError> {
         let conn = Connection::open_in_memory()?;
         let journal = Self {
@@ -85,9 +89,26 @@ impl EventJournal {
             if integrity != "ok" {
                 return Err(JournalError::IntegrityCheckFailed(integrity));
             }
+            let schema_version: u32 =
+                preflight.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if schema_version > Self::SCHEMA_VERSION {
+                return Err(JournalError::UnsupportedSchemaVersion {
+                    found: schema_version,
+                    supported: Self::SCHEMA_VERSION,
+                });
+            }
         }
 
         let conn = Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let schema_version: u32 =
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > Self::SCHEMA_VERSION {
+            return Err(JournalError::UnsupportedSchemaVersion {
+                found: schema_version,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -103,7 +124,19 @@ impl EventJournal {
     }
 
     fn init_tables(&self) -> Result<(), JournalError> {
-        self.conn.execute(
+        self.conn.pragma_update(None, "foreign_keys", true)?;
+        let schema_version: u32 =
+            self.conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > Self::SCHEMA_VERSION {
+            return Err(JournalError::UnsupportedSchemaVersion {
+                found: schema_version,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
+
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS events (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 boot_epoch INTEGER NOT NULL,
@@ -115,7 +148,8 @@ impl EventJournal {
             [],
         )?;
         let has_recorded_at = {
-            let mut statement = self.conn.prepare("PRAGMA table_info(events)")?;
+            let mut statement =
+                transaction.prepare("PRAGMA table_info(events)")?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
             let mut found = false;
             for column in columns {
@@ -126,18 +160,18 @@ impl EventJournal {
             found
         };
         if !has_recorded_at {
-            self.conn.execute(
+            transaction.execute(
                 "ALTER TABLE events
                  ADD COLUMN recorded_at_ms INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-            self.conn.execute(
+            transaction.execute(
                 "UPDATE events SET recorded_at_ms = ?1 WHERE recorded_at_ms = 0",
                 params![chrono::Utc::now().timestamp_millis()],
             )?;
         }
 
-        self.conn.execute(
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sequence INTEGER NOT NULL,
@@ -147,7 +181,7 @@ impl EventJournal {
             )",
             [],
         )?;
-        self.conn.execute(
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS cursor_acks (
                 client_id TEXT PRIMARY KEY,
                 sequence INTEGER NOT NULL,
@@ -155,14 +189,16 @@ impl EventJournal {
             )",
             [],
         )?;
-        self.conn.execute(
+        transaction.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)",
             [],
         )?;
-        self.conn.execute(
+        transaction.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_recorded_at ON events(recorded_at_ms)",
             [],
         )?;
+        transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -879,10 +915,70 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         assert!(recorded_at_ms > 0);
+        assert_eq!(
+            journal
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            EventJournal::SCHEMA_VERSION
+        );
 
         drop(journal);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn future_schema_is_rejected_without_modification() {
+        let file_name = format!(
+            "muxport-event-journal-future-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(file_name);
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA user_version = 999;
+                     CREATE TABLE future_marker (value TEXT NOT NULL);
+                     INSERT INTO future_marker VALUES ('preserve-me');",
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            EventJournal::open_file(&path, 2),
+            Err(JournalError::UnsupportedSchemaVersion {
+                found: 999,
+                supported: 2
+            })
+        ));
+        let connection = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM future_marker", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "preserve-me"
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            999
+        );
+
+        drop(connection);
+        let _ = std::fs::remove_file(path);
     }
 }

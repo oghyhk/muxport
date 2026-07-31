@@ -28,6 +28,8 @@ pub enum CoreError {
     InvalidStoredState(i32),
     #[error("Command ledger integrity check failed: {0}")]
     IntegrityCheckFailed(String),
+    #[error("Command ledger schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: u32, supported: u32 },
     #[error("Command ledger database error: {0}")]
     Sql(#[from] rusqlite::Error),
 }
@@ -139,6 +141,8 @@ impl Default for CommandLedger {
 }
 
 impl CommandLedger {
+    const SCHEMA_VERSION: u32 = 2;
+
     pub fn new() -> Self {
         Self {
             executed_commands: HashMap::new(),
@@ -147,16 +151,42 @@ impl CommandLedger {
     }
 
     pub fn open_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, CoreError> {
+        let path = path.as_ref();
+        if path.exists() {
+            let preflight = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let integrity: String =
+                preflight.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(CoreError::IntegrityCheckFailed(integrity));
+            }
+            let schema_version: u32 =
+                preflight.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if schema_version > Self::SCHEMA_VERSION {
+                return Err(CoreError::UnsupportedSchemaVersion {
+                    found: schema_version,
+                    supported: Self::SCHEMA_VERSION,
+                });
+            }
+        }
         let conn = rusqlite::Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let schema_version: u32 =
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > Self::SCHEMA_VERSION {
+            return Err(CoreError::UnsupportedSchemaVersion {
+                found: schema_version,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let integrity: String =
-            conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(CoreError::IntegrityCheckFailed(integrity));
-        }
-        conn.execute(
+        let transaction = conn.unchecked_transaction()?;
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS command_ledger (
                 idempotency_key TEXT PRIMARY KEY,
                 state_code INTEGER NOT NULL,
@@ -167,7 +197,7 @@ impl CommandLedger {
             [],
         )?;
         let has_fingerprint = {
-            let mut stmt = conn.prepare("PRAGMA table_info(command_ledger)")?;
+            let mut stmt = transaction.prepare("PRAGMA table_info(command_ledger)")?;
             let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
             let mut found = false;
             for column in columns {
@@ -178,12 +208,14 @@ impl CommandLedger {
             found
         };
         if !has_fingerprint {
-            conn.execute(
+            transaction.execute(
                 "ALTER TABLE command_ledger
                  ADD COLUMN command_fingerprint TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
         }
+        transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+        transaction.commit()?;
 
         let mut ledger = Self {
             executed_commands: HashMap::new(),
@@ -588,6 +620,15 @@ mod tests {
 
         let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
         assert_eq!(
+            ledger
+                .conn
+                .as_ref()
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            CommandLedger::SCHEMA_VERSION
+        );
+        assert_eq!(
             ledger.check_or_record("legacy", 0).unwrap(),
             Some((
                 RemoteOpState::Succeeded,
@@ -605,5 +646,51 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn sqlite_rejects_future_schema_without_modifying_it() {
+        let db_path = std::env::temp_dir().join(format!(
+            "cmd-ledger-future-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA user_version = 999;
+                 CREATE TABLE future_marker (value TEXT NOT NULL);
+                 INSERT INTO future_marker VALUES ('preserve-me');",
+            )
+            .unwrap();
+        }
+
+        assert!(matches!(
+            CommandLedger::open_sqlite(&db_path),
+            Err(CoreError::UnsupportedSchemaVersion {
+                found: 999,
+                supported: 2
+            })
+        ));
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT value FROM future_marker", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "preserve-me"
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            999
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
     }
 }

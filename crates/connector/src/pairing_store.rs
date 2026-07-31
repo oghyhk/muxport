@@ -5,7 +5,9 @@ use muxport_crypto::{
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
@@ -27,6 +29,8 @@ pub enum PairingStoreError {
     Crypto(#[from] CryptoError),
     #[error("Pairing store integrity check failed: {0}")]
     IntegrityCheckFailed(String),
+    #[error("Pairing store schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: u32, supported: u32 },
     #[error("Pairing offer input is invalid")]
     InvalidOffer,
     #[error("Pairing token is unknown, expired, or already consumed")]
@@ -54,7 +58,29 @@ pub struct PairingStore {
 }
 
 impl PairingStore {
+    const SCHEMA_VERSION: u32 = 1;
+
     pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self, PairingStoreError> {
+        let path = path.as_ref();
+        if path.exists() {
+            let preflight = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let integrity: String =
+                preflight.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(PairingStoreError::IntegrityCheckFailed(integrity));
+            }
+            let schema_version: u32 =
+                preflight.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if schema_version > Self::SCHEMA_VERSION {
+                return Err(PairingStoreError::UnsupportedSchemaVersion {
+                    found: schema_version,
+                    supported: Self::SCHEMA_VERSION,
+                });
+            }
+        }
         let conn = Connection::open(path)?;
         Self::from_connection(conn)
     }
@@ -65,15 +91,20 @@ impl PairingStore {
     }
 
     fn from_connection(conn: Connection) -> Result<Self, PairingStoreError> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let schema_version: u32 =
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > Self::SCHEMA_VERSION {
+            return Err(PairingStoreError::UnsupportedSchemaVersion {
+                found: schema_version,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let integrity: String =
-            conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(PairingStoreError::IntegrityCheckFailed(integrity));
-        }
-        conn.execute_batch(
+        let transaction = conn.unchecked_transaction()?;
+        transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS pairing_sessions (
                 pairing_id TEXT PRIMARY KEY,
                 host_id TEXT NOT NULL,
@@ -104,7 +135,7 @@ impl PairingStore {
             );",
         )?;
         let now = chrono::Utc::now().timestamp_millis();
-        conn.execute(
+        transaction.execute(
             "UPDATE pairing_sessions
              SET state_code = ?1
              WHERE state_code IN (?2, ?3) AND expires_at_ms < ?4",
@@ -115,7 +146,7 @@ impl PairingStore {
         // cannot safely continue. A fully confirmed record can still be
         // finalized transactionally because it no longer needs the ephemeral
         // secret.
-        conn.execute(
+        transaction.execute(
             "UPDATE pairing_sessions
              SET state_code = ?1
              WHERE state_code = ?2
@@ -123,6 +154,8 @@ impl PairingStore {
                     AND NOT (phone_confirmed = 1 AND host_confirmed = 1))",
             params![STATE_CANCELLED, STATE_OFFERED, STATE_CLAIMED],
         )?;
+        transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+        transaction.commit()?;
         Ok(Self { conn })
     }
 
@@ -833,6 +866,13 @@ mod tests {
         let pairing_id;
         {
             let mut store = PairingStore::open_sqlite(&db_path).unwrap();
+            assert_eq!(
+                store
+                    .conn
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                PairingStore::SCHEMA_VERSION
+            );
             (pairing_id, _) =
                 claim_pairing(&mut store, "host-1", &device_identity);
             store
@@ -863,6 +903,55 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn future_schema_is_rejected_without_modification() {
+        let db_path = std::env::temp_dir().join(format!(
+            "muxport-pairing-future-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        {
+            let connection = Connection::open(&db_path).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA user_version = 999;
+                     CREATE TABLE future_marker (value TEXT NOT NULL);
+                     INSERT INTO future_marker VALUES ('preserve-me');",
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            PairingStore::open_sqlite(&db_path),
+            Err(PairingStoreError::UnsupportedSchemaVersion {
+                found: 999,
+                supported: 1
+            })
+        ));
+        let connection = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM future_marker", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "preserve-me"
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            999
+        );
+
+        drop(connection);
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
