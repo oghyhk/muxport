@@ -948,6 +948,13 @@ const RuntimeInfo$json = {
       '10': 'activeCredentialProfileId'
     },
     {'1': 'project_paths', '3': 6, '4': 3, '5': 9, '10': 'projectPaths'},
+    {
+      '1': 'connector_managed',
+      '3': 7,
+      '4': 1,
+      '5': 8,
+      '10': 'connectorManaged'
+    },
   ],
 };
 
@@ -958,7 +965,7 @@ final $typed_data.Uint8List runtimeInfoDescriptor = $convert.base64Decode(
     'bmFtZRgDIAEoCVIEbmFtZRI3CgVzdGF0ZRgEIAEoDjIhLm11eHBvcnQucHJvdG9jb2wudjEuUn'
     'VudGltZVN0YXRlUgVzdGF0ZRI/ChxhY3RpdmVfY3JlZGVudGlhbF9wcm9maWxlX2lkGAUgASgJ'
     'UhlhY3RpdmVDcmVkZW50aWFsUHJvZmlsZUlkEiMKDXByb2plY3RfcGF0aHMYBiADKAlSDHByb2'
-    'plY3RQYXRocw==');
+    'plY3RQYXRocxIrChFjb25uZWN0b3JfbWFuYWdlZBgHIAEoCFIQY29ubmVjdG9yTWFuYWdlZA==');
 
 @$core.Deprecated('Use credentialProfileInfoDescriptor instead')
 const CredentialProfileInfo$json = {

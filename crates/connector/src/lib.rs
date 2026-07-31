@@ -186,6 +186,20 @@ impl RuntimeMirror {
         }
     }
 
+    /// Projects manifest-derived ownership to authenticated phones. It is not
+    /// inferred from a process or endpoint, so an external runtime remains
+    /// explicitly unmanaged even when its name looks familiar.
+    pub fn set_runtime_connector_managed(&mut self, runtime_id: &str, managed: bool) {
+        if let Some(runtime) = self
+            .snapshot
+            .runtimes
+            .iter_mut()
+            .find(|runtime| runtime.runtime_id == runtime_id)
+        {
+            runtime.connector_managed = managed;
+        }
+    }
+
     /// Removes projections for runtimes no longer present in connector
     /// configuration. This is applied after restart before new source
     /// snapshots arrive, so deleted manifest entries cannot survive as stale
@@ -414,6 +428,7 @@ impl RuntimeMirror {
             state: RuntimeState::Unknown as i32,
             active_credential_profile_id: String::new(),
             project_paths: Vec::new(),
+            connector_managed: false,
         });
         self.snapshot.runtimes.len() - 1
     }
@@ -680,6 +695,23 @@ mod tests {
             snapshot.runtimes[0].active_credential_profile_id,
             "go-account-a"
         );
+    }
+
+    #[test]
+    fn manifest_derived_management_is_projected_without_process_inference() {
+        let mut mirror = RuntimeMirror::new("host", "hostname", ConnectorState::Ready, 0);
+        mirror.reconcile_runtime(
+            "external-opencode",
+            AgentType::Opencode,
+            "OpenCode",
+            vec![],
+            vec![],
+        );
+        mirror.set_runtime_connector_managed("external-opencode", false);
+        assert!(!mirror.snapshot_at(0).runtimes[0].connector_managed);
+
+        mirror.set_runtime_connector_managed("external-opencode", true);
+        assert!(mirror.snapshot_at(0).runtimes[0].connector_managed);
     }
 
     #[test]

@@ -15,6 +15,7 @@ class BulkCredentialSwitchPlan {
     required this.offline,
     required this.locked,
     required this.busy,
+    required this.unmanaged,
     required this.missingProfile,
   });
 
@@ -24,6 +25,7 @@ class BulkCredentialSwitchPlan {
   final List<BulkCredentialSwitchTarget> offline;
   final List<BulkCredentialSwitchTarget> locked;
   final List<BulkCredentialSwitchTarget> busy;
+  final List<BulkCredentialSwitchTarget> unmanaged;
   final List<BulkCredentialSwitchTarget> missingProfile;
 
   List<BulkCredentialSwitchTarget> get dispatchable => ready;
@@ -39,6 +41,7 @@ class BulkCredentialSwitchPlan {
     final offline = <BulkCredentialSwitchTarget>[];
     final locked = <BulkCredentialSwitchTarget>[];
     final busy = <BulkCredentialSwitchTarget>[];
+    final unmanaged = <BulkCredentialSwitchTarget>[];
     final missingProfile = <BulkCredentialSwitchTarget>[];
     for (final host in hosts) {
       Map<String, Object?>? profile;
@@ -75,6 +78,8 @@ class BulkCredentialSwitchPlan {
           locked.add(target);
         } else if (!_isProviderCompatible(host, runtime, provider)) {
           incompatible.add(target);
+        } else if (runtime['connectorManaged'] != true) {
+          unmanaged.add(target);
         } else if (runtime['activeCredentialProfileId'] == profileId) {
           alreadyAssigned.add(target);
         } else if (_hasActiveWork(host, runtimeId)) {
@@ -91,6 +96,7 @@ class BulkCredentialSwitchPlan {
       offline: List.unmodifiable(offline),
       locked: List.unmodifiable(locked),
       busy: List.unmodifiable(busy),
+      unmanaged: List.unmodifiable(unmanaged),
       missingProfile: List.unmodifiable(missingProfile),
     );
   }

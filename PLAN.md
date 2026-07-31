@@ -479,7 +479,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Bulk switch
 
 - [x] Build and display an impact plan before dispatch.
-- [ ] List compatible, incompatible, offline, locked, busy, and unmanaged runtimes separately.
+- [x] List compatible, incompatible, offline, locked, busy, and unmanaged runtimes separately.
 - [x] Let the user exclude individual targets.
 - [x] Dispatch one independently idempotent child operation per host/runtime.
 - [x] Show partial progress and partial failure honestly.

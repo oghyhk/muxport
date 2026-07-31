@@ -283,6 +283,9 @@ message RuntimeInfo {
   RuntimeState state = 4;
   string active_credential_profile_id = 5;
   repeated string project_paths = 6;
+  // Only the connector decides this from its runtime manifest/profile. Mobile
+  // clients must never infer management from a process name or PID.
+  bool connector_managed = 7;
 }
 
 message CredentialProfileInfo {

@@ -28,6 +28,7 @@ void main() {
             'runtimeId': 'runtime-a',
             'name': 'OpenCode',
             'activeCredentialProfileId': 'profile-old',
+            'connectorManaged': true,
           },
         ],
       },

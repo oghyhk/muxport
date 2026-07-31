@@ -2733,6 +2733,7 @@ class RuntimeInfo extends $pb.GeneratedMessage {
     RuntimeState? state,
     $core.String? activeCredentialProfileId,
     $core.Iterable<$core.String>? projectPaths,
+    $core.bool? connectorManaged,
   }) {
     final result = create();
     if (runtimeId != null) result.runtimeId = runtimeId;
@@ -2742,6 +2743,7 @@ class RuntimeInfo extends $pb.GeneratedMessage {
     if (activeCredentialProfileId != null)
       result.activeCredentialProfileId = activeCredentialProfileId;
     if (projectPaths != null) result.projectPaths.addAll(projectPaths);
+    if (connectorManaged != null) result.connectorManaged = connectorManaged;
     return result;
   }
 
@@ -2767,6 +2769,7 @@ class RuntimeInfo extends $pb.GeneratedMessage {
         enumValues: RuntimeState.values)
     ..aOS(5, _omitFieldNames ? '' : 'activeCredentialProfileId')
     ..pPS(6, _omitFieldNames ? '' : 'projectPaths')
+    ..aOB(7, _omitFieldNames ? '' : 'connectorManaged')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2835,6 +2838,17 @@ class RuntimeInfo extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(6)
   $pb.PbList<$core.String> get projectPaths => $_getList(5);
+
+  /// Only the connector decides this from its runtime manifest/profile. Mobile
+  /// clients must never infer management from a process name or PID.
+  @$pb.TagNumber(7)
+  $core.bool get connectorManaged => $_getBF(6);
+  @$pb.TagNumber(7)
+  set connectorManaged($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasConnectorManaged() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearConnectorManaged() => $_clearField(7);
 }
 
 class CredentialProfileInfo extends $pb.GeneratedMessage {

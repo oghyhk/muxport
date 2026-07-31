@@ -168,6 +168,7 @@ Map<String, Object?> _snapshotJson(wire.HostSnapshot snapshot) {
           'state': runtime.state.value,
           'activeCredentialProfileId': runtime.activeCredentialProfileId,
           'projectPaths': runtime.projectPaths,
+          'connectorManaged': runtime.connectorManaged,
         },
     ],
     'credentialProfiles': [

@@ -232,6 +232,7 @@ class CredentialMatrixScreen extends StatelessWidget {
                   Text('Offline or stale: ${plan.offline.length}'),
                   Text('Credential locked: ${plan.locked.length}'),
                   Text('Busy with active work: ${plan.busy.length}'),
+                  Text('Unmanaged external runtime: ${plan.unmanaged.length}'),
                   Text('Missing this account: ${plan.missingProfile.length}'),
                   const SizedBox(height: 12),
                   const Text(

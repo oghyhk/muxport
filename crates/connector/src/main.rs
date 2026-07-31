@@ -60,6 +60,7 @@ struct RuntimeConfig {
     credential_profile_id: Arc<RwLock<String>>,
     session_assignments: Arc<RwLock<HashMap<String, String>>>,
     managed_opencode: Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
+    connector_managed: bool,
 }
 
 impl RuntimeConfig {
@@ -762,6 +763,10 @@ fn apply_source_update(
                     projects,
                     sessions,
                 );
+                mirror.set_runtime_connector_managed(
+                    &config.runtime_id,
+                    config.connector_managed,
+                );
                 mirror.set_runtime_active_profile(
                     &config.runtime_id,
                     &config.credential_profile_id(),
@@ -1280,6 +1285,7 @@ async fn build_manifest_runtimes(
                             credential_profile_id: Arc::new(RwLock::new(entry.profile_id)),
                             session_assignments: Arc::new(RwLock::new(HashMap::new())),
                             managed_opencode: Some(Arc::new(tokio::sync::Mutex::new(managed))),
+                            connector_managed: true,
                         },
                         Arc::new(adapter) as Arc<dyn AgentAdapter>,
                     ))
@@ -1305,6 +1311,7 @@ async fn build_manifest_runtimes(
                             credential_profile_id: Arc::new(RwLock::new(entry.profile_id)),
                             session_assignments: Arc::new(RwLock::new(HashMap::new())),
                             managed_opencode: None,
+                            connector_managed: true,
                         },
                         Arc::new(profile.adapter()) as Arc<dyn AgentAdapter>,
                     ))
@@ -1353,6 +1360,7 @@ fn validate_runtime_paths(manifest: &RuntimeManifest) -> Result<(), io::Error> {
 
 fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>, DynError> {
     let managed_opencode_profile_id = nonempty_env("MUXPORT_OPENCODE_PROFILE_ID");
+    let connector_managed_opencode = managed_opencode_profile_id.is_some();
     let (opencode, default_opencode_runtime_id, managed_opencode): (
         Arc<dyn AgentAdapter>,
         String,
@@ -1394,9 +1402,11 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
         )),
         session_assignments: Arc::new(RwLock::new(HashMap::new())),
         managed_opencode,
+        connector_managed: connector_managed_opencode,
     };
 
     let managed_codex_profile_id = nonempty_env("MUXPORT_CODEX_PROFILE_ID");
+    let connector_managed_codex = managed_codex_profile_id.is_some();
     let (codex, default_codex_runtime_id): (Arc<dyn AgentAdapter>, String) =
         if let Some(profile_id) = managed_codex_profile_id.as_deref() {
             let profile = managed_codex_profile(profile_id)?;
@@ -1421,6 +1431,7 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
         )),
         session_assignments: Arc::new(RwLock::new(HashMap::new())),
         managed_opencode: None,
+        connector_managed: connector_managed_codex,
     };
     Ok(vec![(opencode_config, opencode), (codex_config, codex)])
 }
@@ -2803,6 +2814,7 @@ mod tests {
                 "historical-profile".into(),
             )]))),
             managed_opencode: None,
+            connector_managed: true,
         };
         let mut sessions = vec![
             SessionSummary {
@@ -2842,6 +2854,7 @@ mod tests {
             credential_profile_id: Arc::new(RwLock::new(String::new())),
             session_assignments: Arc::new(RwLock::new(HashMap::new())),
             managed_opencode: None,
+            connector_managed: true,
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(4);
         let synchronization = tokio::spawn({

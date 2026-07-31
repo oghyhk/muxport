@@ -20,7 +20,11 @@ void main() {
         snapshot: {
           'credentialProfiles': profile == null ? [] : [profile],
           'runtimes': [
-            {'runtimeId': 'runtime-$id', 'activeCredentialProfileId': assigned},
+            {
+              'runtimeId': 'runtime-$id',
+              'activeCredentialProfileId': assigned,
+              'connectorManaged': true,
+            },
           ],
         },
         cursor: null,
@@ -50,6 +54,7 @@ void main() {
                 {
                   'runtimeId': 'runtime-busy',
                   'activeCredentialProfileId': 'old',
+                  'connectorManaged': true,
                 },
               ],
               'activeSessions': [
@@ -150,14 +155,28 @@ void main() {
             {'profileId': 'old', 'provider': 'openai'},
           ],
           'runtimes': [
-            {'runtimeId': 'r1', 'activeCredentialProfileId': 'old'},
+            {
+              'runtimeId': 'r1',
+              'activeCredentialProfileId': 'old',
+              'connectorManaged': true,
+            },
           ],
         }),
         host('locked', const {
           'connectorState': 2,
           'credentialProfiles': [targetProfile],
           'runtimes': [
-            {'runtimeId': 'r2', 'activeCredentialProfileId': 'old'},
+            {
+              'runtimeId': 'r2',
+              'activeCredentialProfileId': 'old',
+              'connectorManaged': true,
+            },
+          ],
+        }),
+        host('external', const {
+          'credentialProfiles': [targetProfile],
+          'runtimes': [
+            {'runtimeId': 'r3', 'activeCredentialProfileId': 'old'},
           ],
         }),
       ],
@@ -167,5 +186,6 @@ void main() {
     expect(plan.ready, isEmpty);
     expect(plan.incompatible, hasLength(1));
     expect(plan.locked, hasLength(1));
+    expect(plan.unmanaged, hasLength(1));
   });
 }
