@@ -98,7 +98,9 @@ pub enum CodexAccount {
     },
     AmazonBedrock {
         #[serde(rename = "credentialSource")]
-        credential_source: String,
+        credential_source: Option<String>,
+        #[serde(rename = "usesCodexManagedCredentials")]
+        uses_codex_managed_credentials: Option<bool>,
     },
 }
 
@@ -1593,7 +1595,7 @@ mod tests {
             server_writer
                 .write_all(
                     format!(
-                        "{{\"id\":{},\"result\":{{\"rateLimits\":null}}}}\n",
+                        "{{\"id\":{},\"result\":{{\"rateLimits\":{{}}}}}}\n",
                         limits["id"]
                     )
                     .as_bytes(),
@@ -1617,7 +1619,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             adapter.read_rate_limits().await.unwrap(),
-            json!({"rateLimits": null})
+            json!({"rateLimits": {}})
         );
         server.await.unwrap();
         adapter.shutdown_gracefully().await.unwrap();
@@ -1671,6 +1673,50 @@ mod tests {
         assert!(matches!(
             guard.before_start(),
             Err(AdapterError::InitFailed(detail)) if detail.contains("operator restart")
+        ));
+    }
+
+    #[test]
+    fn generated_account_contract_fixture_matches_supported_shapes() {
+        let login_schema: Value = serde_json::from_str(include_str!(
+            "../fixtures/0.146.0/v2/LoginAccountParams.json"
+        ))
+        .unwrap();
+        let login_types = login_schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|shape| shape["properties"]["type"]["enum"][0].as_str())
+            .collect::<HashSet<_>>();
+        assert!(login_types.contains("apiKey"));
+        assert!(login_types.contains("chatgpt"));
+        assert!(login_types.contains("chatgptDeviceCode"));
+
+        let account_schema: Value = serde_json::from_str(include_str!(
+            "../fixtures/0.146.0/v2/GetAccountResponse.json"
+        ))
+        .unwrap();
+        assert_eq!(account_schema["title"], "GetAccountResponse");
+        assert!(account_schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "requiresOpenaiAuth"));
+
+        let current_bedrock: CodexAccountRead = serde_json::from_value(json!({
+            "account": {
+                "type": "amazonBedrock",
+                "usesCodexManagedCredentials": true
+            },
+            "requiresOpenaiAuth": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            current_bedrock.account,
+            Some(CodexAccount::AmazonBedrock {
+                uses_codex_managed_credentials: Some(true),
+                ..
+            })
         ));
     }
 }
