@@ -14,10 +14,10 @@ use muxport_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, RwLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::process::Command;
 
@@ -25,6 +25,8 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const THREAD_PAGE_LIMIT: usize = 100;
 const MAX_THREAD_PAGES: usize = 100;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_SERVER_START_WINDOW: Duration = Duration::from_secs(60);
+const MAX_APP_SERVER_STARTS_PER_WINDOW: usize = 6;
 
 /// Codex adapter backed by the stable App Server JSONL/JSON-RPC API.
 ///
@@ -38,6 +40,41 @@ pub struct CodexAdapter {
     client: Arc<Mutex<Option<Arc<JsonRpcPeer>>>>,
     state: Arc<CodexState>,
     observed_version: Arc<RwLock<Option<String>>>,
+    starts: Arc<Mutex<AppServerStartGuard>>,
+}
+
+#[derive(Default)]
+struct AppServerStartGuard {
+    attempts: VecDeque<Instant>,
+    crash_loop_tripped: bool,
+}
+
+impl AppServerStartGuard {
+    fn before_start(&mut self) -> Result<(), AdapterError> {
+        if self.crash_loop_tripped {
+            return Err(AdapterError::InitFailed(
+                "Codex App Server crash loop is latched; operator restart is required".into(),
+            ));
+        }
+        let now = Instant::now();
+        while self
+            .attempts
+            .front()
+            .is_some_and(|attempt| now.duration_since(*attempt) >= APP_SERVER_START_WINDOW)
+        {
+            self.attempts.pop_front();
+        }
+        if self.attempts.len() >= MAX_APP_SERVER_STARTS_PER_WINDOW {
+            self.crash_loop_tripped = true;
+            return Err(AdapterError::InitFailed(format!(
+                "Codex App Server crash loop: {} starts within {} seconds; automatic restart stopped",
+                MAX_APP_SERVER_STARTS_PER_WINDOW,
+                APP_SERVER_START_WINDOW.as_secs()
+            )));
+        }
+        self.attempts.push_back(now);
+        Ok(())
+    }
 }
 
 struct CodexState {
@@ -153,6 +190,7 @@ impl CodexAdapter {
                 rate_limits: RwLock::new(None),
             }),
             observed_version: Arc::new(RwLock::new(None)),
+            starts: Arc::new(Mutex::new(AppServerStartGuard::default())),
         }
     }
 
@@ -190,6 +228,7 @@ impl CodexAdapter {
             let _ = stale.shutdown().await;
         }
 
+        self.starts.lock().await.before_start()?;
         let (client, incoming) = JsonRpcPeer::connect_process(&self.process).await?;
         let state = Arc::clone(&self.state);
         let reader_client = Arc::downgrade(&client);
@@ -1617,5 +1656,21 @@ mod tests {
             adapter.state.rate_limits.read().unwrap().as_ref(),
             Some(&json!({"rateLimits": {"limitId": "codex"}}))
         );
+    }
+
+    #[test]
+    fn app_server_start_guard_latches_rapid_crash_loops() {
+        let mut guard = AppServerStartGuard::default();
+        for _ in 0..MAX_APP_SERVER_STARTS_PER_WINDOW {
+            guard.before_start().unwrap();
+        }
+        assert!(matches!(
+            guard.before_start(),
+            Err(AdapterError::InitFailed(detail)) if detail.contains("crash loop")
+        ));
+        assert!(matches!(
+            guard.before_start(),
+            Err(AdapterError::InitFailed(detail)) if detail.contains("operator restart")
+        ));
     }
 }
