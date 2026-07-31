@@ -43,6 +43,63 @@ struct RuntimeConfig {
     agent_type: AgentType,
     runtime_name: &'static str,
     credential_profile_id: String,
+    managed_opencode: Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
+}
+
+struct ManagedOpenCodeChild {
+    profile: ManagedOpenCodeProfile,
+    server_password: String,
+    child: Option<tokio::process::Child>,
+}
+
+impl ManagedOpenCodeChild {
+    fn start(
+        profile: ManagedOpenCodeProfile,
+        server_password: String,
+    ) -> Result<Self, adapter_opencode::ManagedOpenCodeError> {
+        let child = profile.spawn(&server_password)?;
+        Ok(Self {
+            profile,
+            server_password,
+            child: Some(child),
+        })
+    }
+
+    fn ensure_running(&mut self) -> Result<bool, AdapterError> {
+        let restart = match self.child.as_mut() {
+            Some(child) => child.try_wait().map_err(|error| {
+                AdapterError::InitFailed(format!(
+                    "managed OpenCode process status failed: {error}"
+                ))
+            })?.is_some(),
+            None => true,
+        };
+        if !restart {
+            return Ok(false);
+        }
+        self.child = Some(self.profile.spawn(&self.server_password).map_err(|error| {
+            AdapterError::InitFailed(format!(
+                "managed OpenCode process restart failed: {error}"
+            ))
+        })?);
+        Ok(true)
+    }
+
+    async fn stop(&mut self) -> Result<(), AdapterError> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        if child.try_wait().map_err(|error| {
+            AdapterError::Internal(format!("managed OpenCode process status failed: {error}"))
+        })?.is_none()
+        {
+            child.kill().await.map_err(|error| {
+                AdapterError::Internal(format!("managed OpenCode process stop failed: {error}"))
+            })?;
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
 }
 
 enum SourceUpdate {
@@ -136,25 +193,28 @@ async fn main() -> Result<(), DynError> {
     mirror.set_connector_state(ConnectorState::Recovering);
     mirror.save_snapshot(&journal)?;
 
-    let mut managed_opencode_child = None;
     let managed_opencode_profile_id = nonempty_env("MUXPORT_OPENCODE_PROFILE_ID");
-    let (opencode, default_opencode_runtime_id): (Arc<dyn AgentAdapter>, String) =
+    let (opencode, default_opencode_runtime_id, managed_opencode): (
+        Arc<dyn AgentAdapter>,
+        String,
+        Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
+    ) =
         if let Some(profile_id) = managed_opencode_profile_id.as_deref() {
             let profile = managed_opencode_profile(profile_id)?;
             let password = nonempty_env("MUXPORT_OPENCODE_PASSWORD")
                 .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-            let child = profile.spawn(&password)?;
-            let adapter = profile.adapter(password)?;
+            let adapter = profile.adapter(password.clone())?;
+            let managed = ManagedOpenCodeChild::start(profile.clone(), password)?;
             info!(
                 profile_id,
                 profile_root = %profile.profile_root().display(),
                 endpoint = %profile.base_url(),
                 "connector-managed isolated OpenCode runtime started"
             );
-            managed_opencode_child = Some(child);
             (
                 Arc::new(adapter),
                 format!("opencode-managed-{profile_id}"),
+                Some(Arc::new(tokio::sync::Mutex::new(managed))),
             )
         } else {
             let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
@@ -163,6 +223,7 @@ async fn main() -> Result<(), DynError> {
             (
                 Arc::new(OpenCodeAdapter::new(opencode_url, opencode_password)),
                 "opencode-local".into(),
+                None,
             )
         };
     let opencode_config = RuntimeConfig {
@@ -171,6 +232,7 @@ async fn main() -> Result<(), DynError> {
         agent_type: AgentType::Opencode,
         runtime_name: "OpenCode",
         credential_profile_id: managed_opencode_profile_id.unwrap_or_default(),
+        managed_opencode,
     };
 
     let managed_codex_profile_id = nonempty_env("MUXPORT_CODEX_PROFILE_ID");
@@ -194,6 +256,7 @@ async fn main() -> Result<(), DynError> {
         agent_type: AgentType::Codex,
         runtime_name: "Codex",
         credential_profile_id: managed_codex_profile_id.unwrap_or_default(),
+        managed_opencode: None,
     };
 
     let runtimes = vec![
@@ -435,19 +498,14 @@ async fn main() -> Result<(), DynError> {
             warn!(%error, "runtime monitor task failed");
         }
     }
-    if let Some(mut child) = managed_opencode_child {
-        match child.try_wait() {
-            Ok(None) => {
-                if let Err(error) = child.kill().await {
-                    warn!(%error, "managed OpenCode process could not be stopped");
-                }
-                let _ = child.wait().await;
-            }
-            Ok(Some(status)) => {
-                debug!(%status, "managed OpenCode process had already exited");
-            }
-            Err(error) => {
-                warn!(%error, "managed OpenCode process status could not be read");
+    for (config, _) in &runtimes {
+        if let Some(managed) = config.managed_opencode.as_ref() {
+            if let Err(error) = managed.lock().await.stop().await {
+                warn!(
+                    %error,
+                    runtime_id = %config.runtime_id,
+                    "managed OpenCode process could not be stopped"
+                );
             }
         }
     }
@@ -553,8 +611,19 @@ async fn monitor_runtime(
             return;
         }
 
-        let synchronized =
-            synchronize_runtime(adapter.as_ref(), &config, &updates).await;
+        let synchronized = async {
+            if let Some(managed) = config.managed_opencode.as_ref() {
+                if managed.lock().await.ensure_running()? {
+                    info!(
+                        runtime_id = %config.runtime_id,
+                        profile_id = %config.credential_profile_id,
+                        "managed OpenCode process restarted in the same isolated profile"
+                    );
+                }
+            }
+            synchronize_runtime(adapter.as_ref(), &config, &updates).await
+        }
+        .await;
         let mut events = match synchronized {
             Ok(events) => {
                 reconnect_delay = INITIAL_RECONNECT_DELAY;
@@ -983,6 +1052,7 @@ mod tests {
             agent_type: AgentType::Codex,
             runtime_name: "Codex",
             credential_profile_id: String::new(),
+            managed_opencode: None,
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(4);
         let mut events = synchronize_runtime(&adapter, &config, &updates_tx)
@@ -1004,5 +1074,44 @@ mod tests {
             }
         }
         assert!(events.next().await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_opencode_child_restarts_with_the_same_profile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "muxport-managed-child-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let executable = root.join("fake-opencode");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'launch\\n' >> launches.txt\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let profile =
+            ManagedOpenCodeProfile::prepare(&root, "profile-a", executable, &project, 43119)
+                .unwrap();
+        let mut managed =
+            ManagedOpenCodeChild::start(profile, "test-server-password".into()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(managed.ensure_running().unwrap());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            std::fs::read_to_string(project.join("launches.txt"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        managed.stop().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
