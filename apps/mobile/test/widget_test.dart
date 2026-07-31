@@ -73,6 +73,41 @@ void main() {
     );
   });
 
+  testWidgets('renders multiple independently paired hosts', (tester) async {
+    HostSyncState host(String id, String name, int sequence) => HostSyncState(
+      hostId: id,
+      pinnedHostKey: 'pin-$id',
+      displayName: name,
+      protocolVersion: mobileProtocolVersion,
+      phase: HostSyncPhase.cachedStale,
+      snapshot: const {},
+      cursor: SyncCursor(hostEpoch: 'epoch-$id', sequence: sequence),
+      sourceVersions: const {},
+      recentEventIds: const [],
+      pendingOperations: const {},
+    );
+    final bootstrap = AppBootstrapState(
+      cache: MobileCacheSnapshot(
+        hosts: [
+          host('host-laptop', 'Development laptop', 4),
+          host('host-vps', 'Remote VPS', 12),
+        ],
+      ),
+      cacheGeneration: 2,
+      cacheStatus: CacheBootstrapStatus.ready,
+      identity: null,
+      identityStatus: IdentityBootstrapStatus.unavailable,
+    );
+
+    await tester.pumpWidget(MuxportApp(bootstrap: Future.value(bootstrap)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Development laptop'), findsOneWidget);
+    expect(find.text('Remote VPS'), findsOneWidget);
+    expect(find.text('Cached cursor: epoch-host-laptop / 4'), findsOneWidget);
+    expect(find.text('Cached cursor: epoch-host-vps / 12'), findsOneWidget);
+  });
+
   testWidgets('diagnostics never claims unwired controls are healthy', (
     tester,
   ) async {

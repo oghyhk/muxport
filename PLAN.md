@@ -780,7 +780,7 @@ Exit: one app operates OpenCode and Codex through one normalized UI without losi
 
 ### Phase 4 — Fleet, bulk switching, and rotation
 
-- [ ] Pair multiple hosts.
+- [x] Pair multiple hosts.
 - [ ] Implement assignment precedence and operation impact planning.
 - [ ] Implement bulk switching with partial results.
 - [ ] Implement rotation pools, cooldown, round robin, schedule, and guarded failover.
