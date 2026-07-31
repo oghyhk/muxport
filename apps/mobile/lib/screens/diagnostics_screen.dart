@@ -10,6 +10,8 @@ class DiagnosticsScreen extends StatefulWidget {
     required this.bootstrap,
     required this.hosts,
     this.onLoadCommandAudit,
+    this.appLockEnabled = false,
+    this.onSetAppLock,
     super.key,
   });
 
@@ -17,6 +19,8 @@ class DiagnosticsScreen extends StatefulWidget {
   final Iterable<HostSyncState> hosts;
   final Future<List<CommandAuditEntry>> Function(HostSyncState host)?
   onLoadCommandAudit;
+  final bool appLockEnabled;
+  final Future<bool> Function(bool enabled)? onSetAppLock;
 
   @override
   State<DiagnosticsScreen> createState() => _DiagnosticsScreenState();
@@ -26,6 +30,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   final Map<String, List<CommandAuditEntry>> _auditByHost = {};
   var _auditLoading = false;
   var _auditLoadFailed = false;
+  var _appLockUpdating = false;
 
   Future<void> _loadCommandAudit() async {
     final load = widget.onLoadCommandAudit;
@@ -53,6 +58,22 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       _auditLoading = false;
       _auditLoadFailed = failed;
     });
+  }
+
+  Future<void> _setAppLock(bool enabled) async {
+    final update = widget.onSetAppLock;
+    if (update == null || _appLockUpdating) return;
+    setState(() => _appLockUpdating = true);
+    final saved = await update(enabled);
+    if (!mounted) return;
+    setState(() => _appLockUpdating = false);
+    if (!saved) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not update the protected app-lock preference.'),
+        ),
+      );
+    }
   }
 
   @override
@@ -109,6 +130,17 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                     title: 'Connector security log',
                     value: _auditStatus(),
                     healthy: !_auditLoadFailed,
+                  ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Optional app lock'),
+                    subtitle: const Text(
+                      'Require device authentication after the app backgrounds. Uses biometrics or the OS device credential.',
+                    ),
+                    value: widget.appLockEnabled,
+                    onChanged: widget.onSetAppLock == null || _appLockUpdating
+                        ? null
+                        : _setAppLock,
                   ),
                 ],
               ),

@@ -600,7 +600,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Prevent double approval from repeated taps or duplicate pushes.
 - [ ] Test Android process death and iOS background eviction, not only hot reload/restart.
 - [x] Blur sensitive content in app switcher previews.
-- [ ] Provide an optional app lock with biometric/PIN fallback.
+- [x] Provide an optional app lock with biometric/PIN fallback.
 
 ### Accessibility and phone ergonomics
 

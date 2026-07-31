@@ -6,6 +6,7 @@ import 'package:flutter_protocol/flutter_protocol.dart';
 import 'package:flutter_protocol/wire_protocol.dart' as wire;
 
 import 'pairing/signed_pairing_offer.dart';
+import 'security/app_lock.dart';
 import 'security/device_identity.dart';
 import 'security/sensitive_inputs.dart';
 import 'security/step_up_authenticator.dart';
@@ -138,6 +139,45 @@ class _StartupFailureScreen extends StatelessWidget {
   }
 }
 
+class _AppLockScreen extends StatelessWidget {
+  const _AppLockScreen({required this.onUnlock});
+
+  final Future<void> Function() onUnlock;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_outline, size: 56),
+              const SizedBox(height: 16),
+              const Text(
+                'Muxport is locked',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Use your device authentication to view remote hosts and sessions.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                icon: const Icon(Icons.lock_open),
+                label: const Text('Unlock Muxport'),
+                onPressed: () => unawaited(onUnlock()),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class MainNavigationScreen extends StatefulWidget {
   const MainNavigationScreen({required this.bootstrap, super.key});
 
@@ -153,12 +193,15 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
   late Map<String, HostSyncState> _hosts;
   bool _pairingInProgress = false;
   bool _syncInProgress = false;
+  bool _appLockEnabled = false;
+  bool _appLocked = false;
   Timer? _syncTimer;
   bool _isForeground = true;
   final SensitiveInputRegistry _sensitiveInputs = SensitiveInputRegistry();
   final HostSyncOrchestrator _syncOrchestrator = const HostSyncOrchestrator();
   final StepUpAuthenticator _stepUpAuthenticator =
       PlatformStepUpAuthenticator();
+  final AppLockPreference _appLockPreference = AppLockPreference();
 
   @override
   void initState() {
@@ -166,6 +209,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     _hosts = Map.of(widget.bootstrap.cache.hosts);
     WidgetsBinding.instance.addObserver(this);
     _markReconnectableHostsReconnecting();
+    unawaited(_loadAppLockPreference());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_syncAllHosts());
     });
@@ -185,6 +229,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     switch (state) {
       case AppLifecycleState.resumed:
         _isForeground = true;
+        if (_appLockEnabled && mounted) {
+          setState(() => _appLocked = true);
+        }
         _markReconnectableHostsReconnecting(notify: true);
         _startSyncTimer();
         unawaited(_syncAllHosts());
@@ -197,6 +244,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         _syncTimer?.cancel();
         _syncTimer = null;
         _sensitiveInputs.clear();
+        if (_appLockEnabled && mounted) {
+          setState(() => _appLocked = true);
+        }
         unawaited(_clearSensitiveArtifacts());
         unawaited(_persistBeforeSuspension());
         break;
@@ -260,8 +310,44 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     }
   }
 
+  Future<void> _loadAppLockPreference() async {
+    final enabled = await _appLockPreference.load();
+    if (mounted) {
+      setState(() => _appLockEnabled = enabled);
+    }
+  }
+
+  Future<bool> _setAppLock(bool enabled) async {
+    if (enabled) {
+      final authorized = await _stepUpAuthenticator.authorize(
+        reason: 'Authorize enabling Muxport app lock',
+      );
+      if (!authorized) return false;
+    }
+    final saved = await _appLockPreference.setEnabled(enabled);
+    if (saved && mounted) {
+      setState(() {
+        _appLockEnabled = enabled;
+        if (!enabled) _appLocked = false;
+      });
+    }
+    return saved;
+  }
+
+  Future<void> _unlockApp() async {
+    final authorized = await _stepUpAuthenticator.authorize(
+      reason: 'Unlock Muxport',
+    );
+    if (authorized && mounted) {
+      setState(() => _appLocked = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_appLocked) {
+      return _AppLockScreen(onUnlock: _unlockApp);
+    }
     final screens = [
       HostFleetScreen(
         hosts: _hosts.values.toList(growable: false),
@@ -310,6 +396,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onLoadCommandAudit: widget.bootstrap.canAuthenticateTransport
             ? _listCommandAudit
             : null,
+        appLockEnabled: _appLockEnabled,
+        onSetAppLock: _setAppLock,
       ),
     ];
     return Scaffold(
