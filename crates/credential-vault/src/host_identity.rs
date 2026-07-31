@@ -21,6 +21,8 @@ pub enum HostIdentityError {
     CorruptIdentity,
     #[error("new host identity could not be verified after persistence")]
     PersistenceVerificationFailed,
+    #[error("no staged host identity rotation exists")]
+    NoStagedRotation,
 }
 
 /// Narrow interface for the OS-protected secret holding the long-term host
@@ -28,6 +30,7 @@ pub enum HostIdentityError {
 pub trait HostIdentitySecretStore {
     fn get_secret(&self, name: &str) -> Result<Option<Vec<u8>>, HostIdentityError>;
     fn set_secret(&self, name: &str, value: &[u8]) -> Result<(), HostIdentityError>;
+    fn delete_secret(&self, name: &str) -> Result<(), HostIdentityError>;
 }
 
 pub struct LoadedHostIdentity {
@@ -121,6 +124,103 @@ impl<S: HostIdentitySecretStore> HostIdentityManager<S> {
             created: false,
         }))
     }
+
+    /// Creates a replacement identity in a separate protected-store entry.
+    /// The active identity is not changed until `promote_staged_rotation`; this
+    /// makes a crash before promotion harmless.  The old protected identity is
+    /// retained only as a short-lived rollback record until the pairing store
+    /// has atomically invalidated the old device registry.
+    pub fn stage_rotation(
+        &self,
+        host_id: &str,
+    ) -> Result<LoadedHostIdentity, HostIdentityError> {
+        validate_host_id(host_id)?;
+        if let Some(staged) = self.load_staged_rotation(host_id)? {
+            return Ok(staged);
+        }
+
+        let entry_name = identity_entry_name(host_id);
+        let Some(mut current) = self.store.get_secret(&entry_name)? else {
+            return Err(HostIdentityError::NoStagedRotation);
+        };
+        let current_key = decode_identity(&current);
+        current.zeroize();
+        let current_key = current_key?;
+
+        let mut recovery_record = encode_identity(&current_key);
+        self.store
+            .set_secret(&identity_rotation_recovery_entry_name(host_id), &recovery_record)?;
+        recovery_record.zeroize();
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut record = encode_identity(&signing_key);
+        self.store
+            .set_secret(&identity_rotation_staged_entry_name(host_id), &record)?;
+        record.zeroize();
+
+        let staged = self
+            .load_staged_rotation(host_id)?
+            .ok_or(HostIdentityError::PersistenceVerificationFailed)?;
+        if staged.signing_key.verifying_key() != signing_key.verifying_key() {
+            return Err(HostIdentityError::PersistenceVerificationFailed);
+        }
+        Ok(staged)
+    }
+
+    /// Returns a rotation key only when it was staged in the OS-protected
+    /// store.  It never creates a replacement identity.
+    pub fn load_staged_rotation(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<LoadedHostIdentity>, HostIdentityError> {
+        validate_host_id(host_id)?;
+        let Some(mut record) = self
+            .store
+            .get_secret(&identity_rotation_staged_entry_name(host_id))?
+        else {
+            return Ok(None);
+        };
+        let signing_key = decode_identity(&record);
+        record.zeroize();
+        Ok(Some(LoadedHostIdentity {
+            signing_key: signing_key?,
+            created: false,
+        }))
+    }
+
+    /// Promotes an already staged rotation after the pairing database has
+    /// recorded an explicit, recoverable pending transition.
+    pub fn promote_staged_rotation(
+        &self,
+        host_id: &str,
+    ) -> Result<LoadedHostIdentity, HostIdentityError> {
+        let staged = self
+            .load_staged_rotation(host_id)?
+            .ok_or(HostIdentityError::NoStagedRotation)?;
+        let mut record = encode_identity(staged.signing_key());
+        self.store
+            .set_secret(&identity_entry_name(host_id), &record)?;
+        record.zeroize();
+
+        let persisted = self
+            .load_existing(host_id)?
+            .ok_or(HostIdentityError::PersistenceVerificationFailed)?;
+        if persisted.signing_key.verifying_key() != staged.signing_key.verifying_key() {
+            return Err(HostIdentityError::PersistenceVerificationFailed);
+        }
+        Ok(persisted)
+    }
+
+    /// Clears the short-lived staged and recovery entries after pairing state
+    /// has been atomically transitioned to the new public key.
+    pub fn clear_staged_rotation(&self, host_id: &str) -> Result<(), HostIdentityError> {
+        validate_host_id(host_id)?;
+        self.store
+            .delete_secret(&identity_rotation_staged_entry_name(host_id))?;
+        self.store
+            .delete_secret(&identity_rotation_recovery_entry_name(host_id))?;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -182,6 +282,31 @@ impl HostIdentitySecretStore for OsHostIdentityStore {
             Err(HostIdentityError::StoreUnavailable)
         }
     }
+
+    fn delete_secret(&self, name: &str) -> Result<(), HostIdentityError> {
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux"
+        ))]
+        {
+            let entry = keyring::Entry::new(OS_KEYRING_SERVICE, name)
+                .map_err(|_| HostIdentityError::StoreUnavailable)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(_) => Err(HostIdentityError::StoreOperationFailed),
+            }
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux"
+        )))]
+        {
+            let _ = name;
+            Err(HostIdentityError::StoreUnavailable)
+        }
+    }
 }
 
 fn validate_host_id(host_id: &str) -> Result<(), HostIdentityError> {
@@ -193,8 +318,20 @@ fn validate_host_id(host_id: &str) -> Result<(), HostIdentityError> {
 }
 
 fn identity_entry_name(host_id: &str) -> String {
+    identity_entry_name_with_purpose(host_id, b"muxport-host-identity-entry-v1")
+}
+
+fn identity_rotation_staged_entry_name(host_id: &str) -> String {
+    identity_entry_name_with_purpose(host_id, b"muxport-host-identity-rotation-staged-v1")
+}
+
+fn identity_rotation_recovery_entry_name(host_id: &str) -> String {
+    identity_entry_name_with_purpose(host_id, b"muxport-host-identity-rotation-recovery-v1")
+}
+
+fn identity_entry_name_with_purpose(host_id: &str, purpose: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"muxport-host-identity-entry-v1");
+    hasher.update(purpose);
     hasher.update((host_id.len() as u64).to_be_bytes());
     hasher.update(host_id.as_bytes());
     format!("host-{}", encode_hex(&hasher.finalize()))
@@ -258,6 +395,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(name.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete_secret(&self, name: &str) -> Result<(), HostIdentityError> {
+            if self.unavailable {
+                return Err(HostIdentityError::StoreUnavailable);
+            }
+            self.values.lock().unwrap().remove(name);
             Ok(())
         }
     }
@@ -336,5 +481,28 @@ mod tests {
             HostIdentityManager::new(store).load_or_create(" "),
             Err(HostIdentityError::InvalidHostId)
         ));
+    }
+
+    #[test]
+    fn staged_rotation_preserves_the_active_key_until_promotion_then_cleans_up() {
+        let store = MemorySecretStore::default();
+        let manager = HostIdentityManager::new(store.clone());
+        let original = manager.load_or_create("host-1").unwrap();
+        let staged = manager.stage_rotation("host-1").unwrap();
+        assert_ne!(original.public_key_hex(), staged.public_key_hex());
+        assert_eq!(
+            manager.load_existing("host-1").unwrap().unwrap().public_key_hex(),
+            original.public_key_hex()
+        );
+        assert_eq!(
+            manager.load_staged_rotation("host-1").unwrap().unwrap().public_key_hex(),
+            staged.public_key_hex()
+        );
+
+        let promoted = manager.promote_staged_rotation("host-1").unwrap();
+        assert_eq!(promoted.public_key_hex(), staged.public_key_hex());
+        manager.clear_staged_rotation("host-1").unwrap();
+        assert!(manager.load_staged_rotation("host-1").unwrap().is_none());
+        assert_eq!(store.values.lock().unwrap().len(), 1);
     }
 }

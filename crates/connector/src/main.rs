@@ -9,8 +9,8 @@ use connector::{
     PairingCoordinator, PairingStore, PairingStoreError, RuntimeMirror,
 };
 use credential_vault::{
-    HostIdentityManager, OsHostIdentityStore, OsVaultKeyStore, PersistentVault,
-    VaultKeyManager,
+    HostIdentityManager, LoadedHostIdentity, OsHostIdentityStore, OsVaultKeyStore,
+    PersistentVault, VaultKeyManager,
 };
 use event_journal::EventJournal;
 use futures::StreamExt;
@@ -324,10 +324,18 @@ async fn main() -> Result<(), DynError> {
         .unwrap_or_else(|_| "muxport-pairing.db".into());
     let mut pairing_store = PairingStore::open_sqlite(&pairing_db)?;
     info!(path = %pairing_db, "persistent pairing store initialized");
-    let host_identity =
-        HostIdentityManager::new(OsHostIdentityStore::new()).load_or_create(&host_id);
+    let host_identity_manager = HostIdentityManager::new(OsHostIdentityStore::new());
+    let host_identity = host_identity_manager.load_or_create(&host_id);
     let direct_transport_security = match host_identity {
         Ok(identity) => {
+            if complete_promoted_host_key_rotation(
+                &host_id,
+                &host_identity_manager,
+                &identity,
+                &mut pairing_store,
+            )? {
+                info!("completed an interrupted host-key rotation; every phone must pair again");
+            }
             let binding = pairing_store.bind_host_identity(
                 &host_id,
                 &identity.signing_key().verifying_key(),
@@ -1377,6 +1385,7 @@ async fn run_local_subcommand() -> Result<bool, DynError> {
         "pairing-confirm" => run_pairing_confirm(arguments)?,
         "pairing-list" => run_pairing_list(arguments)?,
         "pairing-revoke" => run_pairing_revoke(arguments)?,
+        "pairing-rotate-host-key" => run_pairing_rotate_host_key(arguments)?,
         "opencode-profile-auth" => {
             let profile_id = arguments
                 .next()
@@ -1940,6 +1949,75 @@ fn run_pairing_revoke(
     Ok(())
 }
 
+/// Rotates the protected host identity only while the connector is stopped.
+/// The rotation is staged in the OS credential store, recorded in SQLite, and
+/// then finalized transactionally. Existing phone identities are intentionally
+/// invalidated; the provider vault is never opened or modified.
+fn run_pairing_rotate_host_key(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<(), DynError> {
+    let host_id = arguments
+        .next()
+        .ok_or("pairing-rotate-host-key requires HOST_ID VERIFIED_RECOVERY_BACKUP --confirm-host-id HOST_ID")?;
+    let recovery_backup = arguments
+        .next()
+        .ok_or("pairing-rotate-host-key requires HOST_ID VERIFIED_RECOVERY_BACKUP --confirm-host-id HOST_ID")?;
+    let confirmation_flag = arguments
+        .next()
+        .ok_or("pairing-rotate-host-key requires --confirm-host-id HOST_ID")?;
+    let confirmed_host_id = arguments
+        .next()
+        .ok_or("pairing-rotate-host-key requires --confirm-host-id HOST_ID")?;
+    if confirmation_flag != "--confirm-host-id"
+        || confirmed_host_id != host_id
+        || arguments.next().is_some()
+    {
+        return Err(
+            "pairing-rotate-host-key accepts exactly HOST_ID VERIFIED_RECOVERY_BACKUP --confirm-host-id HOST_ID"
+                .into(),
+        );
+    }
+    let recovery_backup = PathBuf::from(recovery_backup);
+    verify_recovery_backup_for_host_key_rotation(&recovery_backup)?;
+
+    let state_db = std::env::var("MUXPORT_STATE_DB")
+        .unwrap_or_else(|_| "muxport-state.db".into());
+    let _maintenance_lock = InstanceLock::acquire(InstanceLock::default_path_for(&state_db))?;
+    let manager = HostIdentityManager::new(OsHostIdentityStore::new());
+    let current = manager
+        .load_existing(&host_id)?
+        .ok_or("no existing protected identity exists for that host id")?;
+    let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
+        .unwrap_or_else(|_| "muxport-pairing.db".into());
+    let mut store = PairingStore::open_sqlite(&pairing_db)?;
+    if complete_promoted_host_key_rotation(&host_id, &manager, &current, &mut store)? {
+        println!(
+            "host key rotation was completed after an interruption; all phones must be paired again"
+        );
+        return Ok(());
+    }
+    store.bind_host_identity(&host_id, &current.signing_key().verifying_key())?;
+
+    let staged = manager.stage_rotation(&host_id)?;
+    let prepared = store.prepare_host_key_rotation(
+        &host_id,
+        current.signing_key(),
+        &staged.signing_key().verifying_key(),
+    )?;
+    let promoted = manager.promote_staged_rotation(&host_id)?;
+    store.finalize_host_key_rotation(
+        &host_id,
+        &current.public_key_hex(),
+        &promoted.signing_key().verifying_key(),
+    )?;
+    manager.clear_staged_rotation(&host_id)?;
+    println!(
+        "host key rotated{}; all paired phones and pending offers were invalidated, while provider credentials were left unchanged",
+        if prepared { "" } else { " after resuming the staged recovery" }
+    );
+    Ok(())
+}
+
 fn run_pairing_list(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<(), DynError> {
@@ -1969,6 +2047,59 @@ fn run_pairing_list(
             if device.is_revoked { "revoked" } else { "active" },
             device.device_name,
             device.public_key_hex
+        );
+    }
+    Ok(())
+}
+
+/// Finalizes only the crash window after the protected identity changed but
+/// before the pairing database could atomically invalidate old devices. If the
+/// identity is still the old key, normal operation continues and the explicit
+/// maintenance command can safely resume it later.
+fn complete_promoted_host_key_rotation(
+    host_id: &str,
+    manager: &HostIdentityManager<OsHostIdentityStore>,
+    current: &LoadedHostIdentity,
+    store: &mut PairingStore,
+) -> Result<bool, DynError> {
+    let Some(pending) = store.pending_host_key_rotation(host_id)? else {
+        if manager.load_staged_rotation(host_id)?.is_some() {
+            manager.clear_staged_rotation(host_id)?;
+        }
+        return Ok(false);
+    };
+    let current_public_key_hex = current.public_key_hex();
+    if pending.new_public_key_hex == current_public_key_hex {
+        store.finalize_host_key_rotation(
+            host_id,
+            &pending.old_public_key_hex,
+            &current.signing_key().verifying_key(),
+        )?;
+        manager.clear_staged_rotation(host_id)?;
+        return Ok(true);
+    }
+    if pending.old_public_key_hex == current_public_key_hex {
+        return Ok(false);
+    }
+    Err("pending host-key rotation does not match the protected host identity".into())
+}
+
+fn verify_recovery_backup_for_host_key_rotation(path: &Path) -> Result<(), DynError> {
+    verify_state_backup(path)?;
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(path.join("manifest.json"))?)?;
+    let has_pairing_database = manifest
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|files| {
+            files.iter().any(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str)
+                    == Some("pairing.db")
+            })
+        });
+    if !has_pairing_database {
+        return Err(
+            "host-key rotation requires a verified recovery backup containing pairing.db"
+                .into(),
         );
     }
     Ok(())

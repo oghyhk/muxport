@@ -304,7 +304,7 @@ secret_handle          # opaque reference into vault
 - [ ] Derive separate keys for commands, events, secret provisioning, and attachment transfer.
 - [x] Rotate session keys and bind every frame to host ID, device ID, protocol version, sequence, and direction.
 - [x] Reject replayed, expired, out-of-order-without-window, or wrong-host frames.
-- [ ] Support device revocation and host key rotation without rotating provider credentials.
+- [x] Support device revocation and host key rotation without rotating provider credentials.
 - [x] Require re-pairing after host identity loss; never silently trust a replacement key.
 - [ ] Commission an external cryptographic review before public beta.
 

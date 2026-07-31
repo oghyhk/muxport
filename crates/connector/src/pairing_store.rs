@@ -45,6 +45,8 @@ pub enum PairingStoreError {
     ConfirmationIncomplete,
     #[error("Persisted host identity does not match the protected signing key")]
     HostIdentityMismatch,
+    #[error("a different host-key rotation is already pending")]
+    HostKeyRotationPending,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,12 +55,21 @@ pub enum ConfirmingParty {
     Host,
 }
 
+/// Non-secret durable state used to resume a host-key rotation after a crash.
+/// It deliberately contains only the public keys that are already used for
+/// pairing identity verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingHostKeyRotation {
+    pub old_public_key_hex: String,
+    pub new_public_key_hex: String,
+}
+
 pub struct PairingStore {
     conn: Connection,
 }
 
 impl PairingStore {
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
 
     pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self, PairingStoreError> {
         let path = path.as_ref();
@@ -132,6 +143,13 @@ impl PairingStore {
                 host_id TEXT NOT NULL,
                 public_key_hex TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pending_host_key_rotation (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                host_id TEXT NOT NULL,
+                old_public_key_hex TEXT NOT NULL,
+                new_public_key_hex TEXT NOT NULL,
+                prepared_at_ms INTEGER NOT NULL
             );",
         )?;
         let now = chrono::Utc::now().timestamp_millis();
@@ -219,6 +237,151 @@ impl PairingStore {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Persists the public half of a host-key rotation before the protected
+    /// identity is promoted. The old signed registry stays usable until
+    /// `finalize_host_key_rotation` succeeds, so an interruption cannot leave
+    /// an unverified replacement key trusted.
+    pub fn prepare_host_key_rotation(
+        &mut self,
+        host_id: &str,
+        current_identity: &SigningKey,
+        next_identity: &VerifyingKey,
+    ) -> Result<bool, PairingStoreError> {
+        if host_id.trim().is_empty()
+            || host_id.len() > 256
+            || current_identity.verifying_key() == *next_identity
+        {
+            return Err(PairingStoreError::HostIdentityMismatch);
+        }
+        let old_public_key_hex = encode_hex(current_identity.verifying_key().as_bytes());
+        let new_public_key_hex = encode_hex(next_identity.as_bytes());
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pinned: Option<(String, String)> = tx
+            .query_row(
+                "SELECT host_id, public_key_hex FROM host_identity_pin WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if pinned.as_ref() != Some(&(host_id.to_owned(), old_public_key_hex.clone())) {
+            return Err(PairingStoreError::HostIdentityMismatch);
+        }
+        // Verify an existing registry before retaining it during the staged
+        // phase. A corrupt or substituted record must not be carried across a
+        // recovery action.
+        let _ = load_registry_tx(&tx, host_id, current_identity)?;
+
+        let existing: Option<PendingHostKeyRotation> = tx
+            .query_row(
+                "SELECT old_public_key_hex, new_public_key_hex
+                 FROM pending_host_key_rotation WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(PendingHostKeyRotation {
+                        old_public_key_hex: row.get(0)?,
+                        new_public_key_hex: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.old_public_key_hex == old_public_key_hex
+                && existing.new_public_key_hex == new_public_key_hex
+            {
+                tx.commit()?;
+                return Ok(false);
+            }
+            return Err(PairingStoreError::HostKeyRotationPending);
+        }
+        tx.execute(
+            "INSERT INTO pending_host_key_rotation
+                (singleton, host_id, old_public_key_hex, new_public_key_hex, prepared_at_ms)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                host_id,
+                old_public_key_hex,
+                new_public_key_hex,
+                chrono::Utc::now().timestamp_millis(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn pending_host_key_rotation(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<PendingHostKeyRotation>, PairingStoreError> {
+        if host_id.trim().is_empty() || host_id.len() > 256 {
+            return Err(PairingStoreError::HostIdentityMismatch);
+        }
+        self.conn
+            .query_row(
+                "SELECT old_public_key_hex, new_public_key_hex
+                 FROM pending_host_key_rotation WHERE singleton = 1 AND host_id = ?1",
+                params![host_id],
+                |row| {
+                    Ok(PendingHostKeyRotation {
+                        old_public_key_hex: row.get(0)?,
+                        new_public_key_hex: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Completes a previously prepared host-key rotation in one SQLite
+    /// transaction. All paired devices and outstanding pairing offers are
+    /// invalidated, but no provider credential or vault record is touched.
+    pub fn finalize_host_key_rotation(
+        &mut self,
+        host_id: &str,
+        old_public_key_hex: &str,
+        new_identity: &VerifyingKey,
+    ) -> Result<(), PairingStoreError> {
+        let new_public_key_hex = encode_hex(new_identity.as_bytes());
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT host_id, old_public_key_hex, new_public_key_hex
+                 FROM pending_host_key_rotation WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if pending.as_ref()
+            != Some(&(host_id.to_owned(), old_public_key_hex.to_owned(), new_public_key_hex.clone()))
+        {
+            return Err(PairingStoreError::HostIdentityMismatch);
+        }
+        let pin: Option<(String, String)> = tx
+            .query_row(
+                "SELECT host_id, public_key_hex FROM host_identity_pin WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if pin.as_ref() != Some(&(host_id.to_owned(), old_public_key_hex.to_owned())) {
+            return Err(PairingStoreError::HostIdentityMismatch);
+        }
+
+        tx.execute("DELETE FROM pairing_sessions", [])?;
+        tx.execute("DELETE FROM signed_device_registry", [])?;
+        tx.execute(
+            "UPDATE host_identity_pin
+             SET public_key_hex = ?1, created_at_ms = ?2 WHERE singleton = 1",
+            params![new_public_key_hex, chrono::Utc::now().timestamp_millis()],
+        )?;
+        tx.execute("DELETE FROM pending_host_key_rotation", [])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn create_offer(
@@ -970,7 +1133,7 @@ mod tests {
             PairingStore::open_sqlite(&db_path),
             Err(PairingStoreError::UnsupportedSchemaVersion {
                 found: 999,
-                supported: 1
+                supported: 2
             })
         ));
         let connection = Connection::open_with_flags(
@@ -1205,6 +1368,70 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn host_key_rotation_invalidates_pairings_without_touching_other_state() {
+        let mut store = PairingStore::open_in_memory().unwrap();
+        let old_identity = SigningKey::generate(&mut OsRng);
+        let next_identity = SigningKey::generate(&mut OsRng);
+        let device_identity = SigningKey::generate(&mut OsRng);
+        store
+            .bind_host_identity("host-1", &old_identity.verifying_key())
+            .unwrap();
+        let (pairing_id, _) = claim_pairing(&mut store, "host-1", &device_identity);
+        store
+            .confirm_sas(&pairing_id, "123456", ConfirmingParty::Phone)
+            .unwrap();
+        store
+            .confirm_sas(&pairing_id, "123456", ConfirmingParty::Host)
+            .unwrap();
+        let device = store.finalize(&pairing_id, "host-1", &old_identity).unwrap();
+
+        assert!(store
+            .prepare_host_key_rotation(
+                "host-1",
+                &old_identity,
+                &next_identity.verifying_key(),
+            )
+            .unwrap());
+        assert_eq!(
+            store.pending_host_key_rotation("host-1").unwrap(),
+            Some(PendingHostKeyRotation {
+                old_public_key_hex: encode_hex(old_identity.verifying_key().as_bytes()),
+                new_public_key_hex: encode_hex(next_identity.verifying_key().as_bytes()),
+            })
+        );
+        assert!(store
+            .load_registry("host-1", &old_identity)
+            .unwrap()
+            .is_authorized(&device.device_id, &device.public_key_hex));
+
+        store
+            .finalize_host_key_rotation(
+                "host-1",
+                &encode_hex(old_identity.verifying_key().as_bytes()),
+                &next_identity.verifying_key(),
+            )
+            .unwrap();
+        assert!(store.pending_host_key_rotation("host-1").unwrap().is_none());
+        assert!(!store
+            .bind_host_identity("host-1", &next_identity.verifying_key())
+            .unwrap());
+        assert!(store
+            .load_registry("host-1", &next_identity)
+            .unwrap()
+            .list_devices()
+            .is_empty());
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM pairing_sessions", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

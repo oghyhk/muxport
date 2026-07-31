@@ -114,6 +114,11 @@ cargo run -p connector --bin muxport-connector -- pairing-revoke HOST_ID DEVICE_
 See the [lost-phone revocation runbook](docs/runbooks/lost-phone-revocation.md)
 before performing this recovery action.
 
+For a suspected host-identity compromise, stop the connector, create and
+verify a recovery backup, then use `pairing-rotate-host-key`. This deliberately
+invalidates every paired phone while preserving provider credentials; follow
+the [host-key rotation runbook](docs/runbooks/host-key-rotation.md) exactly.
+
 ### Development managed OpenCode profile
 
 Managed profiles keep OpenCode home, data, configuration, cache, and state in
