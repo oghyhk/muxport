@@ -144,14 +144,18 @@ export MUXPORT_PROFILES_DIR="$PWD/muxport-profiles"
 export MUXPORT_CODEX_PROFILE_ID="personal"
 export MUXPORT_CODEX_PATH="/absolute/path/to/codex"
 export MUXPORT_CODEX_PROJECT="/absolute/path/to/project"
+cargo run -p connector --bin muxport-connector -- \
+  codex-profile-login personal
 cargo run -p connector --bin muxport-connector
 ```
 
 This launches App Server over stdio with isolated `CODEX_HOME` and
 `CODEX_SQLITE_HOME` directories. Codex owns login persistence and token
 refresh. Muxport uses supported `account/*` methods and never reads, edits, or
-copies Codex credential/database files. Mobile account enrollment and
-multi-profile daemon registration remain incomplete.
+copies Codex credential/database files. The local enrollment command uses
+Codex's device-code flow, displays only the verification URL/code, waits for
+the supported completion notification, and confirms `account/read`. Mobile
+account enrollment and multi-profile daemon registration remain incomplete.
 
 ## Security
 

@@ -1,7 +1,7 @@
 use adapter_api::{
     AdapterError, AgentAdapter, EventStream, ProjectInfo, SessionSummary,
 };
-use adapter_codex::{CodexAdapter, ManagedCodexProfile};
+use adapter_codex::{CodexAdapter, CodexLoginStart, ManagedCodexProfile};
 use adapter_opencode::{ManagedOpenCodeProfile, OpenCodeAdapter};
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
@@ -877,6 +877,44 @@ async fn run_local_subcommand() -> Result<bool, DynError> {
             println!(
                 "OpenCode provider {provider_id} enrolled in isolated profile {profile_id}"
             );
+        }
+        "codex-profile-login" => {
+            let profile_id = arguments
+                .next()
+                .ok_or("codex-profile-login requires PROFILE_ID")?;
+            if arguments.next().is_some() {
+                return Err("codex-profile-login accepts exactly PROFILE_ID".into());
+            }
+            let profile = managed_codex_profile(&profile_id)?;
+            let adapter = profile.adapter();
+            let login = adapter.start_device_code_login().await?;
+            let (login_id, verification_url, user_code) = match login {
+                CodexLoginStart::ChatgptDeviceCode {
+                    login_id,
+                    verification_url,
+                    user_code,
+                } => (login_id, verification_url, user_code),
+                other => {
+                    return Err(format!(
+                        "Codex returned an unexpected device login response: {other:?}"
+                    )
+                    .into())
+                }
+            };
+            println!("Open {verification_url}");
+            println!("Enter code: {user_code}");
+            println!("Waiting for Codex to confirm the isolated profile login...");
+            adapter
+                .wait_for_login_completion(&login_id, Duration::from_secs(15 * 60))
+                .await?;
+            let account = adapter.read_account(true).await?;
+            if account.account.is_none() {
+                return Err(
+                    "Codex reported login completion but account/read remained signed out".into(),
+                );
+            }
+            adapter.shutdown_gracefully().await?;
+            println!("Codex account enrolled in isolated profile {profile_id}");
         }
         _ => return Err(format!("unknown connector command {command:?}").into()),
     }

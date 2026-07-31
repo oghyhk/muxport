@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tokio::process::Command;
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -85,6 +85,8 @@ struct CodexState {
     pending_approvals: RwLock<HashMap<String, PendingApproval>>,
     account: RwLock<Option<CodexAccount>>,
     rate_limits: RwLock<Option<Value>>,
+    login_completions: RwLock<HashMap<String, Result<(), String>>>,
+    login_completion_changed: Notify,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -190,6 +192,8 @@ impl CodexAdapter {
                 pending_approvals: RwLock::new(HashMap::new()),
                 account: RwLock::new(None),
                 rate_limits: RwLock::new(None),
+                login_completions: RwLock::new(HashMap::new()),
+                login_completion_changed: Notify::new(),
             }),
             observed_version: Arc::new(RwLock::new(None)),
             starts: Arc::new(Mutex::new(AppServerStartGuard::default())),
@@ -336,6 +340,38 @@ impl CodexAdapter {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn wait_for_login_completion(
+        &self,
+        login_id: &str,
+        timeout: Duration,
+    ) -> Result<(), AdapterError> {
+        Self::validate_nonempty(login_id, "login id")?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.state.login_completion_changed.notified();
+            if let Some(result) = self
+                .state
+                .login_completions
+                .write()
+                .map_err(|_| {
+                    AdapterError::Internal(
+                        "Codex login completion state lock was poisoned".into(),
+                    )
+                })?
+                .remove(login_id)
+            {
+                return result.map_err(AdapterError::CredentialInvalid);
+            }
+            tokio::time::timeout_at(deadline, notified)
+                .await
+                .map_err(|_| {
+                    AdapterError::OutcomeUnknown(format!(
+                        "Codex login {login_id} did not complete before the local timeout"
+                    ))
+                })?;
+        }
     }
 
     pub async fn logout(&self) -> Result<(), AdapterError> {
@@ -1121,6 +1157,38 @@ impl CodexState {
                 })? = account;
                 Ok(Vec::new())
             }
+            "account/login/completed" => {
+                let Some(login_id) = params.get("loginId").and_then(Value::as_str) else {
+                    return Ok(Vec::new());
+                };
+                let success = params
+                    .get("success")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        AdapterError::Protocol(
+                            "Codex account/login/completed had no boolean success".into(),
+                        )
+                    })?;
+                let result = if success {
+                    Ok(())
+                } else {
+                    Err(params
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex login failed")
+                        .to_owned())
+                };
+                self.login_completions
+                    .write()
+                    .map_err(|_| {
+                        AdapterError::Internal(
+                            "Codex login completion state lock was poisoned".into(),
+                        )
+                    })?
+                    .insert(login_id.to_owned(), result);
+                self.login_completion_changed.notify_waiters();
+                Ok(Vec::new())
+            }
             "account/rateLimits/updated" => {
                 *self.rate_limits.write().map_err(|_| {
                     AdapterError::Internal("Codex rate-limit state lock was poisoned".into())
@@ -1717,6 +1785,49 @@ mod tests {
                 uses_codex_managed_credentials: Some(true),
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn login_completion_is_restart_safe_against_notification_races() {
+        let adapter = CodexAdapter::new_managed(
+            ProcessConfig::inherited("codex"),
+            "profile-a".into(),
+        );
+        adapter
+            .state
+            .notification_events(
+                "account/login/completed",
+                &json!({
+                    "loginId": "login-a",
+                    "success": true,
+                    "error": null
+                }),
+                "peer-a",
+            )
+            .unwrap();
+        adapter
+            .wait_for_login_completion("login-a", Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        adapter
+            .state
+            .notification_events(
+                "account/login/completed",
+                &json!({
+                    "loginId": "login-b",
+                    "success": false,
+                    "error": "device code expired"
+                }),
+                "peer-a",
+            )
+            .unwrap();
+        assert!(matches!(
+            adapter
+                .wait_for_login_completion("login-b", Duration::from_millis(10))
+                .await,
+            Err(AdapterError::CredentialInvalid(detail)) if detail == "device code expired"
         ));
     }
 }
