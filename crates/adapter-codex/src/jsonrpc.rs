@@ -436,12 +436,33 @@ impl JsonRpcPeer {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        let detail = self.redacted_exit_detail(detail).await;
         self.writer.lock().await.take();
         let pending = std::mem::take(&mut *self.pending.lock().await);
         for (_, sender) in pending {
             let _ = sender.send(Err(ReplyError::Transport(detail.clone())));
         }
         let _ = self.incoming.send(Incoming::Failure(detail)).await;
+    }
+
+    /// A closed stdio stream normally means the child has already exited. Keep
+    /// only its coarse exit code for recovery diagnostics; stderr can contain
+    /// prompts, paths, account information, or provider errors and is never
+    /// retained or logged.
+    async fn redacted_exit_detail(&self, detail: String) -> String {
+        let status = {
+            let mut child = self.child.lock().await;
+            child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+        };
+        match status {
+            Some(status) => match status.code() {
+                Some(code) => format!("{detail}; app_server_exit_code={code}"),
+                None => format!("{detail}; app_server_exit_signal_or_unknown"),
+            },
+            None => detail,
+        }
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), AdapterError> {
@@ -503,6 +524,37 @@ fn transport_error(mutation: bool, detail: &str) -> AdapterError {
 mod tests {
     use super::*;
     use tokio::io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_exit_diagnostic_keeps_only_the_exit_code() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 7"]);
+        let child = command.spawn().unwrap();
+        let (client, server) = duplex(64);
+        let (reader, writer) = split(client);
+        let (_server_reader, _server_writer) = split(server);
+        let (peer, mut incoming) =
+            JsonRpcPeer::from_io_with_limit(reader, writer, Some(child), 1024);
+        for _ in 0..20 {
+            if peer
+                .child
+                .lock()
+                .await
+                .as_mut()
+                .is_some_and(|child| child.try_wait().ok().flatten().is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        peer.invalidate("Codex App Server stdout closed".into()).await;
+        let Some(Incoming::Failure(detail)) = incoming.recv().await else {
+            panic!("expected a redacted app-server failure diagnostic");
+        };
+        assert!(detail.contains("app_server_exit_code=7"));
+        assert!(!detail.contains("stderr"));
+    }
 
     #[tokio::test]
     async fn performs_required_initialize_handshake() {
