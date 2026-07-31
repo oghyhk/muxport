@@ -553,8 +553,8 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Codex restart recovery
 
-- [ ] Detect App Server exit and capture only redacted crash metadata.
-- [ ] Mark any in-flight turn `outcome_unknown` until source reconciliation.
+- [x] Detect App Server exit and capture only redacted crash metadata.
+- [x] Mark any in-flight turn `outcome_unknown` until source reconciliation.
 - [x] Restart the same isolated profile when policy allows.
 - [x] Reinitialize and list/read persisted threads.
 - [ ] Compare known turn and item IDs with authoritative thread state.
