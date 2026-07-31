@@ -988,6 +988,7 @@ fn parse_runtime_manifest(bytes: &[u8]) -> Result<RuntimeManifest, io::Error> {
 async fn build_manifest_runtimes(
     manifest: RuntimeManifest,
 ) -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>, DynError> {
+    validate_runtime_paths(&manifest)?;
     let mut runtimes = Vec::with_capacity(manifest.runtimes.len());
     for entry in manifest.runtimes {
         let runtime_name = entry
@@ -1061,6 +1062,36 @@ async fn build_manifest_runtimes(
         }
     }
     Ok(runtimes)
+}
+
+fn validate_runtime_paths(manifest: &RuntimeManifest) -> Result<(), io::Error> {
+    for entry in &manifest.runtimes {
+        let executable = fs::metadata(&entry.executable).map_err(|error| {
+            invalid_manifest(format!(
+                "executable for runtime {:?} is unavailable: {error}",
+                entry.runtime_id
+            ))
+        })?;
+        if !executable.is_file() {
+            return Err(invalid_manifest(format!(
+                "executable for runtime {:?} must be a file",
+                entry.runtime_id
+            )));
+        }
+        let project = fs::metadata(&entry.project_directory).map_err(|error| {
+            invalid_manifest(format!(
+                "project_directory for runtime {:?} is unavailable: {error}",
+                entry.runtime_id
+            ))
+        })?;
+        if !project.is_dir() {
+            return Err(invalid_manifest(format!(
+                "project_directory for runtime {:?} must be a directory",
+                entry.runtime_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>, DynError> {
@@ -1251,6 +1282,23 @@ async fn run_local_subcommand() -> Result<bool, DynError> {
             }
             adapter.shutdown_gracefully().await?;
             println!("Codex account enrolled in isolated profile {profile_id}");
+        }
+        "runtime-manifest-validate" => {
+            let path = arguments
+                .next()
+                .ok_or("runtime-manifest-validate requires ABSOLUTE_MANIFEST_PATH")?;
+            if arguments.next().is_some() {
+                return Err(
+                    "runtime-manifest-validate accepts exactly ABSOLUTE_MANIFEST_PATH".into(),
+                );
+            }
+            let manifest = read_runtime_manifest(Path::new(&path))?;
+            validate_runtime_paths(&manifest)?;
+            println!(
+                "Runtime manifest version {} is valid for {} managed runtime(s)",
+                manifest.version,
+                manifest.runtimes.len()
+            );
         }
         _ => return Err(format!("unknown connector command {command:?}").into()),
     }
@@ -1546,6 +1594,22 @@ mod tests {
         document["runtimes"] = serde_json::json!([]);
         let error = parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
         assert!(error.to_string().contains("at least one runtime"), "{error}");
+    }
+
+    #[test]
+    fn runtime_manifest_preflights_paths_before_process_start() {
+        let mut document = test_runtime_manifest();
+        document["runtimes"][0]["executable"] = serde_json::json!(
+            std::env::temp_dir().join(format!(
+                "muxport-missing-executable-{}",
+                uuid::Uuid::new_v4()
+            ))
+        );
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let manifest = parse_runtime_manifest(&bytes).unwrap();
+        let error = validate_runtime_paths(&manifest).unwrap_err();
+        assert!(error.to_string().contains("executable"), "{error}");
+        assert!(error.to_string().contains("unavailable"), "{error}");
     }
 
     #[cfg(unix)]

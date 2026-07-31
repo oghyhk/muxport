@@ -62,8 +62,19 @@ used by the manifest.
 ## Startup, synchronization, and restart behavior
 
 The whole manifest is parsed and collision-checked before any managed process
-starts. If a later managed runtime cannot start, already-started OpenCode
-children are stopped before connector startup fails.
+starts. Every configured executable and project path is also checked before
+the first child starts. If a later managed runtime still cannot start,
+already-started OpenCode children are stopped before connector startup fails.
+
+Preflight the exact file without starting a runtime:
+
+```sh
+cargo run -p connector --bin muxport-connector -- \
+  runtime-manifest-validate /absolute/path/to/runtimes.json
+```
+
+The command prints only the manifest version and runtime count; it does not
+print paths, account metadata, or credential material.
 
 Each entry gets an independent adapter, monitor, authoritative snapshot, event
 subscription, health loop, and persistent runtime ID. Mobile projections
