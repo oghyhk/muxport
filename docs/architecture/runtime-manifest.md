@@ -73,12 +73,15 @@ and journal protocol.
 
 When a managed OpenCode child exits, its monitor restarts the same executable,
 project, profile roots, loopback port, and in-memory password, then takes a new
-authoritative snapshot. Five rapid restarts in 60 seconds latch the runtime as
-degraded until the connector is explicitly restarted. Managed Codex App Server
+authoritative snapshot. Five process failures in ten minutes latch the runtime
+as degraded until the connector is explicitly restarted. Managed Codex App Server
 processes use the adapter supervisor and reopen the same isolated profile after
 failure. Connector restart reloads the same stable runtime IDs and profile
 roots, while the event journal repairs mobile cursors from a snapshot plus
-contiguous replay.
+contiguous replay. On Unix, both `SIGINT` and the `SIGTERM` used by service
+managers trigger graceful adapter shutdown and a final snapshot. Managed child
+handles are also kill-on-drop, so an error during later connector startup
+cannot leave an orphan OpenCode server behind.
 
 If the connector host is offline, mobile keeps its last redacted projection
 and marks synchronization stale; it does not invent runtime state or execute

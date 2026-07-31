@@ -25,8 +25,8 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const THREAD_PAGE_LIMIT: usize = 100;
 const MAX_THREAD_PAGES: usize = 100;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
-const APP_SERVER_START_WINDOW: Duration = Duration::from_secs(60);
-const MAX_APP_SERVER_STARTS_PER_WINDOW: usize = 6;
+const APP_SERVER_START_WINDOW: Duration = Duration::from_secs(10 * 60);
+const MAX_APP_SERVER_STARTS_PER_WINDOW: usize = 5;
 
 /// Codex adapter backed by the stable App Server JSONL/JSON-RPC API.
 ///

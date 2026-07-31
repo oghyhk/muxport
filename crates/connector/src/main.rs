@@ -37,8 +37,8 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const DELTAS_PER_SNAPSHOT: usize = 100;
 const SOURCE_UPDATE_CAPACITY: usize = 512;
-const MANAGED_RESTART_WINDOW: Duration = Duration::from_secs(60);
-const MAX_MANAGED_RESTARTS_PER_WINDOW: usize = 5;
+const MANAGED_RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
+const MAX_MANAGED_FAILURES_PER_WINDOW: usize = 5;
 const RUNTIME_MANIFEST_VERSION: u32 = 1;
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_MANAGED_RUNTIMES: usize = 64;
@@ -147,16 +147,16 @@ impl ManagedOpenCodeChild {
         {
             self.restart_attempts.pop_front();
         }
-        if self.restart_attempts.len() >= MAX_MANAGED_RESTARTS_PER_WINDOW {
+        self.restart_attempts.push_back(now);
+        if self.restart_attempts.len() >= MAX_MANAGED_FAILURES_PER_WINDOW {
             self.child = None;
             self.crash_loop_tripped = true;
             return Err(AdapterError::InitFailed(format!(
-                "managed OpenCode crash loop: {} restarts within {} seconds; automatic restart stopped",
-                MAX_MANAGED_RESTARTS_PER_WINDOW,
+                "managed OpenCode crash loop: {} failures within {} seconds; automatic restart stopped",
+                MAX_MANAGED_FAILURES_PER_WINDOW,
                 MANAGED_RESTART_WINDOW.as_secs()
             )));
         }
-        self.restart_attempts.push_back(now);
         self.child = Some(self.profile.spawn(&self.server_password).map_err(|error| {
             AdapterError::InitFailed(format!(
                 "managed OpenCode process restart failed: {error}"
@@ -483,7 +483,7 @@ async fn main() -> Result<(), DynError> {
         );
     }
 
-    let mut shutdown = Box::pin(tokio::signal::ctrl_c());
+    let mut shutdown = Box::pin(shutdown_signal());
     let mut deltas_since_snapshot: HashMap<String, usize> = HashMap::new();
     loop {
         tokio::select! {
@@ -811,6 +811,22 @@ async fn wait_for_shutdown(
     tokio::select! {
         changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
         _ = tokio::time::sleep(delay) => false,
+    }
+}
+
+async fn shutdown_signal() -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
     }
 }
 
@@ -1677,7 +1693,7 @@ mod tests {
                 .count(),
             2
         );
-        for _ in 0..4 {
+        for _ in 0..3 {
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert!(managed.ensure_running().unwrap());
         }
@@ -1691,7 +1707,7 @@ mod tests {
                 .unwrap()
                 .lines()
                 .count(),
-            6
+            5
         );
         managed.stop().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();

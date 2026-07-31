@@ -152,7 +152,8 @@ impl ManagedOpenCodeProfile {
             .env("OPENCODE_SERVER_PASSWORD", server_password)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
         command.spawn().map_err(ManagedOpenCodeError::Io)
     }
 
