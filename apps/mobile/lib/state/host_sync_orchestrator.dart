@@ -225,6 +225,16 @@ NormalizedSyncEvent _normalizeEvent(
         'runtimeId': event.sessionUpdated.runtimeId,
         'status': event.sessionUpdated.status,
       });
+    case wire.Event_Inner.streamDelta:
+      payload.addAll({
+        'sessionId': event.streamDelta.sessionId,
+        'turnId': event.streamDelta.turnId,
+        // Retain a bounded mobile projection of live output. The connector
+        // journal remains authoritative; this cache is only for a readable
+        // timeline while the phone is connected or recovering.
+        'deltaText': _boundedDelta(event.streamDelta.deltaText),
+        'isFinal': event.streamDelta.isFinal,
+      });
     case wire.Event_Inner.credentialRotated:
       payload.addAll({
         'profileId': event.credentialRotated.profileId,
@@ -253,6 +263,14 @@ NormalizedSyncEvent _normalizeEvent(
     sourceObjectVersion: sequence,
     payload: payload,
   );
+}
+
+String _boundedDelta(String value) {
+  const maximumCharacters = 4096;
+  if (value.length <= maximumCharacters) {
+    return value;
+  }
+  return '${value.substring(0, maximumCharacters)}\n[output truncated on mobile]';
 }
 
 Map<String, Object?> _reduceSnapshot(

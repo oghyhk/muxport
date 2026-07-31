@@ -231,6 +231,7 @@ class SessionTimelineScreen extends StatelessWidget {
     if (runtimeId.isEmpty || sessionId.isEmpty || onSendInput == null) {
       return;
     }
+    final recentOutput = _recentOutput(host, sessionId);
     final navigator = Navigator.of(context);
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -251,6 +252,15 @@ class SessionTimelineScreen extends StatelessWidget {
               subtitle: const Text('Continue this session'),
               onTap: () => Navigator.of(sheetContext).pop('input'),
             ),
+            if (recentOutput.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.subject_outlined),
+                title: const Text('View recent output'),
+                subtitle: const Text(
+                  'Live output retained in the encrypted phone cache',
+                ),
+                onTap: () => Navigator.of(sheetContext).pop('output'),
+              ),
             if (onSteerSession != null)
               ListTile(
                 leading: const Icon(Icons.alt_route),
@@ -276,6 +286,22 @@ class SessionTimelineScreen extends StatelessWidget {
     }
     if (action == 'interrupt') {
       await onInterruptSession!(host, runtimeId, sessionId);
+      return;
+    }
+    if (action == 'output') {
+      await showDialog<void>(
+        context: navigator.context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Recent output'),
+          content: SingleChildScrollView(child: SelectableText(recentOutput)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
       return;
     }
     final isSteer = action == 'steer';
@@ -401,6 +427,24 @@ String _sessionStatusLabel(String status) {
     'outcomeUnknown' => 'OUTCOME UNKNOWN · RESYNCING',
     _ => status,
   };
+}
+
+String _recentOutput(HostSyncState host, String sessionId) {
+  final parts = <String>[];
+  final events = host.snapshot['recentEvents'] as List? ?? const [];
+  for (final raw in events) {
+    if (raw is! Map) {
+      continue;
+    }
+    final event = Map<String, Object?>.from(raw);
+    if (event['kind'] == 'streamDelta' && event['sessionId'] == sessionId) {
+      final text = _text(event['deltaText']);
+      if (text.isNotEmpty) {
+        parts.add(text);
+      }
+    }
+  }
+  return parts.join();
 }
 
 String _text(Object? value, {String fallback = ''}) {
