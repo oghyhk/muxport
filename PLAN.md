@@ -313,7 +313,7 @@ secret_handle          # opaque reference into vault
 ### Wire protocol
 
 - [x] Define canonical schemas and generate Rust and Dart types.
-- [ ] Include protocol version, capability version, request ID, idempotency key, host epoch, sequence, timestamp, and expiry where applicable.
+- [x] Include protocol version, capability version, request ID, idempotency key, host epoch, sequence, timestamp, and expiry where applicable.
 - [x] Separate command, command-result, event, snapshot, acknowledgement, and error envelopes.
 - [ ] Limit frame size and chunk large diffs/attachments with hashes.
 - [ ] Use explicit redaction types so a secret cannot be serialized into an ordinary event by mistake.
