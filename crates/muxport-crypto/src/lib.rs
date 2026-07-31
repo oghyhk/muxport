@@ -873,7 +873,7 @@ mod tests {
             "../../../protocol/fixtures/direct_session_v1.json"
         ))
         .unwrap();
-        assert_eq!(fixture["schemaVersion"].as_u64(), Some(1));
+        assert_eq!(fixture["schemaVersion"].as_u64(), Some(2));
         let host_id = fixture["hostId"].as_str().unwrap();
         let device_id = fixture["deviceId"].as_str().unwrap();
         let shared_secret: [u8; 32] = fixture_hex(
@@ -931,6 +931,9 @@ mod tests {
                 sequence: 1,
                 timestamp_ms: 1_700_000_000_000,
                 idempotency_key: "fixture-idempotency-1".into(),
+                capability_version: 1,
+                request_id: "fixture-probe-1".into(),
+                expires_at_ms: 1_700_000_060_000,
             }),
             payload: Some(muxport_envelope::Payload::Command(Command {
                 command_id: "fixture-probe-1".into(),

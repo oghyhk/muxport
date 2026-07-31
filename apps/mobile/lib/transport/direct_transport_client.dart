@@ -16,6 +16,7 @@ const Duration _handshakeTimeout = Duration(seconds: 15);
 const int _maximumHandshakeRecordBytes = 16 * 1024;
 const int _maximumEncryptedRecordBytes =
     directTransportMaximumPlaintextBytes + 32;
+const int _directTransportCapabilityVersion = 1;
 
 class PairingEnrollmentResult {
   const PairingEnrollmentResult({
@@ -412,6 +413,7 @@ class DirectSyncConnection {
           bootEpoch: Int64(localBootEpoch),
           sequence: Int64(frameSequence),
           timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+          capabilityVersion: _directTransportCapabilityVersion,
         ),
         ack: wire.Ack(
           sequenceAcknowledged: Int64(sequence),
@@ -821,6 +823,9 @@ class AuthenticatedDirectConnection {
           sequence: Int64(sequence),
           timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
           idempotencyKey: idempotencyKey,
+          capabilityVersion: _directTransportCapabilityVersion,
+          requestId: command.commandId,
+          expiresAtMs: command.deadlineMs,
         ),
         command: command,
       );
@@ -909,6 +914,7 @@ class AuthenticatedDirectConnection {
     final header = envelope.header;
     final bootEpoch = header.bootEpoch.toInt();
     if (header.protocolVersion != directTransportProtocolVersion ||
+        header.capabilityVersion <= 0 ||
         header.senderId != hostId ||
         header.recipientId != deviceId ||
         header.sequence.toInt() != frameSequence ||

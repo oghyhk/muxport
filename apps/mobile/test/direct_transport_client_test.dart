@@ -451,6 +451,9 @@ void main() {
         sequence: Int64.ONE,
         timestampMs: Int64(1700000000000),
         idempotencyKey: 'fixture-idempotency-1',
+        capabilityVersion: 1,
+        requestId: 'fixture-probe-1',
+        expiresAtMs: Int64(1700000060000),
       ),
       command: wire.Command(
         commandId: 'fixture-probe-1',
@@ -630,6 +633,7 @@ wire.EnvelopeHeader _hostHeader({
     sequence: Int64(sequence),
     timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
     idempotencyKey: cursor,
+    capabilityVersion: 1,
   );
 }
 
@@ -971,6 +975,8 @@ Future<void> _serveProbe({
         bootEpoch: Int64(22),
         sequence: Int64(responseSequence),
         timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+        capabilityVersion: 1,
+        requestId: request.command.commandId,
       ),
       commandResult: wire.CommandResult(
         commandId: request.command.commandId,

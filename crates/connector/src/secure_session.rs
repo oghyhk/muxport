@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+pub const CURRENT_CAPABILITY_VERSION: u32 = 1;
 pub const DEFAULT_MAX_PLAINTEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Error, Debug)]
@@ -99,6 +100,7 @@ impl SecureEnvelopeSession {
             return Err(SecureSessionError::EmptyIdempotencyKey);
         }
         let sequence = self.cipher.next_send_sequence()?;
+        let (request_id, expires_at_ms) = payload_request_metadata(&payload);
         let envelope = MuxportEnvelope {
             header: Some(EnvelopeHeader {
                 protocol_version: CURRENT_PROTOCOL_VERSION,
@@ -108,6 +110,9 @@ impl SecureEnvelopeSession {
                 sequence,
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 idempotency_key: idempotency_key.to_owned(),
+                capability_version: CURRENT_CAPABILITY_VERSION,
+                request_id,
+                expires_at_ms,
             }),
             payload: Some(payload),
         };
@@ -157,6 +162,9 @@ impl SecureEnvelopeSession {
             Some(muxport_envelope::Payload::Command(command)) => command,
             _ => return Err(SecureSessionError::UnexpectedPayload),
         };
+        if header.request_id != command.command_id {
+            return Err(SecureSessionError::InvalidEnvelopeHeader);
+        }
         Ok(AuthenticatedCommand {
             sender_id: header.sender_id,
             idempotency_key: header.idempotency_key,
@@ -174,6 +182,7 @@ impl SecureEnvelopeSession {
             .as_ref()
             .ok_or(SecureSessionError::InvalidEnvelopeHeader)?;
         if header.protocol_version != CURRENT_PROTOCOL_VERSION
+            || header.capability_version == 0
             || header.boot_epoch == 0
             || header.sequence == 0
         {
@@ -195,6 +204,16 @@ impl SecureEnvelopeSession {
             _ => {}
         }
         Ok(())
+    }
+}
+
+fn payload_request_metadata(payload: &muxport_envelope::Payload) -> (String, i64) {
+    match payload {
+        muxport_envelope::Payload::Command(command) => {
+            (command.command_id.clone(), command.deadline_ms)
+        }
+        muxport_envelope::Payload::CommandResult(result) => (result.command_id.clone(), 0),
+        _ => (String::new(), 0),
     }
 }
 

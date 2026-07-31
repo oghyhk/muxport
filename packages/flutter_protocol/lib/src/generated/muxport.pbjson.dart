@@ -146,6 +146,15 @@ const EnvelopeHeader$json = {
     {'1': 'sequence', '3': 5, '4': 1, '5': 4, '10': 'sequence'},
     {'1': 'timestamp_ms', '3': 6, '4': 1, '5': 3, '10': 'timestampMs'},
     {'1': 'idempotency_key', '3': 7, '4': 1, '5': 9, '10': 'idempotencyKey'},
+    {
+      '1': 'capability_version',
+      '3': 8,
+      '4': 1,
+      '5': 13,
+      '10': 'capabilityVersion'
+    },
+    {'1': 'request_id', '3': 9, '4': 1, '5': 9, '10': 'requestId'},
+    {'1': 'expires_at_ms', '3': 10, '4': 1, '5': 3, '10': 'expiresAtMs'},
   ],
 };
 
@@ -155,7 +164,9 @@ final $typed_data.Uint8List envelopeHeaderDescriptor = $convert.base64Decode(
     'Npb24SGwoJc2VuZGVyX2lkGAIgASgJUghzZW5kZXJJZBIhCgxyZWNpcGllbnRfaWQYAyABKAlS'
     'C3JlY2lwaWVudElkEh0KCmJvb3RfZXBvY2gYBCABKARSCWJvb3RFcG9jaBIaCghzZXF1ZW5jZR'
     'gFIAEoBFIIc2VxdWVuY2USIQoMdGltZXN0YW1wX21zGAYgASgDUgt0aW1lc3RhbXBNcxInCg9p'
-    'ZGVtcG90ZW5jeV9rZXkYByABKAlSDmlkZW1wb3RlbmN5S2V5');
+    'ZGVtcG90ZW5jeV9rZXkYByABKAlSDmlkZW1wb3RlbmN5S2V5Ei0KEmNhcGFiaWxpdHlfdmVyc2'
+    'lvbhgIIAEoDVIRY2FwYWJpbGl0eVZlcnNpb24SHQoKcmVxdWVzdF9pZBgJIAEoCVIJcmVxdWVz'
+    'dElkEiIKDWV4cGlyZXNfYXRfbXMYCiABKANSC2V4cGlyZXNBdE1z');
 
 @$core.Deprecated('Use muxportEnvelopeDescriptor instead')
 const MuxportEnvelope$json = {

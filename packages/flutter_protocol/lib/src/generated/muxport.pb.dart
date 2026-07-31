@@ -31,6 +31,9 @@ class EnvelopeHeader extends $pb.GeneratedMessage {
     $fixnum.Int64? sequence,
     $fixnum.Int64? timestampMs,
     $core.String? idempotencyKey,
+    $core.int? capabilityVersion,
+    $core.String? requestId,
+    $fixnum.Int64? expiresAtMs,
   }) {
     final result = create();
     if (protocolVersion != null) result.protocolVersion = protocolVersion;
@@ -40,6 +43,9 @@ class EnvelopeHeader extends $pb.GeneratedMessage {
     if (sequence != null) result.sequence = sequence;
     if (timestampMs != null) result.timestampMs = timestampMs;
     if (idempotencyKey != null) result.idempotencyKey = idempotencyKey;
+    if (capabilityVersion != null) result.capabilityVersion = capabilityVersion;
+    if (requestId != null) result.requestId = requestId;
+    if (expiresAtMs != null) result.expiresAtMs = expiresAtMs;
     return result;
   }
 
@@ -69,6 +75,10 @@ class EnvelopeHeader extends $pb.GeneratedMessage {
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..aInt64(6, _omitFieldNames ? '' : 'timestampMs')
     ..aOS(7, _omitFieldNames ? '' : 'idempotencyKey')
+    ..aI(8, _omitFieldNames ? '' : 'capabilityVersion',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aOS(9, _omitFieldNames ? '' : 'requestId')
+    ..aInt64(10, _omitFieldNames ? '' : 'expiresAtMs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -152,6 +162,33 @@ class EnvelopeHeader extends $pb.GeneratedMessage {
   $core.bool hasIdempotencyKey() => $_has(6);
   @$pb.TagNumber(7)
   void clearIdempotencyKey() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.int get capabilityVersion => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set capabilityVersion($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasCapabilityVersion() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearCapabilityVersion() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get requestId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set requestId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasRequestId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearRequestId() => $_clearField(9);
+
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get expiresAtMs => $_getI64(9);
+  @$pb.TagNumber(10)
+  set expiresAtMs($fixnum.Int64 value) => $_setInt64(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasExpiresAtMs() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearExpiresAtMs() => $_clearField(10);
 }
 
 enum MuxportEnvelope_Payload {
