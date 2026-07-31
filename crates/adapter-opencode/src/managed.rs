@@ -457,7 +457,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires MUXPORT_TEST_OPENCODE_PATH pointing to a real OpenCode executable"]
     async fn live_opencode_profile_restarts_with_the_same_isolated_state() {
-        use adapter_api::AgentAdapter;
+        use adapter_api::{AgentAdapter, CredentialMaterial};
 
         let executable = std::env::var_os("MUXPORT_TEST_OPENCODE_PATH")
             .map(PathBuf::from)
@@ -475,7 +475,10 @@ mod tests {
                 .unwrap();
         let password = "live-fixture-server-password";
 
-        for _ in 0..2 {
+        let credential =
+            CredentialMaterial::api_key("opencode", b"muxport-live-fixture-not-a-real-key")
+                .unwrap();
+        for cycle in 0..2 {
             let mut child = profile.spawn(password).unwrap();
             let adapter = profile.adapter(password).unwrap();
             let mut healthy = false;
@@ -491,6 +494,21 @@ mod tests {
             }
             assert!(healthy, "managed OpenCode did not become healthy");
             assert!(child.try_wait().unwrap().is_none());
+            if cycle == 0 {
+                adapter
+                    .activate_credential("profile-a", &credential)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(
+                    adapter
+                        .read_account_state("opencode")
+                        .await
+                        .unwrap()
+                        .connected,
+                    "isolated provider state did not survive source restart"
+                );
+            }
             child.kill().await.unwrap();
             let _ = child.wait().await;
         }
