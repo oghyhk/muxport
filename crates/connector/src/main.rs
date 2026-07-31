@@ -2,7 +2,7 @@ use adapter_api::{
     AdapterError, AgentAdapter, EventStream, ProjectInfo, SessionSummary,
 };
 use adapter_codex::CodexAdapter;
-use adapter_opencode::OpenCodeAdapter;
+use adapter_opencode::{ManagedOpenCodeProfile, OpenCodeAdapter};
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
     ConfirmingParty, DirectTransportService, InstanceLock,
@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -41,6 +42,7 @@ struct RuntimeConfig {
     runtime_id: String,
     agent_type: AgentType,
     runtime_name: &'static str,
+    credential_profile_id: String,
 }
 
 enum SourceUpdate {
@@ -61,7 +63,7 @@ enum SourceUpdate {
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
-    if run_local_subcommand()? {
+    if run_local_subcommand().await? {
         return Ok(());
     }
     let subscriber = FmtSubscriber::builder()
@@ -134,17 +136,42 @@ async fn main() -> Result<(), DynError> {
     mirror.set_connector_state(ConnectorState::Recovering);
     mirror.save_snapshot(&journal)?;
 
-    let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:4096".into());
-    let opencode_password = nonempty_env("MUXPORT_OPENCODE_PASSWORD");
+    let mut managed_opencode_child = None;
+    let managed_opencode_profile_id = nonempty_env("MUXPORT_OPENCODE_PROFILE_ID");
+    let (opencode, default_opencode_runtime_id): (Arc<dyn AgentAdapter>, String) =
+        if let Some(profile_id) = managed_opencode_profile_id.as_deref() {
+            let profile = managed_opencode_profile(profile_id)?;
+            let password = nonempty_env("MUXPORT_OPENCODE_PASSWORD")
+                .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+            let child = profile.spawn(&password)?;
+            let adapter = profile.adapter(password)?;
+            info!(
+                profile_id,
+                profile_root = %profile.profile_root().display(),
+                endpoint = %profile.base_url(),
+                "connector-managed isolated OpenCode runtime started"
+            );
+            managed_opencode_child = Some(child);
+            (
+                Arc::new(adapter),
+                format!("opencode-managed-{profile_id}"),
+            )
+        } else {
+            let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:4096".into());
+            let opencode_password = nonempty_env("MUXPORT_OPENCODE_PASSWORD");
+            (
+                Arc::new(OpenCodeAdapter::new(opencode_url, opencode_password)),
+                "opencode-local".into(),
+            )
+        };
     let opencode_config = RuntimeConfig {
         runtime_id: nonempty_env("MUXPORT_OPENCODE_RUNTIME_ID")
-            .unwrap_or_else(|| "opencode-local".into()),
+            .unwrap_or(default_opencode_runtime_id),
         agent_type: AgentType::Opencode,
         runtime_name: "OpenCode",
+        credential_profile_id: managed_opencode_profile_id.unwrap_or_default(),
     };
-    let opencode: Arc<dyn AgentAdapter> =
-        Arc::new(OpenCodeAdapter::new(opencode_url, opencode_password));
 
     let codex_path = nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
     let codex_config = RuntimeConfig {
@@ -152,6 +179,7 @@ async fn main() -> Result<(), DynError> {
             .unwrap_or_else(|| "codex-local".into()),
         agent_type: AgentType::Codex,
         runtime_name: "Codex",
+        credential_profile_id: String::new(),
     };
     let codex: Arc<dyn AgentAdapter> = Arc::new(CodexAdapter::new(codex_path));
 
@@ -385,6 +413,22 @@ async fn main() -> Result<(), DynError> {
             warn!(%error, "runtime monitor task failed");
         }
     }
+    if let Some(mut child) = managed_opencode_child {
+        match child.try_wait() {
+            Ok(None) => {
+                if let Err(error) = child.kill().await {
+                    warn!(%error, "managed OpenCode process could not be stopped");
+                }
+                let _ = child.wait().await;
+            }
+            Ok(Some(status)) => {
+                debug!(%status, "managed OpenCode process had already exited");
+            }
+            Err(error) => {
+                warn!(%error, "managed OpenCode process status could not be read");
+            }
+        }
+    }
     if let Some(task) = direct_transport_task {
         match task.await {
             Ok(Ok(())) => {}
@@ -420,6 +464,10 @@ fn apply_source_update(
                 config.runtime_name,
                 projects,
                 sessions,
+            );
+            mirror.set_runtime_active_profile(
+                &config.runtime_id,
+                &config.credential_profile_id,
             );
             mirror.set_connector_state(ConnectorState::Degraded);
             mirror.save_snapshot(journal)?;
@@ -627,7 +675,7 @@ fn record_degraded(
             runtime_id: config.runtime_id.clone(),
             agent_type: config.agent_type as i32,
             state: RuntimeState::Degraded as i32,
-            active_profile_id: String::new(),
+            active_profile_id: config.credential_profile_id.clone(),
             details: details.to_owned(),
         })),
     };
@@ -679,14 +727,45 @@ fn pairing_offer_ttl() -> Result<Option<Duration>, io::Error> {
     Ok(Some(Duration::from_secs(seconds)))
 }
 
-fn run_local_subcommand() -> Result<bool, DynError> {
+async fn run_local_subcommand() -> Result<bool, DynError> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
         return Ok(false);
     };
-    if command != "pairing-confirm" {
-        return Err(format!("unknown connector command {command:?}").into());
+    match command.as_str() {
+        "pairing-confirm" => run_pairing_confirm(arguments)?,
+        "opencode-profile-auth" => {
+            let profile_id = arguments
+                .next()
+                .ok_or("opencode-profile-auth requires PROFILE_ID PROVIDER_ID")?;
+            let provider_id = arguments
+                .next()
+                .ok_or("opencode-profile-auth requires PROFILE_ID PROVIDER_ID")?;
+            if arguments.next().is_some() {
+                return Err(
+                    "opencode-profile-auth accepts exactly PROFILE_ID PROVIDER_ID".into(),
+                );
+            }
+            let profile = managed_opencode_profile(&profile_id)?;
+            let status = profile.auth_login(&provider_id).await?;
+            if !status.success() {
+                return Err(format!(
+                    "OpenCode authentication exited unsuccessfully with {status}"
+                )
+                .into());
+            }
+            println!(
+                "OpenCode provider {provider_id} enrolled in isolated profile {profile_id}"
+            );
+        }
+        _ => return Err(format!("unknown connector command {command:?}").into()),
     }
+    Ok(true)
+}
+
+fn run_pairing_confirm(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<(), DynError> {
     let host_id = arguments
         .next()
         .ok_or("pairing-confirm requires HOST_ID PAIRING_ID SAS")?;
@@ -745,7 +824,44 @@ fn run_local_subcommand() -> Result<bool, DynError> {
         }
         Err(error) => return Err(error.into()),
     }
-    Ok(true)
+    Ok(())
+}
+
+fn managed_opencode_profile(
+    profile_id: &str,
+) -> Result<ManagedOpenCodeProfile, DynError> {
+    let executable = nonempty_env("MUXPORT_OPENCODE_PATH")
+        .map(PathBuf::from)
+        .ok_or("MUXPORT_OPENCODE_PATH is required for a managed OpenCode profile")?;
+    let project_directory = nonempty_env("MUXPORT_OPENCODE_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let profiles_root = nonempty_env("MUXPORT_PROFILES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?.join("profiles"));
+    let port = match nonempty_env("MUXPORT_OPENCODE_PORT") {
+        Some(value) => value.parse::<u16>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MUXPORT_OPENCODE_PORT must be an integer from 1 to 65535",
+            )
+        })?,
+        None => 4096,
+    };
+    if port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MUXPORT_OPENCODE_PORT must be an integer from 1 to 65535",
+        )
+        .into());
+    }
+    Ok(ManagedOpenCodeProfile::prepare(
+        profiles_root,
+        profile_id,
+        executable,
+        project_directory,
+        port,
+    )?)
 }
 
 fn new_boot_epoch() -> u64 {
@@ -826,6 +942,7 @@ mod tests {
             runtime_id: "codex-test".into(),
             agent_type: AgentType::Codex,
             runtime_name: "Codex",
+            credential_profile_id: String::new(),
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(4);
         let mut events = synchronize_runtime(&adapter, &config, &updates_tx)

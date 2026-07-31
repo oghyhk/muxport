@@ -158,6 +158,17 @@ impl RuntimeMirror {
         };
     }
 
+    pub fn set_runtime_active_profile(&mut self, runtime_id: &str, profile_id: &str) {
+        if let Some(runtime) = self
+            .snapshot
+            .runtimes
+            .iter_mut()
+            .find(|runtime| runtime.runtime_id == runtime_id)
+        {
+            runtime.active_credential_profile_id = profile_id.to_owned();
+        }
+    }
+
     /// Adds the runtime correlation missing from a vendor-neutral adapter
     /// before the event receives its durable connector sequence.
     pub fn correlate_event(event: &mut Event, runtime_id: &str) {
@@ -440,6 +451,7 @@ mod tests {
             }],
             vec![session("current", "/new", "Current", "busy")],
         );
+        mirror.set_runtime_active_profile("opencode-1", "go-account-a");
 
         let snapshot = mirror.snapshot_at(0);
         assert_eq!(snapshot.active_sessions.len(), 1);
@@ -447,6 +459,10 @@ mod tests {
         assert_eq!(
             RuntimeState::try_from(snapshot.runtimes[0].state).unwrap(),
             RuntimeState::OnlineRunning
+        );
+        assert_eq!(
+            snapshot.runtimes[0].active_credential_profile_id,
+            "go-account-a"
         );
     }
 

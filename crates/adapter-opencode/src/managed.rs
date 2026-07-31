@@ -18,6 +18,8 @@ pub enum ManagedOpenCodeError {
     ProjectDirectoryNotAbsolute,
     #[error("managed OpenCode server password must not be empty")]
     EmptyServerPassword,
+    #[error("managed OpenCode provider id is invalid")]
+    InvalidProviderId,
     #[error("managed OpenCode profile path contains a symbolic link: {0}")]
     SymbolicLink(PathBuf),
     #[error("managed OpenCode profile path is not a directory: {0}")]
@@ -138,6 +140,7 @@ impl ManagedOpenCodeProfile {
             return Err(ManagedOpenCodeError::EmptyServerPassword);
         }
         let mut command = Command::new(&self.executable);
+        self.configure_isolated_environment(&mut command);
         command
             .arg("serve")
             .arg("--hostname")
@@ -145,6 +148,46 @@ impl ManagedOpenCodeProfile {
             .arg("--port")
             .arg(self.port.to_string())
             .current_dir(&self.project_directory)
+            .env("OPENCODE_SERVER_USERNAME", "opencode")
+            .env("OPENCODE_SERVER_PASSWORD", server_password)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.spawn().map_err(ManagedOpenCodeError::Io)
+    }
+
+    /// Runs OpenCode's supported interactive authentication command inside
+    /// this isolated profile. Muxport never reads or writes the vendor auth
+    /// file and never receives the entered secret.
+    pub async fn auth_login(
+        &self,
+        provider_id: &str,
+    ) -> Result<std::process::ExitStatus, ManagedOpenCodeError> {
+        if provider_id.is_empty()
+            || provider_id.len() > 256
+            || provider_id.chars().any(char::is_control)
+        {
+            return Err(ManagedOpenCodeError::InvalidProviderId);
+        }
+        let mut command = Command::new(&self.executable);
+        command
+            .arg("auth")
+            .arg("login")
+            .arg("--provider")
+            .arg(provider_id)
+            .current_dir(&self.project_directory)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        self.configure_isolated_environment(&mut command);
+        command
+            .status()
+            .await
+            .map_err(ManagedOpenCodeError::Io)
+    }
+
+    fn configure_isolated_environment(&self, command: &mut Command) {
+        command
             .env_clear()
             .env("HOME", &self.home_root)
             .env("USERPROFILE", &self.home_root)
@@ -152,18 +195,12 @@ impl ManagedOpenCodeProfile {
             .env("XDG_CONFIG_HOME", &self.config_root)
             .env("XDG_CACHE_HOME", &self.cache_root)
             .env("XDG_STATE_HOME", &self.state_root)
-            .env("OPENCODE_CONFIG_DIR", self.config_root.join("opencode"))
-            .env("OPENCODE_SERVER_USERNAME", "opencode")
-            .env("OPENCODE_SERVER_PASSWORD", server_password)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .env("OPENCODE_CONFIG_DIR", self.config_root.join("opencode"));
         for name in bootstrap_environment_names() {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
         }
-        command.spawn().map_err(ManagedOpenCodeError::Io)
     }
 
     #[cfg(test)]
@@ -374,6 +411,45 @@ mod tests {
             profile.config_root.join("opencode").display()
         )));
         assert!(!evidence.contains("test-server-password"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supported_auth_cli_runs_inside_the_selected_profile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("managed-opencode-auth");
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let executable = root.join("fake-opencode");
+        fs::write(
+            &executable,
+            concat!(
+                "#!/bin/sh\n",
+                "{\n",
+                "  printf 'args=%s\\n' \"$*\"\n",
+                "  printf 'data=%s\\n' \"$XDG_DATA_HOME\"\n",
+                "  printf 'server_password=%s\\n' \"${OPENCODE_SERVER_PASSWORD-unset}\"\n",
+                "} > managed-auth.txt\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let profile =
+            ManagedOpenCodeProfile::prepare(&root, "profile-a", &executable, &project, 43114)
+                .unwrap();
+
+        assert!(profile.auth_login("opencode").await.unwrap().success());
+        let evidence = fs::read_to_string(project.join("managed-auth.txt")).unwrap();
+        assert!(evidence.contains("args=auth login --provider opencode"));
+        assert!(evidence.contains(&format!("data={}", profile.data_root.display())));
+        assert!(evidence.contains("server_password=unset"));
+        assert!(matches!(
+            profile.auth_login("\n").await,
+            Err(ManagedOpenCodeError::InvalidProviderId)
+        ));
 
         fs::remove_dir_all(root).unwrap();
     }
