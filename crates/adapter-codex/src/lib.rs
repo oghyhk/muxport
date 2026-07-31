@@ -141,7 +141,7 @@ impl CodexAdapter {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             process,
-            profile_id,
+            profile_id: profile_id.clone(),
             client: Arc::new(Mutex::new(None)),
             state: Arc::new(CodexState {
                 profile_id: profile_id.clone(),

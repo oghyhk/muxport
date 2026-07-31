@@ -1,7 +1,7 @@
 use adapter_api::AdapterError;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -72,7 +72,7 @@ impl ProcessConfig {
     }
 
     #[cfg(test)]
-    pub(crate) fn environment_value(&self, name: &str) -> Option<&OsStr> {
+    pub(crate) fn environment_value(&self, name: &str) -> Option<&std::ffi::OsStr> {
         self.env
             .iter()
             .find_map(|(key, value)| (key == name).then_some(value.as_os_str()))
