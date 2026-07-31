@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_protocol/flutter_protocol.dart';
 
 import 'pairing/signed_pairing_offer.dart';
 import 'screens/host_fleet_screen.dart';
@@ -170,7 +171,12 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         onPairHost: _canPairHost ? _pairHost : null,
       ),
       SessionTimelineScreen(hosts: _hosts.values),
-      ApprovalInboxScreen(hosts: _hosts.values),
+      ApprovalInboxScreen(
+        hosts: _hosts.values,
+        onDecision: widget.bootstrap.canAuthenticateTransport
+            ? _respondToApproval
+            : null,
+      ),
       CredentialMatrixScreen(hosts: _hosts.values),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
@@ -427,6 +433,126 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       }
     } finally {
       _syncInProgress = false;
+    }
+  }
+
+  Future<void> _respondToApproval(
+    HostSyncState host,
+    Map<String, Object?> event,
+    bool approved,
+  ) async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    final approvalId = event['approvalId'];
+    final sessionId = event['sessionId'];
+    final runtimeId = _runtimeForSession(host, sessionId);
+    if (!host.canMutate ||
+        identity == null ||
+        cacheStore == null ||
+        approvalId is! String ||
+        approvalId.isEmpty ||
+        sessionId is! String ||
+        sessionId.isEmpty ||
+        runtimeId == null ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      _showMessage('Approval is not safely routable from current host state.');
+      return;
+    }
+
+    final now = DateTime.now();
+    final operationId =
+        'approval-${identity.deviceId}-${now.microsecondsSinceEpoch}';
+    final pending = PendingOperation.local(
+      idempotencyKey: operationId,
+      kind: 'approval:$approvalId',
+      createdAtMs: now.millisecondsSinceEpoch,
+      deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
+    );
+    final pendingHost = host.addPendingOperation(pending);
+    await _persistHost(pendingHost, cacheStore);
+
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.respondToApproval(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: runtimeId,
+        sessionId: sessionId,
+        approvalId: approvalId,
+        approved: approved,
+        decisionReason: approved
+            ? 'Approved from paired Muxport device'
+            : 'Rejected from paired Muxport device',
+      );
+      final state =
+          result.state.value >= 0 &&
+              result.state.value < RemoteOpState.values.length
+          ? RemoteOpState.values[result.state.value]
+          : RemoteOpState.reconciliationRequired;
+      final resolved = (_hosts[host.hostId] ?? pendingHost).resolveOperation(
+        operationId,
+        state,
+      );
+      await _persistHost(resolved, cacheStore);
+      _showMessage(
+        result.success
+            ? (approved ? 'Approval accepted.' : 'Approval rejected.')
+            : 'Connector did not confirm the decision: ${result.errorMessage}',
+      );
+      unawaited(_syncAllHosts());
+    } on Object catch (error) {
+      final current = _hosts[host.hostId] ?? pendingHost;
+      final unresolved = current.resolveOperation(
+        operationId,
+        RemoteOpState.reconciliationRequired,
+      );
+      await _persistHost(unresolved, cacheStore);
+      _showMessage(
+        'Approval outcome is unknown; verify source state before retrying: $error',
+      );
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  String? _runtimeForSession(HostSyncState host, Object? sessionId) {
+    if (sessionId is! String) {
+      return null;
+    }
+    final sessions = host.snapshot['activeSessions'] as List? ?? const [];
+    for (final value in sessions) {
+      if (value is! Map) {
+        continue;
+      }
+      final session = Map<String, Object?>.from(value);
+      if (session['sessionId'] == sessionId) {
+        final runtimeId = session['runtimeId'];
+        return runtimeId is String && runtimeId.isNotEmpty ? runtimeId : null;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _persistHost(
+    HostSyncState host,
+    GenerationMobileCacheStore cacheStore,
+  ) async {
+    final nextHosts = {..._hosts, host.hostId: host};
+    await cacheStore.save(MobileCacheSnapshot(hosts: nextHosts.values));
+    if (mounted) {
+      setState(() {
+        _hosts = nextHosts;
+      });
     }
   }
 }

@@ -654,6 +654,40 @@ class AuthenticatedDirectConnection {
     );
   }
 
+  Future<wire.CommandResult> respondToApproval({
+    required String commandId,
+    required String idempotencyKey,
+    required String runtimeId,
+    required String sessionId,
+    required String approvalId,
+    required bool approved,
+    String decisionReason = '',
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        runtimeId.trim().isEmpty ||
+        sessionId.trim().isEmpty ||
+        approvalId.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'approval routing identifiers and a positive deadline are required',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        approveAction: wire.ApproveActionCmd(
+          approvalId: approvalId,
+          approved: approved,
+          decisionReason: decisionReason,
+          sessionId: sessionId,
+          runtimeId: runtimeId,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
   Future<wire.CommandResult> sendCommand(
     wire.Command command, {
     required String idempotencyKey,

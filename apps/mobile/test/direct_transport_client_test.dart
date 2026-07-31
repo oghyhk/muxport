@@ -171,6 +171,55 @@ void main() {
     await server.close();
   });
 
+  test('mobile client routes one authenticated approval decision', () async {
+    final ed25519 = Ed25519();
+    final hostIdentity = await ed25519.newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 21),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final hostPublicHex = _hex(hostPublic.bytes);
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(17),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final serverTask = _serveProbe(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+      expectedDeviceId: mobileIdentity.deviceId,
+      expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+      expectApproval: true,
+    );
+
+    final connection = await AuthenticatedDirectConnection.connect(
+      address: InternetAddress.loopbackIPv4.address,
+      port: server.port,
+      pinnedHost: PinnedHostIdentity(
+        hostId: 'host-1',
+        publicKeyHex: hostPublicHex,
+      ),
+      identity: mobileIdentity,
+    );
+    final result = await connection.respondToApproval(
+      commandId: 'approval-command-1',
+      idempotencyKey: 'approval-idempotency-1',
+      runtimeId: 'codex-managed-work',
+      sessionId: 'session-1',
+      approvalId: 'approval-1',
+      approved: false,
+      decisionReason: 'Rejected in test',
+    );
+    expect(result.success, isTrue);
+    expect(result.commandId, 'approval-command-1');
+
+    await connection.close();
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
   test(
     'mobile client rejects a challenge outside the pinned identity',
     () async {
@@ -673,6 +722,7 @@ Future<void> _serveProbe({
   required String hostPublicHex,
   required String expectedDeviceId,
   required String expectedDevicePublicKeyHex,
+  bool expectApproval = false,
 }) async {
   final socket = await server.first;
   final reader = _TestRecordReader(socket);
@@ -766,9 +816,20 @@ Future<void> _serveProbe({
     expect(request.header.senderId, expectedDeviceId);
     expect(request.header.recipientId, 'host-1');
     expect(request.header.sequence.toInt(), requestFrame.sequence);
-    expect(request.command.commandId, 'probe-1');
-    expect(request.command.hasProbeHost(), isTrue);
-    expect(request.header.idempotencyKey, 'probe-idempotency-1');
+    if (expectApproval) {
+      expect(request.command.commandId, 'approval-command-1');
+      expect(request.header.idempotencyKey, 'approval-idempotency-1');
+      expect(request.command.hasApproveAction(), isTrue);
+      expect(request.command.approveAction.runtimeId, 'codex-managed-work');
+      expect(request.command.approveAction.sessionId, 'session-1');
+      expect(request.command.approveAction.approvalId, 'approval-1');
+      expect(request.command.approveAction.approved, isFalse);
+      expect(request.command.approveAction.decisionReason, 'Rejected in test');
+    } else {
+      expect(request.command.commandId, 'probe-1');
+      expect(request.command.hasProbeHost(), isTrue);
+      expect(request.header.idempotencyKey, 'probe-idempotency-1');
+    }
 
     final responseSequence = cipher.nextSendSequence;
     final response = wire.MuxportEnvelope(

@@ -3,9 +3,19 @@ import 'package:flutter/material.dart';
 import '../state/mobile_sync_state.dart';
 
 class ApprovalInboxScreen extends StatelessWidget {
-  const ApprovalInboxScreen({required this.hosts, super.key});
+  const ApprovalInboxScreen({
+    required this.hosts,
+    required this.onDecision,
+    super.key,
+  });
 
   final Iterable<HostSyncState> hosts;
+  final Future<void> Function(
+    HostSyncState host,
+    Map<String, Object?> event,
+    bool approved,
+  )?
+  onDecision;
 
   @override
   Widget build(BuildContext context) {
@@ -34,9 +44,8 @@ class ApprovalInboxScreen extends StatelessWidget {
     }
     final pending = approvals.values.toList(growable: false)
       ..sort(
-        (left, right) => _timestamp(
-          right.event,
-        ).compareTo(_timestamp(left.event)),
+        (left, right) =>
+            _timestamp(right.event).compareTo(_timestamp(left.event)),
       );
 
     return Scaffold(
@@ -60,6 +69,13 @@ class ApprovalInboxScreen extends StatelessWidget {
                 final item = pending[index];
                 final event = item.event;
                 final approvalId = event['approvalId']! as String;
+                final operationPending = item.host.pendingOperations.values.any(
+                  (operation) => operation.kind == 'approval:$approvalId',
+                );
+                final canRespond =
+                    item.host.canMutate &&
+                    !operationPending &&
+                    onDecision != null;
                 final actionType = _text(
                   event['actionType'],
                   fallback: 'action',
@@ -104,12 +120,16 @@ class ApprovalInboxScreen extends StatelessWidget {
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
                             OutlinedButton(
-                              onPressed: null,
+                              onPressed: canRespond
+                                  ? () => onDecision!(item.host, event, false)
+                                  : null,
                               child: const Text('Reject'),
                             ),
                             const SizedBox(width: 8),
                             FilledButton(
-                              onPressed: null,
+                              onPressed: canRespond
+                                  ? () => onDecision!(item.host, event, true)
+                                  : null,
                               child: const Text('Approve'),
                             ),
                           ],
