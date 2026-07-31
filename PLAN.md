@@ -586,10 +586,10 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Credential profiles and validation status.
 - [x] Assignment matrix by host/runtime/project.
 - [x] Rotation-pool editor.
-- [ ] Bulk-switch impact preview and progress.
+- [x] Bulk-switch impact preview and progress.
 - [x] Recovery/degraded-state explanations.
 - [ ] Device/host revocation and security log.
-- [ ] Redacted diagnostics export.
+- [x] Redacted diagnostics export.
 
 ### Mobile lifecycle
 
