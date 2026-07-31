@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../state/mobile_sync_state.dart';
+import '../state/bulk_switch_plan.dart';
 
 class CredentialMatrixScreen extends StatelessWidget {
   const CredentialMatrixScreen({
@@ -125,20 +126,30 @@ class CredentialMatrixScreen extends StatelessWidget {
                               ),
                           ],
                         ),
-                        if (onRotateCredential != null &&
-                            item.host.canMutate &&
-                            assignments.isNotEmpty)
+                        if (item.host.canMutate)
                           PopupMenuButton<String>(
                             tooltip: 'Credential actions',
-                            onSelected: (_) => _chooseRuntimeRotation(
-                              context,
-                              item.host,
-                              profileId,
-                            ),
-                            itemBuilder: (context) => const [
-                              PopupMenuItem(
-                                value: 'rotate',
-                                child: Text('Rotate an assigned runtime'),
+                            onSelected: (action) {
+                              if (action == 'rotate') {
+                                _chooseRuntimeRotation(
+                                  context,
+                                  item.host,
+                                  profileId,
+                                );
+                              } else {
+                                _showBulkImpactPlan(context, profile);
+                              }
+                            },
+                            itemBuilder: (context) => [
+                              if (onRotateCredential != null &&
+                                  assignments.isNotEmpty)
+                                const PopupMenuItem(
+                                  value: 'rotate',
+                                  child: Text('Rotate an assigned runtime'),
+                                ),
+                              const PopupMenuItem(
+                                value: 'bulk',
+                                child: Text('Preview multi-host switch'),
                               ),
                             ],
                           ),
@@ -148,6 +159,35 @@ class CredentialMatrixScreen extends StatelessWidget {
                 );
               },
             ),
+    );
+  }
+
+  Future<void> _showBulkImpactPlan(
+    BuildContext context,
+    Map<String, Object?> profile,
+  ) async {
+    final provider = _string(profile['provider']);
+    final fingerprint = _string(profile['accountFingerprint']);
+    if (provider.isEmpty || fingerprint.isEmpty) return;
+    final plan = BulkCredentialSwitchPlan.build(
+      hosts: hosts,
+      provider: provider,
+      accountFingerprint: fingerprint,
+    );
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Multi-host switch impact'),
+        content: Text(
+          'Ready: ${plan.ready.length}\nAlready assigned: ${plan.alreadyAssigned.length}\nOffline or stale: ${plan.offline.length}\nMissing this account: ${plan.missingProfile.length}\n\nOnly ready targets can be selected for dispatch. No host has changed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 
