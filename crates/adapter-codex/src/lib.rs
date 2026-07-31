@@ -1478,13 +1478,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_bound_start_fails_before_process_spawn() {
+    async fn external_adapter_rejects_profile_bound_start_before_process_spawn() {
         let adapter = CodexAdapter::new("definitely-not-a-command");
         assert!(matches!(
             adapter
                 .start_session("/srv/app", "build it", "account-a")
                 .await,
-            Err(AdapterError::Unsupported(_))
+            Err(AdapterError::InvalidInput(_))
         ));
     }
 
@@ -1496,5 +1496,126 @@ mod tests {
             adapter.activate_credential("profile", &credential).await,
             Err(AdapterError::Unsupported(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn managed_profile_uses_supported_account_endpoints() {
+        let (client_io, server_io) = duplex(8192);
+        let (client_reader, client_writer) = split(client_io);
+        let (server_reader, mut server_writer) = split(server_io);
+        let (peer, _incoming) = JsonRpcPeer::from_io(client_reader, client_writer);
+        let server = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_reader).lines();
+            let initialize: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            server_writer
+                .write_all(
+                    format!("{{\"id\":{},\"result\":{{}}}}\n", initialize["id"]).as_bytes(),
+                )
+                .await
+                .unwrap();
+            let _: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+
+            let read: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(read["method"], "account/read");
+            assert_eq!(read["params"]["refreshToken"], false);
+            server_writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"account\":null,\"requiresOpenaiAuth\":true}}}}\n",
+                        read["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let login: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(login["method"], "account/login/start");
+            assert_eq!(login["params"]["type"], "apiKey");
+            assert_eq!(login["params"]["apiKey"], "test-secret-key");
+            server_writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"type\":\"apiKey\"}}}}\n",
+                        login["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let limits: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(limits["method"], "account/rateLimits/read");
+            server_writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"rateLimits\":null}}}}\n",
+                        limits["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        peer.initialize().await.unwrap();
+        let adapter = CodexAdapter::new_managed(
+            ProcessConfig::inherited("codex"),
+            "profile-a".into(),
+        );
+        *adapter.client.lock().await = Some(Arc::clone(&peer));
+        assert_eq!(adapter.read_account(false).await.unwrap().account, None);
+        let credential =
+            CredentialMaterial::api_key("openai", b"test-secret-key").unwrap();
+        adapter
+            .activate_credential("profile-a", &credential)
+            .await
+            .unwrap();
+        assert_eq!(
+            adapter.read_rate_limits().await.unwrap(),
+            json!({"rateLimits": null})
+        );
+        server.await.unwrap();
+        adapter.shutdown_gracefully().await.unwrap();
+    }
+
+    #[test]
+    fn tracks_account_and_rate_limit_notifications_without_exposing_tokens() {
+        let adapter = CodexAdapter::new_managed(
+            ProcessConfig::inherited("codex"),
+            "profile-a".into(),
+        );
+        adapter
+            .state
+            .notification_events(
+                "account/updated",
+                &json!({"authMode": "chatgpt", "planType": "plus"}),
+                "peer-a",
+            )
+            .unwrap();
+        assert!(matches!(
+            adapter.state.account.read().unwrap().as_ref(),
+            Some(CodexAccount::Chatgpt {
+                plan_type: Some(plan),
+                ..
+            }) if plan == "plus"
+        ));
+        adapter
+            .state
+            .notification_events(
+                "account/rateLimits/updated",
+                &json!({"rateLimits": {"limitId": "codex"}}),
+                "peer-a",
+            )
+            .unwrap();
+        assert_eq!(
+            adapter.state.rate_limits.read().unwrap().as_ref(),
+            Some(&json!({"rateLimits": {"limitId": "codex"}}))
+        );
     }
 }
