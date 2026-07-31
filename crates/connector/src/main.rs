@@ -128,9 +128,7 @@ async fn main() -> Result<(), DynError> {
             journal.current_sequence(),
         ),
     };
-    // Live snapshot/event delivery is not yet connected, so the connector
-    // remains degraded even when local source mirrors and commands are healthy.
-    mirror.set_connector_state(ConnectorState::Degraded);
+    mirror.set_connector_state(ConnectorState::Recovering);
     mirror.save_snapshot(&journal)?;
 
     let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
@@ -277,17 +275,21 @@ async fn main() -> Result<(), DynError> {
                         advertised_endpoint,
                     )?,
                 ));
-                let service = DirectTransportService::new_with_pairing(
-                    host_id.clone(),
-                    boot_epoch,
-                    host_identity,
-                    pairing,
-                    Arc::clone(&command_router),
-                )?;
+                let service =
+                    DirectTransportService::new_with_pairing(
+                        host_id.clone(),
+                        boot_epoch,
+                        host_identity,
+                        pairing,
+                        Arc::clone(&command_router),
+                    )?
+                    .with_event_journal(&state_db);
                 info!(
                     bind_address = %local_address,
                     "authenticated direct command transport listening"
                 );
+                mirror.set_connector_state(ConnectorState::Ready);
+                mirror.save_snapshot(&journal)?;
                 Some(tokio::spawn(service.serve(
                     listener,
                     shutdown_rx.clone(),
@@ -318,9 +320,17 @@ async fn main() -> Result<(), DynError> {
     }
     drop(updates_tx);
 
-    warn!(
-        "snapshot replay and live mobile event delivery are not connected; connector remains degraded"
-    );
+    if direct_transport_task.is_some() {
+        info!(
+            "authenticated snapshot replay and live event polling are available"
+        );
+    } else {
+        mirror.set_connector_state(ConnectorState::Degraded);
+        mirror.save_snapshot(&journal)?;
+        warn!(
+            "mobile sync transport is unavailable; connector remains degraded"
+        );
+    }
 
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     let mut deltas_since_snapshot: HashMap<String, usize> = HashMap::new();

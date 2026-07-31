@@ -9,6 +9,7 @@ import 'screens/approval_inbox_screen.dart';
 import 'screens/credential_matrix_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'state/app_bootstrap.dart';
+import 'state/host_sync_orchestrator.dart';
 import 'state/mobile_cache_store.dart';
 import 'state/mobile_sync_state.dart';
 import 'transport/direct_transport_client.dart';
@@ -137,11 +138,26 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
   late Map<String, HostSyncState> _hosts;
   bool _pairingInProgress = false;
+  bool _syncInProgress = false;
+  Timer? _syncTimer;
+  final HostSyncOrchestrator _syncOrchestrator = const HostSyncOrchestrator();
 
   @override
   void initState() {
     super.initState();
     _hosts = Map.of(widget.bootstrap.cache.hosts);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_syncAllHosts());
+    });
+    _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_syncAllHosts());
+    });
+  }
+
+  @override
+  void dispose() {
+    _syncTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -156,7 +172,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       const SessionTimelineScreen(),
       const ApprovalInboxScreen(),
       const CredentialMatrixScreen(),
-      DiagnosticsScreen(bootstrap: widget.bootstrap),
+      DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
     return Scaffold(
       body: IndexedStack(index: _currentIndex, children: screens),
@@ -261,6 +277,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             ? 'Phone confirmed. Confirm the same SAS on the host to finish.'
             : 'Host paired. State sync will begin when the connector stream is available.',
       );
+      unawaited(_syncAllHosts());
     } on Object catch (error) {
       await pairing?.close();
       if (mounted) {
@@ -360,5 +377,56 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _syncAllHosts() async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (!mounted ||
+        _syncInProgress ||
+        identity == null ||
+        cacheStore == null ||
+        !widget.bootstrap.canAuthenticateTransport) {
+      return;
+    }
+    _syncInProgress = true;
+    try {
+      for (final hostId in _hosts.keys.toList(growable: false)) {
+        final host = _hosts[hostId];
+        if (host == null || !host.canReconnect) {
+          continue;
+        }
+        try {
+          final synchronized = await _syncOrchestrator.synchronizeOnce(
+            state: host,
+            identity: identity,
+            cacheStore: cacheStore,
+            allHosts: _hosts.values.toList(growable: false),
+          );
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _hosts = {..._hosts, hostId: synchronized};
+          });
+        } on Object {
+          if (!mounted) {
+            return;
+          }
+          final current = _hosts[hostId];
+          if (current != null &&
+              current.phase != HostSyncPhase.pairingPending) {
+            setState(() {
+              _hosts = {
+                ..._hosts,
+                hostId: current.withPhase(HostSyncPhase.offline),
+              };
+            });
+          }
+        }
+      }
+    } finally {
+      _syncInProgress = false;
+    }
   }
 }

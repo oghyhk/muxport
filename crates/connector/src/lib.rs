@@ -9,7 +9,7 @@ pub use command_router::{CommandDispatchError, CommandRouter};
 pub use direct_transport::{
     DirectTransportError, DirectTransportService, PairingHandshakeRequest,
     PairingHandshakeResponse, PairingPhoneAcknowledgement,
-    PairingPhoneConfirmation, ServerChallenge,
+    PairingPhoneConfirmation, ServerChallenge, SyncHandshakeRequest,
 };
 pub use instance_lock::{InstanceLock, InstanceLockError};
 pub use pairing_coordinator::{

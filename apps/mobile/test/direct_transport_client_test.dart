@@ -15,6 +15,60 @@ import 'package:muxport_mobile/transport/direct_transport_client.dart';
 import 'package:muxport_mobile/transport/direct_transport_protocol.dart';
 
 void main() {
+  test('mobile sync client applies snapshot replay and polls by ack', () async {
+    final ed25519 = Ed25519();
+    final hostIdentity = await ed25519.newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 61),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(11),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final serverTask = _serveSync(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostPublicHex: _hex(hostPublic.bytes),
+      expectedDeviceId: mobileIdentity.deviceId,
+    );
+
+    final connection = await DirectSyncConnection.connect(
+      address: InternetAddress.loopbackIPv4.address,
+      port: server.port,
+      pinnedHost: PinnedHostIdentity(
+        hostId: 'host-1',
+        publicKeyHex: _hex(hostPublic.bytes),
+      ),
+      identity: mobileIdentity,
+      afterSequence: 0,
+      knownHostBootEpoch: 0,
+    );
+    final initial = await connection.readInitialBatch();
+
+    expect(initial.hostBootEpoch, 22);
+    expect(initial.snapshot?.hostId, 'host-1');
+    expect(initial.snapshot?.snapshotSequence.toInt(), 1);
+    expect(initial.events, hasLength(1));
+    expect(initial.events.single.sequence, 2);
+    expect(initial.events.single.event.eventId, 'event-2');
+    expect(initial.boundarySequence, 2);
+
+    final empty = await connection.acknowledgeAndPoll(
+      sequence: initial.boundarySequence,
+      hostBootEpoch: initial.hostBootEpoch,
+    );
+    expect(empty.snapshot, isNull);
+    expect(empty.events, isEmpty);
+    expect(empty.boundarySequence, 2);
+
+    await connection.close();
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
   test('mobile client completes encrypted pairing confirmation', () async {
     final ed25519 = Ed25519();
     final hostIdentity = await ed25519.newKeyPairFromSeed(
@@ -244,6 +298,179 @@ void main() {
     cipher.destroy();
     keys.destroy();
   });
+}
+
+Future<void> _serveSync({
+  required ServerSocket server,
+  required SimpleKeyPair hostIdentity,
+  required String hostPublicHex,
+  required String expectedDeviceId,
+}) async {
+  final socket = await server.first;
+  final reader = _TestRecordReader(socket);
+  try {
+    final challenge = await _signedChallenge(
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+    );
+    await _writeRecord(socket, utf8.encode(jsonEncode(challenge)));
+    final request = Map<String, Object?>.from(
+      jsonDecode(utf8.decode(await reader.readRecord())) as Map,
+    );
+    expect(request['kind'], 'sync');
+    expect(request['afterSequence'], 0);
+    expect(request['knownBootEpoch'], 0);
+    final initiator = Map<String, Object?>.from(request['initiator']! as Map);
+    expect(initiator['deviceId'], expectedDeviceId);
+
+    final hostEphemeral = await X25519().newKeyPair();
+    final hostEphemeralPublic = await hostEphemeral.extractPublicKey();
+    final responder = <String, Object?>{
+      'protocolVersion': directTransportProtocolVersion,
+      'hostId': 'host-1',
+      'deviceId': expectedDeviceId,
+      'hostIdentityPublicKeyHex': hostPublicHex,
+      'ephemeralPublicKeyHex': _hex(hostEphemeralPublic.bytes),
+      'nonceHex': _hex(List<int>.filled(32, 23)),
+      'initiatorHashHex': _hex(_initiatorHash(initiator)),
+      'signatureHex': '',
+    };
+    final responderSignature = await Ed25519().sign(
+      _responderClaim(responder),
+      keyPair: hostIdentity,
+    );
+    responder['signatureHex'] = _hex(responderSignature.bytes);
+    await _writeRecord(socket, utf8.encode(jsonEncode(responder)));
+
+    final transcript = _transcript(initiator, responder);
+    final dh = await X25519().sharedSecretKey(
+      keyPair: hostEphemeral,
+      remotePublicKey: SimplePublicKey(
+        _unhex(initiator['ephemeralPublicKeyHex']! as String),
+        type: KeyPairType.x25519,
+      ),
+    );
+    final dhBytes = Uint8List.fromList(await dh.extractBytes());
+    dh.destroy();
+    hostEphemeral.destroy();
+    final transcriptHash = hashes.sha256.convert(transcript).bytes;
+    final dhInput = SecretKeyData(dhBytes, overwriteWhenDestroyed: true);
+    final shared = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
+      secretKey: dhInput,
+      nonce: transcriptHash,
+      info: utf8.encode('muxport-shared-secret-v1'),
+    );
+    dhInput.destroy();
+    dhBytes.fillRange(0, dhBytes.length, 0);
+    final directional = await Hkdf(hmac: Hmac.sha256(), outputLength: 72)
+        .deriveKey(
+          secretKey: shared,
+          nonce: transcriptHash,
+          info: utf8.encode('muxport-directional-session-v1'),
+        );
+    shared.destroy();
+    final material = Uint8List.fromList(await directional.extractBytes());
+    directional.destroy();
+    final hostKeys = DirectSessionKeys(
+      sendKey: material.sublist(32, 64),
+      receiveKey: material.sublist(0, 32),
+      sendNoncePrefix: material.sublist(68, 72),
+      receiveNoncePrefix: material.sublist(64, 68),
+      aad: _sessionAad('host-1', expectedDeviceId, transcript),
+    );
+    material.fillRange(0, material.length, 0);
+    final cipher = DirectSessionCipher(hostKeys);
+    hostKeys.destroy();
+
+    await _writeSyncEnvelope(
+      socket,
+      cipher,
+      wire.MuxportEnvelope(
+        header: _hostHeader(
+          deviceId: expectedDeviceId,
+          sequence: cipher.nextSendSequence,
+        ),
+        snapshot: wire.HostSnapshot(
+          hostId: 'host-1',
+          hostname: 'Test host',
+          connectorState: wire.ConnectorState.CONNECTOR_STATE_READY,
+          snapshotSequence: Int64.ONE,
+        ),
+      ),
+    );
+    await _writeSyncEnvelope(
+      socket,
+      cipher,
+      wire.MuxportEnvelope(
+        header: _hostHeader(
+          deviceId: expectedDeviceId,
+          sequence: cipher.nextSendSequence,
+          cursor: '2',
+        ),
+        event: wire.Event(eventId: 'event-2', timestampMs: Int64(2)),
+      ),
+    );
+    await _writeSyncEnvelope(
+      socket,
+      cipher,
+      wire.MuxportEnvelope(
+        header: _hostHeader(
+          deviceId: expectedDeviceId,
+          sequence: cipher.nextSendSequence,
+        ),
+        ack: wire.Ack(sequenceAcknowledged: Int64(2), bootEpoch: Int64(22)),
+      ),
+    );
+
+    final acknowledgementFrame = DirectEncryptedFrame.decode(
+      await reader.readRecord(),
+    );
+    final acknowledgement = wire.MuxportEnvelope.fromBuffer(
+      await cipher.decrypt(acknowledgementFrame),
+    );
+    expect(acknowledgement.ack.sequenceAcknowledged.toInt(), 2);
+    expect(acknowledgement.ack.bootEpoch.toInt(), 22);
+    await _writeSyncEnvelope(
+      socket,
+      cipher,
+      wire.MuxportEnvelope(
+        header: _hostHeader(
+          deviceId: expectedDeviceId,
+          sequence: cipher.nextSendSequence,
+        ),
+        ack: wire.Ack(sequenceAcknowledged: Int64(2), bootEpoch: Int64(22)),
+      ),
+    );
+    cipher.destroy();
+  } finally {
+    await reader.cancel();
+    await socket.close();
+  }
+}
+
+wire.EnvelopeHeader _hostHeader({
+  required String deviceId,
+  required int sequence,
+  String cursor = '',
+}) {
+  return wire.EnvelopeHeader(
+    protocolVersion: directTransportProtocolVersion,
+    senderId: 'host-1',
+    recipientId: deviceId,
+    bootEpoch: Int64(22),
+    sequence: Int64(sequence),
+    timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+    idempotencyKey: cursor,
+  );
+}
+
+Future<void> _writeSyncEnvelope(
+  Socket socket,
+  DirectSessionCipher cipher,
+  wire.MuxportEnvelope envelope,
+) async {
+  final frame = await cipher.encrypt(envelope.writeToBuffer());
+  await _writeRecord(socket, frame.encode());
 }
 
 Future<Map<String, Object?>> _signedPairingOffer({

@@ -200,9 +200,10 @@ class _HostCard extends StatelessWidget {
                   : '$pendingCount operation(s) require reconciliation',
             ),
             const SizedBox(height: 12),
-            const Text(
-              'Remote controls remain disabled until host identity '
-              'verification and replay or snapshot recovery completes.',
+            Text(
+              host.phase == HostSyncPhase.synchronized
+                  ? 'Host identity and cached state are verified. Command controls are not yet exposed on this screen.'
+                  : 'Remote controls remain disabled until host identity verification and replay or snapshot recovery completes.',
             ),
           ],
         ),

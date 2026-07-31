@@ -1,16 +1,25 @@
 import 'package:flutter/material.dart';
 
 import '../state/app_bootstrap.dart';
+import '../state/mobile_sync_state.dart';
 
 class DiagnosticsScreen extends StatelessWidget {
-  const DiagnosticsScreen({required this.bootstrap, super.key});
+  const DiagnosticsScreen({
+    required this.bootstrap,
+    required this.hosts,
+    super.key,
+  });
 
   final AppBootstrapState bootstrap;
+  final Iterable<HostSyncState> hosts;
 
   @override
   Widget build(BuildContext context) {
     final identityReady =
         bootstrap.identityStatus == IdentityBootstrapStatus.ready;
+    final syncHealthy = hosts.any(
+      (host) => host.phase == HostSyncPhase.synchronized,
+    );
 
     return Scaffold(
       appBar: AppBar(title: const Text('Diagnostics & Audit Log')),
@@ -46,10 +55,12 @@ class DiagnosticsScreen extends StatelessWidget {
                     value: identityReady ? 'AVAILABLE' : 'LOCKED / UNAVAILABLE',
                     healthy: identityReady,
                   ),
-                  const _HealthRow(
+                  _HealthRow(
                     title: 'Connector transport',
-                    value: 'NOT CONNECTED',
-                    healthy: false,
+                    value: syncHealthy
+                        ? 'AUTHENTICATED POLLING'
+                        : 'NOT CONNECTED',
+                    healthy: syncHealthy,
                   ),
                   const _HealthRow(
                     title: 'Secret leak audit',

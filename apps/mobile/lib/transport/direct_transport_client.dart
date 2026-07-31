@@ -256,6 +256,295 @@ class PendingDirectPairing {
   }
 }
 
+class JournaledSyncEvent {
+  const JournaledSyncEvent({required this.sequence, required this.event});
+
+  final int sequence;
+  final wire.Event event;
+}
+
+class DirectSyncBatch {
+  const DirectSyncBatch({
+    required this.snapshot,
+    required this.events,
+    required this.boundarySequence,
+    required this.hostBootEpoch,
+  });
+
+  final wire.HostSnapshot? snapshot;
+  final List<JournaledSyncEvent> events;
+  final int boundarySequence;
+  final int hostBootEpoch;
+}
+
+class DirectSyncConnection {
+  DirectSyncConnection._({
+    required Socket socket,
+    required _SocketRecordReader reader,
+    required DirectSessionCipher cipher,
+    required this.hostId,
+    required this.deviceId,
+    required this.localBootEpoch,
+  }) : _socket = socket,
+       _reader = reader,
+       _cipher = cipher;
+
+  static Future<DirectSyncConnection> connect({
+    required String address,
+    required int port,
+    required PinnedHostIdentity pinnedHost,
+    required MobileDeviceIdentity identity,
+    required int afterSequence,
+    required int knownHostBootEpoch,
+    Duration connectTimeout = _defaultConnectTimeout,
+  }) async {
+    if (address.trim().isEmpty ||
+        port < 1 ||
+        port > 65535 ||
+        afterSequence < 0 ||
+        knownHostBootEpoch < 0) {
+      throw const DirectTransportProtocolException(
+        'direct sync connection parameters are invalid',
+      );
+    }
+    Socket? socket;
+    _SocketRecordReader? reader;
+    PendingDirectHandshake? pendingHandshake;
+    try {
+      socket = await Socket.connect(address, port, timeout: connectTimeout);
+      socket.setOption(SocketOption.tcpNoDelay, true);
+      reader = _SocketRecordReader(socket);
+      final initiator = DirectHandshakeInitiator(identity: identity);
+      final challengeRecord = await reader
+          .readRecord(_maximumHandshakeRecordBytes)
+          .timeout(_handshakeTimeout);
+      final challenge = await initiator.verifyServerChallenge(
+        jsonValue: jsonDecode(utf8.decode(challengeRecord)),
+        pinnedHost: pinnedHost,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      pendingHandshake = await initiator.createInitiatorHello(
+        challenge: challenge,
+      );
+      await _writeRecord(
+        socket,
+        utf8.encode(
+          jsonEncode({
+            'kind': 'sync',
+            'protocolVersion': directTransportProtocolVersion,
+            'afterSequence': afterSequence,
+            'knownBootEpoch': knownHostBootEpoch,
+            'initiator': pendingHandshake.initiator.toJson(),
+          }),
+        ),
+        maximumBytes: _maximumHandshakeRecordBytes,
+      ).timeout(_handshakeTimeout);
+      final responderRecord = await reader
+          .readRecord(_maximumHandshakeRecordBytes)
+          .timeout(_handshakeTimeout);
+      final keys = await pendingHandshake.finish(
+        jsonDecode(utf8.decode(responderRecord)),
+      );
+      final cipher = DirectSessionCipher(keys);
+      keys.destroy();
+      return DirectSyncConnection._(
+        socket: socket,
+        reader: reader,
+        cipher: cipher,
+        hostId: pinnedHost.hostId,
+        deviceId: identity.deviceId,
+        localBootEpoch: _newBootEpoch(),
+      );
+    } on DirectTransportProtocolException {
+      pendingHandshake?.abort();
+      await reader?.cancel();
+      socket?.destroy();
+      rethrow;
+    } on Object catch (error) {
+      pendingHandshake?.abort();
+      await reader?.cancel();
+      socket?.destroy();
+      throw DirectTransportProtocolException(
+        'could not establish the direct sync session',
+        error,
+      );
+    }
+  }
+
+  final Socket _socket;
+  final _SocketRecordReader _reader;
+  final DirectSessionCipher _cipher;
+  final String hostId;
+  final String deviceId;
+  final int localBootEpoch;
+  int? _remoteBootEpoch;
+  bool _closed = false;
+  bool _exchangeInFlight = false;
+
+  Future<DirectSyncBatch> readInitialBatch() {
+    _ensureOpen();
+    return _readBatch();
+  }
+
+  Future<DirectSyncBatch> acknowledgeAndPoll({
+    required int sequence,
+    required int hostBootEpoch,
+  }) async {
+    _ensureOpen();
+    if (_exchangeInFlight || sequence < 0 || hostBootEpoch <= 0) {
+      throw const DirectTransportProtocolException(
+        'sync acknowledgement context is invalid',
+      );
+    }
+    if (_remoteBootEpoch != hostBootEpoch) {
+      throw const DirectTransportProtocolException(
+        'sync acknowledgement boot epoch changed',
+      );
+    }
+    _exchangeInFlight = true;
+    try {
+      final frameSequence = _cipher.nextSendSequence;
+      final acknowledgement = wire.MuxportEnvelope(
+        header: wire.EnvelopeHeader(
+          protocolVersion: directTransportProtocolVersion,
+          senderId: deviceId,
+          recipientId: hostId,
+          bootEpoch: Int64(localBootEpoch),
+          sequence: Int64(frameSequence),
+          timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+        ),
+        ack: wire.Ack(
+          sequenceAcknowledged: Int64(sequence),
+          bootEpoch: Int64(hostBootEpoch),
+        ),
+      );
+      final encrypted = await _cipher.encrypt(acknowledgement.writeToBuffer());
+      await _writeRecord(
+        _socket,
+        encrypted.encode(),
+        maximumBytes: _maximumEncryptedRecordBytes,
+      );
+      return await _readBatch();
+    } finally {
+      _exchangeInFlight = false;
+    }
+  }
+
+  Future<DirectSyncBatch> _readBatch() async {
+    wire.HostSnapshot? snapshot;
+    final events = <JournaledSyncEvent>[];
+    while (true) {
+      final record = await _reader
+          .readRecord(_maximumEncryptedRecordBytes)
+          .timeout(_handshakeTimeout);
+      final frame = DirectEncryptedFrame.decode(record);
+      final envelope = wire.MuxportEnvelope.fromBuffer(
+        await _cipher.decrypt(frame),
+      );
+      _validateEnvelope(frame.sequence, envelope);
+      if (envelope.hasSnapshot()) {
+        if (snapshot != null || events.isNotEmpty) {
+          throw const DirectTransportProtocolException(
+            'sync batch contains an out-of-order snapshot',
+          );
+        }
+        if (envelope.snapshot.hostId != hostId) {
+          throw const DirectTransportProtocolException(
+            'sync snapshot belongs to a different host',
+          );
+        }
+        snapshot = envelope.snapshot;
+        continue;
+      }
+      if (envelope.hasEvent()) {
+        final journalSequence = int.tryParse(envelope.header.idempotencyKey);
+        if (journalSequence == null ||
+            journalSequence <= 0 ||
+            (events.isNotEmpty &&
+                journalSequence != events.last.sequence + 1) ||
+            (events.isEmpty &&
+                snapshot != null &&
+                journalSequence != snapshot.snapshotSequence.toInt() + 1)) {
+          throw const DirectTransportProtocolException(
+            'sync event journal sequence is invalid',
+          );
+        }
+        events.add(
+          JournaledSyncEvent(sequence: journalSequence, event: envelope.event),
+        );
+        continue;
+      }
+      if (!envelope.hasAck()) {
+        throw const DirectTransportProtocolException(
+          'sync batch contains an unexpected payload',
+        );
+      }
+      final boundary = envelope.ack.sequenceAcknowledged.toInt();
+      final hostBootEpoch = envelope.ack.bootEpoch.toInt();
+      final minimumBoundary = events.isNotEmpty
+          ? events.last.sequence
+          : snapshot?.snapshotSequence.toInt() ?? 0;
+      if (hostBootEpoch != _remoteBootEpoch || boundary < minimumBoundary) {
+        throw const DirectTransportProtocolException(
+          'sync boundary is inconsistent with the delivered batch',
+        );
+      }
+      return DirectSyncBatch(
+        snapshot: snapshot,
+        events: List.unmodifiable(events),
+        boundarySequence: boundary,
+        hostBootEpoch: hostBootEpoch,
+      );
+    }
+  }
+
+  void _validateEnvelope(int frameSequence, wire.MuxportEnvelope envelope) {
+    if (!envelope.hasHeader()) {
+      throw const DirectTransportProtocolException(
+        'sync envelope has no authenticated header',
+      );
+    }
+    final header = envelope.header;
+    final bootEpoch = header.bootEpoch.toInt();
+    if (header.protocolVersion != directTransportProtocolVersion ||
+        header.senderId != hostId ||
+        header.recipientId != deviceId ||
+        header.sequence.toInt() != frameSequence ||
+        bootEpoch <= 0) {
+      throw const DirectTransportProtocolException(
+        'sync envelope authentication context is invalid',
+      );
+    }
+    final existingEpoch = _remoteBootEpoch;
+    if (existingEpoch != null && existingEpoch != bootEpoch) {
+      throw const DirectTransportProtocolException(
+        'connector boot epoch changed inside the sync session',
+      );
+    }
+    _remoteBootEpoch ??= bootEpoch;
+  }
+
+  Future<void> close() async {
+    if (_closed) {
+      return;
+    }
+    _closed = true;
+    _cipher.destroy();
+    await _reader.cancel();
+    try {
+      await _socket.close();
+    } finally {
+      _socket.destroy();
+    }
+  }
+
+  void _ensureOpen() {
+    if (_closed) {
+      throw StateError('direct sync session is closed');
+    }
+  }
+}
+
 class AuthenticatedDirectConnection {
   AuthenticatedDirectConnection._({
     required Socket socket,

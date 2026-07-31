@@ -246,6 +246,13 @@ impl EventJournal {
         self.current_sequence
     }
 
+    /// Refreshes the high-water mark when another WAL connection is the
+    /// journal writer. Sync transports use this before serving each poll.
+    pub fn refresh_current_sequence(&mut self) -> Result<u64, JournalError> {
+        self.load_max_sequence()?;
+        Ok(self.current_sequence)
+    }
+
     pub fn record_cursor_ack(&self, client_id: &str, sequence: u64) -> Result<(), JournalError> {
         if client_id.trim().is_empty() {
             return Err(JournalError::EmptyClientId);

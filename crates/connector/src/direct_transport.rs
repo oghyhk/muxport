@@ -6,6 +6,7 @@ use crate::{
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey,
 };
+use event_journal::{EventJournal, JournalError};
 use muxport_crypto::{
     authenticated_transcript, create_responder_hello, derive_session_keys,
     derive_shared_secret, pairing_connection_challenge,
@@ -13,11 +14,12 @@ use muxport_crypto::{
     InitiatorHello, KeyPair, ResponderHello, SessionCipher, SessionRole,
     HANDSHAKE_PROTOCOL_VERSION,
 };
-use muxport_protocol::muxport_envelope;
+use muxport_protocol::{muxport_envelope, Ack};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -62,6 +64,14 @@ pub enum DirectTransportError {
     PairingLockUnavailable,
     #[error("pairing request or confirmation is invalid")]
     InvalidPairingRequest,
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+    #[error("sync transport has no configured event journal")]
+    SyncUnavailable,
+    #[error("sync transport received an invalid acknowledgement")]
+    InvalidSyncAcknowledgement,
+    #[error("sync recovery requires a persisted host snapshot")]
+    MissingSyncSnapshot,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -194,6 +204,16 @@ pub struct PairingPhoneAcknowledgement {
     pub awaiting_host_confirmation: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncHandshakeRequest {
+    pub kind: String,
+    pub protocol_version: u32,
+    pub after_sequence: u64,
+    pub known_boot_epoch: u64,
+    pub initiator: InitiatorHello,
+}
+
 #[derive(Clone)]
 pub struct DirectTransportService {
     host_id: String,
@@ -202,6 +222,7 @@ pub struct DirectTransportService {
     registry: Arc<DeviceRegistry>,
     pairing: Option<Arc<Mutex<PairingCoordinator>>>,
     command_router: Arc<CommandRouter>,
+    journal_path: Option<PathBuf>,
     max_connections: usize,
 }
 
@@ -224,8 +245,17 @@ impl DirectTransportService {
             registry,
             pairing: None,
             command_router,
+            journal_path: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
         })
+    }
+
+    pub fn with_event_journal(
+        mut self,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        self.journal_path = Some(path.into());
+        self
     }
 
     pub fn new_with_pairing(
@@ -341,8 +371,38 @@ impl DirectTransportService {
                 )
                 .await;
         }
-        let initiator: InitiatorHello =
-            serde_json::from_slice(&initiator_bytes)?;
+        let parsed = serde_json::from_slice::<serde_json::Value>(
+            &initiator_bytes,
+        )?;
+        let (initiator, sync_cursor) =
+            if parsed.get("kind").and_then(serde_json::Value::as_str)
+                == Some("sync")
+            {
+                let request: SyncHandshakeRequest =
+                    serde_json::from_value(parsed)?;
+                if request.kind != "sync"
+                    || request.protocol_version
+                        != HANDSHAKE_PROTOCOL_VERSION
+                {
+                    return Err(
+                        DirectTransportError::InvalidSyncAcknowledgement,
+                    );
+                }
+                (
+                    request.initiator,
+                    Some((
+                        request.after_sequence,
+                        request.known_boot_epoch,
+                    )),
+                )
+            } else {
+                (
+                    serde_json::from_slice::<InitiatorHello>(
+                        &initiator_bytes,
+                    )?,
+                    None,
+                )
+            };
         let verified = if let Some(pairing) = &self.pairing {
             let coordinator = pairing
                 .lock()
@@ -394,6 +454,19 @@ impl DirectTransportService {
         )?;
 
         handshake_write(&mut stream, &serde_json::to_vec(&responder)?).await?;
+
+        if let Some((after_sequence, known_boot_epoch)) = sync_cursor {
+            return self
+                .handle_sync_connection(
+                    &mut stream,
+                    &mut shutdown,
+                    session,
+                    verified.device_id(),
+                    after_sequence,
+                    known_boot_epoch,
+                )
+                .await;
+        }
 
         loop {
             let encoded = tokio::select! {
@@ -521,6 +594,167 @@ impl DirectTransportService {
         write_record(stream, &encrypted_ack.encode_wire()?).await?;
         Ok(())
     }
+
+    async fn handle_sync_connection(
+        &self,
+        stream: &mut TcpStream,
+        shutdown: &mut watch::Receiver<bool>,
+        mut session: SecureEnvelopeSession,
+        device_id: &str,
+        after_sequence: u64,
+        known_boot_epoch: u64,
+    ) -> Result<(), DirectTransportError> {
+        let journal_path = self
+            .journal_path
+            .as_ref()
+            .ok_or(DirectTransportError::SyncUnavailable)?;
+        let mut journal =
+            EventJournal::open_file(journal_path, self.boot_epoch)?;
+        self.send_sync_batch(
+            stream,
+            &mut session,
+            &mut journal,
+            after_sequence,
+            known_boot_epoch != self.boot_epoch,
+        )
+        .await?;
+
+        loop {
+            let encoded = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                record = read_record(stream, MAX_ENCRYPTED_RECORD_BYTES) => {
+                    match record {
+                        Ok(record) => record,
+                        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            };
+            let frame = EncryptedFrame::decode_wire(
+                &encoded,
+                DEFAULT_MAX_PLAINTEXT_BYTES + 16,
+            )?;
+            let envelope = session.decrypt_envelope(&frame)?;
+            let Some(muxport_envelope::Payload::Ack(ack)) =
+                envelope.payload
+            else {
+                return Err(
+                    DirectTransportError::InvalidSyncAcknowledgement,
+                );
+            };
+            journal.refresh_current_sequence()?;
+            if ack.boot_epoch != self.boot_epoch
+                || ack.sequence_acknowledged
+                    > journal.current_sequence()
+            {
+                return Err(
+                    DirectTransportError::InvalidSyncAcknowledgement,
+                );
+            }
+            journal.record_cursor_ack(
+                device_id,
+                ack.sequence_acknowledged,
+            )?;
+            self.send_sync_batch(
+                stream,
+                &mut session,
+                &mut journal,
+                ack.sequence_acknowledged,
+                false,
+            )
+            .await?;
+        }
+    }
+
+    async fn send_sync_batch(
+        &self,
+        stream: &mut TcpStream,
+        session: &mut SecureEnvelopeSession,
+        journal: &mut EventJournal,
+        requested_after_sequence: u64,
+        force_snapshot: bool,
+    ) -> Result<u64, DirectTransportError> {
+        journal.refresh_current_sequence()?;
+        let current = journal.current_sequence();
+        let requires_snapshot = if force_snapshot
+            || requested_after_sequence == 0
+            || requested_after_sequence > current
+        {
+            true
+        } else {
+            match journal.get_events_after(requested_after_sequence, 1) {
+                Ok(_) => false,
+                Err(JournalError::GapDetected { .. })
+                | Err(JournalError::CursorBeyondCurrent { .. }) => true,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let mut cursor = requested_after_sequence;
+        if requires_snapshot {
+            let snapshot = journal
+                .latest_snapshot()?
+                .ok_or(DirectTransportError::MissingSyncSnapshot)?;
+            cursor = snapshot.snapshot_sequence;
+            self.write_secure_payload(
+                stream,
+                session,
+                muxport_envelope::Payload::Snapshot(snapshot),
+                "",
+            )
+            .await?;
+        }
+
+        loop {
+            journal.refresh_current_sequence()?;
+            let events = journal.get_events_after(cursor, 128)?;
+            if events.is_empty() {
+                break;
+            }
+            for (sequence, event) in events {
+                self.write_secure_payload(
+                    stream,
+                    session,
+                    muxport_envelope::Payload::Event(event),
+                    &sequence.to_string(),
+                )
+                .await?;
+                cursor = sequence;
+            }
+        }
+
+        journal.refresh_current_sequence()?;
+        let boundary = journal.current_sequence();
+        self.write_secure_payload(
+            stream,
+            session,
+            muxport_envelope::Payload::Ack(Ack {
+                sequence_acknowledged: boundary,
+                boot_epoch: self.boot_epoch,
+            }),
+            "",
+        )
+        .await?;
+        Ok(boundary)
+    }
+
+    async fn write_secure_payload(
+        &self,
+        stream: &mut TcpStream,
+        session: &mut SecureEnvelopeSession,
+        payload: muxport_envelope::Payload,
+        cursor_metadata: &str,
+    ) -> Result<(), DirectTransportError> {
+        let frame = session.encrypt_payload(payload, cursor_metadata)?;
+        write_record(stream, &frame.encode_wire()?).await?;
+        Ok(())
+    }
 }
 
 async fn handshake_read(
@@ -630,7 +864,8 @@ mod tests {
         PairedDeviceRecord, ResponderHello,
     };
     use muxport_protocol::{
-        command, Command, ProbeHostCmd, RemoteOpState,
+        command, Command, ConnectorState, Event, HostSnapshot,
+        ProbeHostCmd, RemoteOpState,
     };
     use rand::rngs::OsRng;
     use std::collections::HashMap;
@@ -669,6 +904,22 @@ mod tests {
             .unwrap(),
             host_identity,
         )
+    }
+
+    async fn read_secure_envelope(
+        stream: &mut TcpStream,
+        session: &mut SecureEnvelopeSession,
+    ) -> muxport_protocol::MuxportEnvelope {
+        let wire =
+            read_record(stream, MAX_ENCRYPTED_RECORD_BYTES)
+                .await
+                .unwrap();
+        let frame = EncryptedFrame::decode_wire(
+            &wire,
+            DEFAULT_MAX_PLAINTEXT_BYTES + 16,
+        )
+        .unwrap();
+        session.decrypt_envelope(&frame).unwrap()
     }
 
     #[tokio::test]
@@ -1010,6 +1261,197 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_connection_sends_snapshot_replay_and_records_ack() {
+        let journal_path = std::env::temp_dir().join(format!(
+            "muxport-sync-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        {
+            let mut journal =
+                EventJournal::open_file(&journal_path, 22).unwrap();
+            journal
+                .append_event(&Event {
+                    event_id: "event-1".into(),
+                    timestamp_ms: 1,
+                    inner: None,
+                })
+                .unwrap();
+            journal
+                .save_snapshot(&HostSnapshot {
+                    host_id: "host-1".into(),
+                    hostname: "Test host".into(),
+                    connector_state: ConnectorState::Ready as i32,
+                    runtimes: Vec::new(),
+                    credential_profiles: Vec::new(),
+                    active_sessions: Vec::new(),
+                    snapshot_sequence: 1,
+                })
+                .unwrap();
+            journal
+                .append_event(&Event {
+                    event_id: "event-2".into(),
+                    timestamp_ms: 2,
+                    inner: None,
+                })
+                .unwrap();
+        }
+
+        let phone_identity = SigningKey::generate(&mut OsRng);
+        let (service, host_identity) = service(&phone_identity);
+        let service = service.with_event_journal(&journal_path);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(service.serve(listener, shutdown_rx));
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let challenge: ServerChallenge =
+            serde_json::from_slice(&handshake_read(&mut stream).await.unwrap())
+                .unwrap();
+        let phone_ephemeral = KeyPair::generate();
+        let initiator = create_initiator_hello(
+            &phone_identity,
+            "phone-1",
+            "host-1",
+            &challenge.challenge,
+            &phone_ephemeral.public,
+        )
+        .unwrap();
+        let request = SyncHandshakeRequest {
+            kind: "sync".into(),
+            protocol_version: HANDSHAKE_PROTOCOL_VERSION,
+            after_sequence: 0,
+            known_boot_epoch: 0,
+            initiator: initiator.clone(),
+        };
+        handshake_write(
+            &mut stream,
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .await
+        .unwrap();
+        let responder: ResponderHello =
+            serde_json::from_slice(&handshake_read(&mut stream).await.unwrap())
+                .unwrap();
+        let responder_ephemeral = verify_responder_hello(
+            &responder,
+            &initiator,
+            "host-1",
+            &encode_hex(host_identity.verifying_key().as_bytes()),
+        )
+        .unwrap();
+        let transcript =
+            authenticated_transcript(&initiator, &responder).unwrap();
+        let shared_secret = derive_shared_secret(
+            phone_ephemeral.secret,
+            &responder_ephemeral,
+            &transcript,
+        )
+        .unwrap();
+        let keys = derive_session_keys(&shared_secret, &transcript).unwrap();
+        let cipher = SessionCipher::from_directional_keys(
+            &keys,
+            SessionRole::Initiator,
+        );
+        let mut phone_session = SecureEnvelopeSession::new(
+            cipher,
+            "phone-1",
+            "host-1",
+            11,
+            "host-1",
+            "phone-1",
+            &transcript,
+            DEFAULT_MAX_PLAINTEXT_BYTES,
+        )
+        .unwrap();
+
+        let snapshot = read_secure_envelope(
+            &mut stream,
+            &mut phone_session,
+        )
+        .await;
+        assert!(matches!(
+            snapshot.payload,
+            Some(muxport_envelope::Payload::Snapshot(ref value))
+                if value.snapshot_sequence == 1
+        ));
+        let replayed = read_secure_envelope(
+            &mut stream,
+            &mut phone_session,
+        )
+        .await;
+        assert_eq!(
+            replayed
+                .header
+                .as_ref()
+                .unwrap()
+                .idempotency_key,
+            "2"
+        );
+        assert!(matches!(
+            replayed.payload,
+            Some(muxport_envelope::Payload::Event(ref value))
+                if value.event_id == "event-2"
+        ));
+        let boundary = read_secure_envelope(
+            &mut stream,
+            &mut phone_session,
+        )
+        .await;
+        assert!(matches!(
+            boundary.payload,
+            Some(muxport_envelope::Payload::Ack(ref value))
+                if value.sequence_acknowledged == 2
+                    && value.boot_epoch == 22
+        ));
+
+        let acknowledgement = phone_session
+            .encrypt_payload(
+                muxport_envelope::Payload::Ack(Ack {
+                    sequence_acknowledged: 2,
+                    boot_epoch: 22,
+                }),
+                "",
+            )
+            .unwrap();
+        write_record(
+            &mut stream,
+            &acknowledgement.encode_wire().unwrap(),
+        )
+        .await
+        .unwrap();
+        let empty_boundary = read_secure_envelope(
+            &mut stream,
+            &mut phone_session,
+        )
+        .await;
+        assert!(matches!(
+            empty_boundary.payload,
+            Some(muxport_envelope::Payload::Ack(ref value))
+                if value.sequence_acknowledged == 2
+        ));
+
+        drop(stream);
+        shutdown_tx.send(true).unwrap();
+        server.await.unwrap().unwrap();
+        let journal =
+            EventJournal::open_file(&journal_path, 23).unwrap();
+        assert_eq!(
+            journal.get_cursor_ack("phone-1").unwrap(),
+            Some(2)
+        );
+        drop(journal);
+        let _ = std::fs::remove_file(&journal_path);
+        let _ = std::fs::remove_file(
+            journal_path.with_extension("db-wal"),
+        );
+        let _ = std::fs::remove_file(
+            journal_path.with_extension("db-shm"),
+        );
     }
 
     #[tokio::test]
