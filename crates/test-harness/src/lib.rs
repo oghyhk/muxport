@@ -1,7 +1,8 @@
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
-    CompatibilityDiagnostic, CredentialMaterial, CredentialValidation, EventStream, ProjectInfo,
-    SessionSummary, UsageBucket, UsageSnapshot, UsageWindow, ADAPTER_CAPABILITY_VERSION,
+    CompatibilityDiagnostic, CredentialMaterial, CredentialPreparation, CredentialValidation,
+    EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot, UsageWindow,
+    ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -138,6 +139,17 @@ impl AgentAdapter for DeterministicFakeAdapter {
         _reason: &str,
     ) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    async fn prepare_credential(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialPreparation, AdapterError> {
+        Ok(CredentialPreparation {
+            profile_id: profile_id.to_owned(),
+            provider_id: credential.provider_id().to_owned(),
+        })
     }
 
     async fn validate_credential(

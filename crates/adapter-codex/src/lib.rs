@@ -4,9 +4,9 @@ mod jsonrpc;
 pub use managed::{ManagedCodexError, ManagedCodexProfile};
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
-    CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialValidation,
-    EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot, UsageWindow,
-    ADAPTER_CAPABILITY_VERSION,
+    CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialPreparation,
+    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot,
+    UsageWindow, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use jsonrpc::{Incoming, JsonRpcPeer, ProcessConfig};
@@ -827,6 +827,30 @@ impl AgentAdapter for CodexAdapter {
         Ok(())
     }
 
+    async fn prepare_credential(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialPreparation, AdapterError> {
+        self.require_managed_profile("credential preparation")?;
+        if profile_id != self.profile_id {
+            return Err(AdapterError::InvalidInput(format!(
+                "credential preparation profile {profile_id:?} does not match adapter profile {:?}",
+                self.profile_id
+            )));
+        }
+        if credential.provider_id() != "openai" || credential.kind() != CredentialKind::ApiKey {
+            return Err(AdapterError::CredentialInvalid(
+                "Codex managed profiles accept only OpenAI API keys".into(),
+            ));
+        }
+        credential.secret_utf8()?;
+        Ok(CredentialPreparation {
+            profile_id: profile_id.to_owned(),
+            provider_id: credential.provider_id().to_owned(),
+        })
+    }
+
     async fn validate_credential(
         &self,
         credential: &CredentialMaterial,
@@ -855,13 +879,7 @@ impl AgentAdapter for CodexAdapter {
         profile_id: &str,
         credential: &CredentialMaterial,
     ) -> Result<(), AdapterError> {
-        self.require_managed_profile("credential activation")?;
-        if profile_id != self.profile_id {
-            return Err(AdapterError::InvalidInput(format!(
-                "credential activation profile {profile_id:?} does not match adapter profile {:?}",
-                self.profile_id
-            )));
-        }
+        self.prepare_credential(profile_id, credential).await?;
         self.validate_credential(credential).await?;
         let response = self
             .ensure_client()

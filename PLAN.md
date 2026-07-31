@@ -137,7 +137,7 @@ Define a versioned `AgentAdapter` interface with:
 - [x] `start_session()`, `send_input()`, `steer()`, and `interrupt()`.
 - [x] `respond_to_approval()` with source correlation identifiers.
 - [x] `read_account_state()` and `read_usage()` when supported.
-- [ ] `prepare_credential()`, `validate_credential()`, and `activate_credential()`.
+- [x] `prepare_credential()`, `validate_credential()`, and `activate_credential()`.
 - [x] `shutdown_gracefully()` for connector-managed runtime instances.
 - [x] A declared capability set so unsupported controls are hidden rather than failing late.
 

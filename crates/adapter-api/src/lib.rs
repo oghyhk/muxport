@@ -43,7 +43,7 @@ pub struct CapabilitySet {
     pub can_read_usage: bool,
 }
 
-pub const ADAPTER_CAPABILITY_VERSION: u32 = 1;
+pub const ADAPTER_CAPABILITY_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -175,6 +175,18 @@ pub struct CredentialValidation {
     pub account_fingerprint: Option<String>,
 }
 
+/// Non-secret confirmation that an adapter can accept a credential for one
+/// isolated runtime profile.
+///
+/// Preparation must not mutate runtime authentication. The connector uses it
+/// as an explicit fail-closed boundary before provider validation and
+/// activation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialPreparation {
+    pub profile_id: String,
+    pub provider_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountState {
     pub provider_id: String,
@@ -228,6 +240,11 @@ pub trait AgentAdapter: Send + Sync {
         approved: bool,
         reason: &str,
     ) -> Result<(), AdapterError>;
+    async fn prepare_credential(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialPreparation, AdapterError>;
     async fn validate_credential(
         &self,
         credential: &CredentialMaterial,

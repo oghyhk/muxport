@@ -4,8 +4,9 @@ pub use managed::{ManagedOpenCodeError, ManagedOpenCodeProfile};
 
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
-    CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialValidation,
-    EventStream, ProjectInfo, SessionSummary, UsageSnapshot, ADAPTER_CAPABILITY_VERSION,
+    CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialPreparation,
+    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageSnapshot,
+    ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -1099,6 +1100,31 @@ impl AgentAdapter for OpenCodeAdapter {
         Ok(())
     }
 
+    async fn prepare_credential(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialPreparation, AdapterError> {
+        let bound_profile = self.managed_profile_id.as_deref().ok_or_else(|| {
+            Self::unsupported("credential preparation for an externally managed runtime")
+        })?;
+        if profile_id != bound_profile {
+            return Err(AdapterError::InvalidInput(format!(
+                "managed OpenCode runtime is bound to profile {bound_profile}"
+            )));
+        }
+        if credential.kind() != CredentialKind::ApiKey {
+            return Err(AdapterError::CredentialInvalid(
+                "managed OpenCode profiles accept only API keys".into(),
+            ));
+        }
+        credential.secret_utf8()?;
+        Ok(CredentialPreparation {
+            profile_id: profile_id.to_owned(),
+            provider_id: credential.provider_id().to_owned(),
+        })
+    }
+
     async fn validate_credential(
         &self,
         credential: &CredentialMaterial,
@@ -1140,14 +1166,7 @@ impl AgentAdapter for OpenCodeAdapter {
         profile_id: &str,
         credential: &CredentialMaterial,
     ) -> Result<(), AdapterError> {
-        let bound_profile = self.managed_profile_id.as_deref().ok_or_else(|| {
-            Self::unsupported("credential activation for an externally managed runtime")
-        })?;
-        if profile_id != bound_profile {
-            return Err(AdapterError::InvalidInput(format!(
-                "managed OpenCode runtime is bound to profile {bound_profile}"
-            )));
-        }
+        self.prepare_credential(profile_id, credential).await?;
         self.validate_credential(credential).await?;
         let secret = credential.secret_utf8()?;
         let request = self

@@ -41,6 +41,11 @@ pub enum CredentialSwitchError {
 
 #[async_trait::async_trait]
 pub trait CredentialRuntime: Send + Sync {
+    async fn prepare(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<(), AdapterError>;
     async fn validate(
         &self,
         credential: &CredentialMaterial,
@@ -58,6 +63,15 @@ impl<T> CredentialRuntime for T
 where
     T: AgentAdapter + Send + Sync + ?Sized,
 {
+    async fn prepare(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<(), AdapterError> {
+        self.prepare_credential(profile_id, credential).await?;
+        Ok(())
+    }
+
     async fn validate(
         &self,
         credential: &CredentialMaterial,
@@ -110,6 +124,7 @@ pub async fn activate_staged_credential<R: CredentialRuntime + ?Sized>(
     let staged =
         CredentialMaterial::api_key(runtime_provider_id, staged_secret.expose_secret())?;
 
+    runtime.prepare(profile_id, &staged).await?;
     let validation = runtime.validate(&staged).await?;
     if validation.provider_id != runtime_provider_id
         || !matches!(
@@ -211,6 +226,7 @@ mod tests {
 
     struct FakeCredentialRuntime {
         activations: Mutex<Vec<String>>,
+        fail_prepare: AtomicBool,
         fail_candidate: AtomicBool,
         fail_rollback: AtomicBool,
         disconnected_readback: AtomicBool,
@@ -221,6 +237,7 @@ mod tests {
         fn healthy() -> Self {
             Self {
                 activations: Mutex::new(Vec::new()),
+                fail_prepare: AtomicBool::new(false),
                 fail_candidate: AtomicBool::new(false),
                 fail_rollback: AtomicBool::new(false),
                 disconnected_readback: AtomicBool::new(false),
@@ -231,6 +248,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CredentialRuntime for FakeCredentialRuntime {
+        async fn prepare(
+            &self,
+            _profile_id: &str,
+            _credential: &CredentialMaterial,
+        ) -> Result<(), AdapterError> {
+            if self.fail_prepare.load(Ordering::SeqCst) {
+                return Err(AdapterError::CredentialInvalid(
+                    "injected preparation rejection".into(),
+                ));
+            }
+            Ok(())
+        }
+
         async fn validate(
             &self,
             credential: &CredentialMaterial,
@@ -342,6 +372,34 @@ mod tests {
         let summary = vault.get_profile("profile-a").unwrap();
         assert_eq!(summary.status, CredentialStatus::Staged);
         assert!(summary.has_staged_credential);
+        assert_eq!(
+            vault
+                .decrypt_active_secret("profile-a")
+                .unwrap()
+                .expose_secret(),
+            b"old-key"
+        );
+        drop(vault);
+        fs_cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn failed_preparation_never_mutates_runtime_or_vault() {
+        let (mut vault, path) = test_vault("prepare-failed");
+        let runtime = FakeCredentialRuntime::healthy();
+        runtime.fail_prepare.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            activate_staged_credential(&runtime, &mut vault, "profile-a", "opencode").await,
+            Err(CredentialSwitchError::Adapter(
+                AdapterError::CredentialInvalid(_)
+            ))
+        ));
+        assert!(runtime.activations.lock().unwrap().is_empty());
+        assert_eq!(
+            vault.get_profile("profile-a").unwrap().status,
+            CredentialStatus::Staged
+        );
         assert_eq!(
             vault
                 .decrypt_active_secret("profile-a")
