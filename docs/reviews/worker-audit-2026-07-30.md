@@ -550,15 +550,48 @@ also showed OpenCode Go is not advertised by `/provider/auth` in 1.18.10, so
 Go-specific activation remains fail-closed pending a supported discovery and
 validation path.
 
+## Managed Codex accounts and runtime recovery
+
+Codex managed profiles now use separate `CODEX_HOME`, `CODEX_SQLITE_HOME`, and
+OS home roots with a scrubbed environment and Codex's supported file
+credential backend. App Server remains the only writer of auth and SQLite
+state. The adapter implements stable account read, API-key activation,
+ChatGPT browser/device-code login start, cancellation, logout, account update,
+login completion, and rate-limit APIs. The local device-code enrollment
+command waits for completion and confirms the resulting account without
+handling OAuth tokens.
+
+The implemented account JSON Schemas generated from official Codex 0.146.0 are
+checked in as contract fixtures. A live disposable fixture started the same
+signed-out isolated profile twice and completed initialization and
+`account/read` both times. It also exposed and corrected a Bedrock account
+shape difference between that release and newer documentation.
+
+The authenticated command router can now activate an already-staged runtime
+credential through the vault transaction; the old encrypted secret remains
+active until adapter readback succeeds. Project assignment, rotation pools,
+and remote secret provisioning remain disabled. Secret provisioning is not
+placed in the ordinary SHA-256-fingerprinted command ledger because that would
+create an avoidable durable secret verifier.
+
+Connector-managed OpenCode children restart with the same executable, project,
+port, password, and profile roots. OpenCode latches after five rapid restarts,
+and Codex latches after six App Server starts in sixty seconds; both require an
+operator connector restart instead of spawning forever.
+
 Automated evidence for these slices includes:
 
 ```text
 cargo test --workspace --locked
-115 tests passed across the Rust workspace; 0 failed
+124 tests passed across the Rust workspace; 0 failed; 2 live fixtures ignored
 
 MUXPORT_TEST_OPENCODE_PATH=... cargo test -p adapter-opencode \
   live_opencode_profile_restarts_with_the_same_isolated_state -- --ignored
 1 live OpenCode 1.18.10 fixture passed; 0 failed
+
+MUXPORT_TEST_CODEX_PATH=... cargo test -p adapter-codex \
+  live_codex_app_server_restarts_in_the_same_isolated_profile -- --ignored
+1 live Codex 0.146.0 fixture passed; 0 failed
 
 flutter analyze
 No issues found
@@ -573,7 +606,7 @@ not claimed. Flutter verification ran on Windows. No physical iOS/Android,
 multi-host, hostile-network, external cryptographic, or penetration evidence
 is claimed.
 
-`PLAN.md` now has 69 verified checks and 367 incomplete checks (436 total).
+`PLAN.md` now has 80 verified checks and 356 incomplete checks (436 total).
 This is intentional: implementation primitives are checked only where the
 current automated evidence satisfies the item; phase exits, CI-only claims,
 physical device work, and external reviews remain unchecked.
@@ -583,16 +616,17 @@ physical device work, and external reviews remain unchecked.
 - Complete a supported OpenCode Go provider discovery and non-production key
   validation path; OpenCode 1.18.10 does not advertise Go in
   `/provider/auth`, so automatic Go rotation remains disabled.
-- Add Codex account/login/rate-limit compatibility fixtures and validated
-  isolated profiles; current credential mutation remains fail-closed.
+- Add mobile Codex account ceremonies and source-backed account/rate-limit
+  synchronization; local isolated enrollment and adapter APIs are implemented.
 - Add camera QR scanning, host-side tray/control UI, device revocation, and
   reviewed headless identity/vault unlock and recovery.
 - Replace the five-second direct polling slice with lifecycle-aware background
   scheduling and, where justified, an opaque relay/push wake-up path.
 - Wire source-backed session, approval, account, assignment, rotation, and
   operation screens; current non-host screens remain disabled previews.
-- Complete supervised managed-runtime recovery, desired-state reconciliation,
-  installation packaging, audit/diagnostic export, backup/restore, and updates.
+- Complete surviving-child adoption, multi-instance desired-state
+  reconciliation, installation packaging, audit/diagnostic export,
+  backup/restore, and updates.
 - Add compatibility, chaos, disk-failure, physical-device, accessibility,
   fuzzing, dependency/secret audit, external security, signing, and beta
   evidence required by `PLAN.md`.
