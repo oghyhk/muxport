@@ -579,11 +579,19 @@ port, password, and profile roots. OpenCode latches after five rapid restarts,
 and Codex latches after six App Server starts in sixty seconds; both require an
 operator connector restart instead of spawning forever.
 
+The host mirror now includes only non-secret vault profile summaries. Flutter's
+Sessions, Approvals, and Accounts tabs render authenticated snapshot/replay
+state instead of demo records. Cached approval events retain routing IDs and
+action type but omit command bodies and descriptions. A paired synchronized
+phone can persist one pending approval operation and dispatch an encrypted
+idempotent decision; later taps stay disabled, and ambiguous transport results
+remain explicitly reconciliation-required.
+
 Automated evidence for these slices includes:
 
 ```text
 cargo test --workspace --locked
-124 tests passed across the Rust workspace; 0 failed; 2 live fixtures ignored
+125 tests passed across the Rust workspace; 0 failed; 2 live fixtures ignored
 
 MUXPORT_TEST_OPENCODE_PATH=... cargo test -p adapter-opencode \
   live_opencode_profile_restarts_with_the_same_isolated_state -- --ignored
@@ -597,7 +605,7 @@ flutter analyze
 No issues found
 
 flutter test
-40 tests passed; 0 failed
+42 tests passed; 0 failed
 ```
 
 The Rust count is the sum of the per-binary/library test output from the
@@ -606,7 +614,7 @@ not claimed. Flutter verification ran on Windows. No physical iOS/Android,
 multi-host, hostile-network, external cryptographic, or penetration evidence
 is claimed.
 
-`PLAN.md` now has 80 verified checks and 356 incomplete checks (436 total).
+`PLAN.md` now has 83 verified checks and 353 incomplete checks (436 total).
 This is intentional: implementation primitives are checked only where the
 current automated evidence satisfies the item; phase exits, CI-only claims,
 physical device work, and external reviews remain unchecked.
@@ -622,8 +630,9 @@ physical device work, and external reviews remain unchecked.
   reviewed headless identity/vault unlock and recovery.
 - Replace the five-second direct polling slice with lifecycle-aware background
   scheduling and, where justified, an opaque relay/push wake-up path.
-- Wire source-backed session, approval, account, assignment, rotation, and
-  operation screens; current non-host screens remain disabled previews.
+- Add encrypted message-content storage/timeline, account ceremonies,
+  assignment editing, rotation operations, and source-detail refresh before
+  approvals; read-only projections and approval decisions are now wired.
 - Complete surviving-child adoption, multi-instance desired-state
   reconciliation, installation packaging, audit/diagnostic export,
   backup/restore, and updates.
