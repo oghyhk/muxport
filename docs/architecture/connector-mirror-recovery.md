@@ -12,9 +12,19 @@ erase, or reorder state from the other. The projection is derived from
 authoritative vendor snapshots plus normalized live events; it is not a
 replacement for either vendor's own state.
 
-The direct/relay mobile transport is not implemented yet. Until it is
-authenticated and encrypted, the daemon deliberately reports the connector as
-`degraded` even when every local source mirror is healthy.
+When the host vault is unlocked, its non-secret credential summaries are also
+projected into `HostSnapshot`: profile ID, display label, provider, account
+fingerprint, validation status, and validation time. Ciphertext, secret
+handles, rollback slots, and vendor auth state never enter the snapshot.
+Flutter renders synchronized session metadata, unresolved approval IDs/types,
+credential summaries, and runtime-level active assignments from this
+projection. Message deltas and approval command bodies are not copied into the
+current plaintext mobile cache.
+
+The authenticated encrypted direct transport serves snapshots and replay.
+Relay delivery is not implemented. Without an authenticated transport the
+daemon deliberately reports the connector as `degraded` even when every local
+source mirror is healthy.
 
 ## Startup sequence
 
