@@ -39,6 +39,9 @@ header and are never included in adapter events or logs.
   are not inherited.
 - Managed servers always launch with `--hostname 127.0.0.1`, a fixed selected
   port, and `OPENCODE_SERVER_PASSWORD`.
+- The connector monitor owns the managed child. If it observes an exit, the
+  next bounded reconciliation attempt launches the same executable, project,
+  port, password, and isolated profile roots before probing and snapshotting.
 - Local enrollment runs `opencode auth login --provider ...` inside the
   isolated environment. OpenCode, not Muxport, writes vendor auth state.
 - Externally adopted servers remain fail-closed for every credential mutation.
@@ -50,6 +53,11 @@ route, reads provider state back, and only then commits the vault slot. Any
 failure after mutation begins reactivates the prior secret. If rollback also
 fails, the result is explicitly `RollbackFailed` and the vault remains staged
 for recovery.
+
+A deterministic child-exit fixture verifies same-profile restart. Surviving
+child adoption after the connector itself is killed, graceful restart policy,
+provider/account validation before reopening mutations, and a hard crash-loop
+cutoff remain incomplete.
 
 ## Restart and reconciliation rules
 

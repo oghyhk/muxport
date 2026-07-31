@@ -529,7 +529,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [ ] On health loss, mark subscription stale and stop accepting mutations.
 - [ ] If connector-managed, request graceful shutdown only when necessary; otherwise preserve the process.
-- [ ] Restart with the same isolated profile and project configuration.
+- [x] Restart with the same isolated profile and project configuration.
 - [ ] Wait for health and provider/account validation.
 - [ ] List all sessions and compare source IDs, message counts, statuses, and active permissions to the last snapshot.
 - [ ] Emit synthetic reconciliation events for changes that occurred during downtime.
