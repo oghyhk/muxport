@@ -1004,6 +1004,9 @@ fn command_audit_action_target(command: &Command) -> (&'static str, String) {
         Some(command::Inner::ListRotationPools(_)) => {
             ("list_rotation_pools", "rotation_policies".into())
         }
+        Some(command::Inner::ListCommandAudit(_)) => {
+            ("list_command_audit", "command_audit".into())
+        }
         Some(command::Inner::UpsertRotationPool(_)) => {
             ("upsert_rotation_pool", "rotation_policy".into())
         }
