@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../state/app_bootstrap.dart';
 import '../state/mobile_sync_state.dart';
+import '../state/status_presentation.dart';
 
 class HostFleetScreen extends StatelessWidget {
   const HostFleetScreen({
@@ -155,7 +156,12 @@ class _HostCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final cursor = host.cursor;
     final pendingCount = host.operationIdsRequiringStatusQuery.length;
-    final statusColor = _statusColor(host.phase);
+    final syncStatus = hostSyncPresentation(host.phase);
+    final statusColor = _statusColor(syncStatus.tone);
+    final connectorStatus = connectorStatusPresentation(
+      host.snapshot['connectorState'],
+    );
+    final runtimes = host.snapshot['runtimes'] as List? ?? const [];
 
     return Card(
       child: Padding(
@@ -175,10 +181,7 @@ class _HostCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                _StatusChip(
-                  label: _statusLabel(host.phase),
-                  color: statusColor,
-                ),
+                _StatusChip(label: syncStatus.label, color: statusColor),
               ],
             ),
             const Divider(height: 24),
@@ -200,43 +203,106 @@ class _HostCard extends StatelessWidget {
                   : '$pendingCount operation(s) require reconciliation',
             ),
             const SizedBox(height: 12),
-            Text(
-              host.phase == HostSyncPhase.synchronized
-                  ? 'Host identity and cached state are verified. Command controls are not yet exposed on this screen.'
-                  : 'Remote controls remain disabled until host identity verification and replay or snapshot recovery completes.',
+            Text(syncStatus.explanation),
+            const Divider(height: 24),
+            _StatusDetail(
+              icon: Icons.hub_outlined,
+              title: 'Connector · ${connectorStatus.label}',
+              explanation: connectorStatus.explanation,
+              color: _statusColor(connectorStatus.tone),
             ),
+            if (runtimes.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              for (final rawRuntime in runtimes)
+                if (rawRuntime is Map) ...[
+                  Builder(
+                    builder: (context) {
+                      final runtime = Map<String, Object?>.from(rawRuntime);
+                      final status = runtimeStatusPresentation(
+                        runtime['state'],
+                      );
+                      final name =
+                          runtime['name'] is String &&
+                              (runtime['name']! as String).trim().isNotEmpty
+                          ? runtime['name']! as String
+                          : runtime['runtimeId']?.toString() ?? 'Runtime';
+                      return _StatusDetail(
+                        icon: Icons.terminal,
+                        title: '$name · ${status.label}',
+                        explanation: status.explanation,
+                        color: _statusColor(status.tone),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                ],
+            ],
+            if (host.pendingOperations.isNotEmpty) ...[
+              const Divider(height: 24),
+              for (final operation in host.pendingOperations.values) ...[
+                Builder(
+                  builder: (context) {
+                    final status = operationStatusPresentation(operation.state);
+                    return _StatusDetail(
+                      icon: Icons.sync,
+                      title: '${operation.kind} · ${status.label}',
+                      explanation: status.explanation,
+                      color: _statusColor(status.tone),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+              ],
+            ],
           ],
         ),
       ),
     );
   }
 
-  static String _statusLabel(HostSyncPhase phase) {
-    return switch (phase) {
-      HostSyncPhase.pairingPending => 'Awaiting host confirmation',
-      HostSyncPhase.cachedStale => 'Cached • stale',
-      HostSyncPhase.reconnecting => 'Reconnecting',
-      HostSyncPhase.replaying => 'Replaying',
-      HostSyncPhase.snapshotRequired => 'Snapshot required',
-      HostSyncPhase.synchronized => 'Synchronized',
-      HostSyncPhase.offline => 'Offline',
-      HostSyncPhase.identityMismatch => 'Identity mismatch',
-      HostSyncPhase.protocolIncompatible => 'Upgrade required',
+  static Color _statusColor(StatusTone tone) {
+    return switch (tone) {
+      StatusTone.neutral => Colors.grey,
+      StatusTone.progress => Colors.blue,
+      StatusTone.healthy => Colors.green,
+      StatusTone.warning => Colors.orange,
+      StatusTone.danger => Colors.red,
     };
   }
+}
 
-  static Color _statusColor(HostSyncPhase phase) {
-    return switch (phase) {
-      HostSyncPhase.pairingPending => Colors.blue,
-      HostSyncPhase.synchronized => Colors.green,
-      HostSyncPhase.reconnecting ||
-      HostSyncPhase.replaying ||
-      HostSyncPhase.cachedStale => Colors.orange,
-      HostSyncPhase.snapshotRequired ||
-      HostSyncPhase.offline ||
-      HostSyncPhase.protocolIncompatible => Colors.amber,
-      HostSyncPhase.identityMismatch => Colors.red,
-    };
+class _StatusDetail extends StatelessWidget {
+  const _StatusDetail({
+    required this.icon,
+    required this.title,
+    required this.explanation,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String title;
+  final String explanation;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 18, color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text(explanation, style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }
 

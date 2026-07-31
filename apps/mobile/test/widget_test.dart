@@ -65,12 +65,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Cached development host'), findsOneWidget);
-    expect(find.text('Cached • stale'), findsOneWidget);
+    expect(find.text('Cached · stale'), findsOneWidget);
     expect(find.text('1 operation(s) require reconciliation'), findsOneWidget);
-    expect(
-      find.textContaining('Remote controls remain disabled'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('saved local state'), findsOneWidget);
   });
 
   testWidgets('renders multiple independently paired hosts', (tester) async {
@@ -135,10 +132,12 @@ void main() {
       protocolVersion: mobileProtocolVersion,
       phase: HostSyncPhase.synchronized,
       snapshot: const {
+        'connectorState': 4,
         'runtimes': [
           {
             'runtimeId': 'codex-managed-work',
             'name': 'Codex',
+            'state': 7,
             'activeCredentialProfileId': 'work-account',
           },
         ],
@@ -158,7 +157,7 @@ void main() {
             'displayName': 'Work account',
             'provider': 'openai',
             'accountFingerprint': 'fingerprint-1234567890',
-            'status': 1,
+            'status': 2,
             'lastValidatedAtMs': 10,
           },
         ],

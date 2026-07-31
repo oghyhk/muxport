@@ -112,8 +112,8 @@ List<String> _runtimeAssignments(HostSyncState host, String profileId) {
 
 String _credentialStatus(Object? raw) {
   return switch (raw) {
-    1 => 'Active',
-    2 => 'Staged',
+    1 => 'Staged',
+    2 => 'Active',
     3 => 'Cooling down',
     4 => 'Invalid',
     5 => 'Revoked',
