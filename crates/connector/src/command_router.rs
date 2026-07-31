@@ -87,6 +87,11 @@ impl CommandRouter {
                     Ok(None) => {
                         ledger.record_result(
                             idempotency_key.to_owned(),
+                            RemoteOpState::Persisted,
+                            String::new(),
+                        )?;
+                        ledger.record_result(
+                            idempotency_key.to_owned(),
                             RemoteOpState::Dispatched,
                             String::new(),
                         )?;
@@ -134,7 +139,20 @@ impl CommandRouter {
             return restore_stored_result(command, state, &stored_result);
         };
 
-        let result = match self.execute(command).await {
+        let execution = self.execute(command).await;
+        if matches!(
+            &execution,
+            Err(AdapterError::ConnectionLost)
+                | Err(AdapterError::ConnectionLostWithDetail(_))
+                | Err(AdapterError::OutcomeUnknown(_))
+        ) {
+            self.ledger.lock().await.record_result(
+                idempotency_key.to_owned(),
+                RemoteOpState::OutcomeUnknown,
+                String::new(),
+            )?;
+        }
+        let result = match execution {
             Ok(value) => command_result(
                 command,
                 RemoteOpState::Succeeded,
@@ -508,6 +526,23 @@ mod tests {
         }
     }
 
+    fn mark_dispatched(ledger: &mut CommandLedger, key: &str) {
+        ledger
+            .record_result(
+                key.to_owned(),
+                RemoteOpState::Persisted,
+                String::new(),
+            )
+            .unwrap();
+        ledger
+            .record_result(
+                key.to_owned(),
+                RemoteOpState::Dispatched,
+                String::new(),
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn duplicate_command_returns_persisted_result_without_redispatch() {
         let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
@@ -566,13 +601,7 @@ mod tests {
         interrupted_ledger
             .reserve_command("interrupted-operation", i64::MAX, "fingerprint")
             .unwrap();
-        interrupted_ledger
-            .record_result(
-                "interrupted-operation".into(),
-                RemoteOpState::Dispatched,
-                String::new(),
-            )
-            .unwrap();
+        mark_dispatched(&mut interrupted_ledger, "interrupted-operation");
         let restarted = router(adapter, interrupted_ledger);
         let interrupted = restarted
             .dispatch(
@@ -628,13 +657,7 @@ mod tests {
         ledger
             .reserve_command("crashed-key", command.deadline_ms, &command_fingerprint(&command))
             .unwrap();
-        ledger
-            .record_result(
-                "crashed-key".into(),
-                RemoteOpState::Dispatched,
-                String::new(),
-            )
-            .unwrap();
+        mark_dispatched(&mut ledger, "crashed-key");
         let router = router(Arc::clone(&adapter), ledger);
 
         let result = router.dispatch("crashed-key", &command).await.unwrap();

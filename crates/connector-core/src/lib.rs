@@ -127,6 +127,39 @@ pub struct CommandLedger {
     conn: Option<rusqlite::Connection>,
 }
 
+pub fn validate_operation_transition(
+    from: RemoteOpState,
+    to: RemoteOpState,
+) -> Result<(), CoreError> {
+    use RemoteOpState::*;
+    let valid = matches!(
+        (from, to),
+        (Created, Persisted)
+            | (Persisted, Dispatched)
+            | (Dispatched, SourceAcknowledged)
+            | (Dispatched, Succeeded)
+            | (Dispatched, Failed)
+            | (Dispatched, Expired)
+            | (Dispatched, Cancelled)
+            | (Dispatched, OutcomeUnknown)
+            | (Dispatched, ReconciliationRequired)
+            | (SourceAcknowledged, Reconciled)
+            | (SourceAcknowledged, Failed)
+            | (SourceAcknowledged, OutcomeUnknown)
+            | (Reconciled, Succeeded)
+            | (Reconciled, Failed)
+            | (OutcomeUnknown, ReconciliationRequired)
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidTransition {
+            from: format!("{from:?}"),
+            to: format!("{to:?}"),
+        })
+    }
+}
+
 #[derive(Clone)]
 struct CommandRecord {
     state: RemoteOpState,
@@ -331,17 +364,31 @@ impl CommandLedger {
         state: RemoteOpState,
         result_json: String,
     ) -> Result<(), CoreError> {
-        if !self.executed_commands.contains_key(&idempotency_key) {
-            return Err(CoreError::UnknownCommand(idempotency_key));
-        }
+        let prior_state = self
+            .executed_commands
+            .get(&idempotency_key)
+            .map(|record| record.state)
+            .ok_or_else(|| CoreError::UnknownCommand(idempotency_key.clone()))?;
+        validate_operation_transition(prior_state, state)?;
         let now = chrono::Utc::now().timestamp_millis();
         if let Some(ref conn) = self.conn {
             let changed = conn.execute(
-                "UPDATE command_ledger SET state_code = ?2, result_json = ?3, updated_at_ms = ?4 WHERE idempotency_key = ?1",
-                rusqlite::params![&idempotency_key, state as i32, &result_json, now],
+                "UPDATE command_ledger
+                 SET state_code = ?2, result_json = ?3, updated_at_ms = ?4
+                 WHERE idempotency_key = ?1 AND state_code = ?5",
+                rusqlite::params![
+                    &idempotency_key,
+                    state as i32,
+                    &result_json,
+                    now,
+                    prior_state as i32
+                ],
             )?;
             if changed != 1 {
-                return Err(CoreError::UnknownCommand(idempotency_key));
+                return Err(CoreError::InvalidTransition {
+                    from: format!("{prior_state:?}"),
+                    to: format!("{state:?}"),
+                });
             }
         }
         self.executed_commands
@@ -370,6 +417,23 @@ impl CommandLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn advance_to_dispatched(ledger: &mut CommandLedger, key: &str) {
+        ledger
+            .record_result(
+                key.to_owned(),
+                RemoteOpState::Persisted,
+                String::new(),
+            )
+            .unwrap();
+        ledger
+            .record_result(
+                key.to_owned(),
+                RemoteOpState::Dispatched,
+                String::new(),
+            )
+            .unwrap();
+    }
 
     #[test]
     fn test_connector_state_transitions() {
@@ -409,6 +473,7 @@ mod tests {
             Some((RemoteOpState::Created, String::new()))
         );
 
+        advance_to_dispatched(&mut ledger, "command-1");
         ledger.record_result(
             "command-1".into(),
             RemoteOpState::Succeeded,
@@ -447,6 +512,7 @@ mod tests {
         ledger
             .reserve_command("operation-1", 0, "fingerprint")
             .unwrap();
+        advance_to_dispatched(&mut ledger, "operation-1");
         ledger
             .record_result(
                 "operation-1".into(),
@@ -494,6 +560,7 @@ mod tests {
         ledger
             .reserve_command("command-1", 0, "fingerprint-a")
             .unwrap();
+        advance_to_dispatched(&mut ledger, "command-1");
         ledger
             .record_result(
                 "command-1".into(),
@@ -521,6 +588,7 @@ mod tests {
         {
             let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
             assert_eq!(ledger.check_or_record("cmd-persisted", 0).unwrap(), None);
+            advance_to_dispatched(&mut ledger, "cmd-persisted");
             ledger.record_result(
                 "cmd-persisted".into(),
                 RemoteOpState::Succeeded,
@@ -593,6 +661,27 @@ mod tests {
             ),
             Err(CoreError::UnknownCommand(key)) if key == "never-reserved"
         ));
+    }
+
+    #[test]
+    fn impossible_operation_transition_is_rejected_without_mutation() {
+        let mut ledger = CommandLedger::new();
+        ledger
+            .reserve_command("operation-1", 0, "fingerprint")
+            .unwrap();
+
+        assert!(matches!(
+            ledger.record_result(
+                "operation-1".into(),
+                RemoteOpState::Succeeded,
+                "{}".into()
+            ),
+            Err(CoreError::InvalidTransition { .. })
+        ));
+        assert_eq!(
+            ledger.lookup_command("operation-1").unwrap(),
+            Some((RemoteOpState::Created, String::new()))
+        );
     }
 
     #[test]
