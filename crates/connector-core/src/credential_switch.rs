@@ -39,6 +39,7 @@ pub enum CredentialSwitchError {
     },
 }
 
+#[async_trait::async_trait]
 pub trait CredentialRuntime: Send + Sync {
     async fn validate(
         &self,
@@ -52,6 +53,7 @@ pub trait CredentialRuntime: Send + Sync {
     async fn read_account(&self, provider_id: &str) -> Result<AccountState, AdapterError>;
 }
 
+#[async_trait::async_trait]
 impl<T> CredentialRuntime for T
 where
     T: AgentAdapter + Send + Sync,
@@ -227,6 +229,7 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl CredentialRuntime for FakeCredentialRuntime {
         async fn validate(
             &self,

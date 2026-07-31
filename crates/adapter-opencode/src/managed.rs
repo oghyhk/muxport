@@ -1,5 +1,6 @@
 use crate::OpenCodeAdapter;
 use adapter_api::AdapterError;
+#[cfg(test)]
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};

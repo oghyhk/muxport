@@ -10,6 +10,7 @@ muxport-protocol = { path = "../muxport-protocol" }
 event-journal = { path = "../event-journal" }
 credential-vault = { path = "../credential-vault" }
 adapter-api = { path = "../adapter-api" }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

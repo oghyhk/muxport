@@ -459,6 +459,7 @@ name = "connector-core"
 version = "0.1.0"
 dependencies = [
  "adapter-api",
+ "async-trait",
  "chrono",
  "credential-vault",
  "event-journal",
