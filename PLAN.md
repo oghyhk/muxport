@@ -131,24 +131,24 @@ muxport/
 Define a versioned `AgentAdapter` interface with:
 
 - [ ] `probe()` — executable version, API version, capabilities, and health.
-- [ ] `discover_projects()` — repositories/workspaces visible to the runtime.
+- [x] `discover_projects()` — repositories/workspaces visible to the runtime.
 - [ ] `list_sessions()` and `read_session()` — authoritative snapshot.
-- [ ] `subscribe()` — normalized live-event stream.
-- [ ] `start_session()`, `send_input()`, `steer()`, and `interrupt()`.
-- [ ] `respond_to_approval()` with source correlation identifiers.
+- [x] `subscribe()` — normalized live-event stream.
+- [x] `start_session()`, `send_input()`, `steer()`, and `interrupt()`.
+- [x] `respond_to_approval()` with source correlation identifiers.
 - [ ] `read_account_state()` and `read_usage()` when supported.
 - [ ] `prepare_credential()`, `validate_credential()`, and `activate_credential()`.
-- [ ] `shutdown_gracefully()` for connector-managed runtime instances.
-- [ ] A declared capability set so unsupported controls are hidden rather than failing late.
+- [x] `shutdown_gracefully()` for connector-managed runtime instances.
+- [x] A declared capability set so unsupported controls are hidden rather than failing late.
 
 ### Built-in adapter strategy
 
-- [ ] Compile OpenCode and Codex adapters into the signed connector for MVP.
-- [ ] Make each adapter use only documented public interfaces.
+- [x] Compile OpenCode and Codex adapters into the signed connector for MVP.
+- [x] Make each adapter use only documented public interfaces.
 - [ ] Generate OpenCode client types from the running server's OpenAPI document during compatibility testing, not dynamically in production.
 - [ ] Generate Codex JSON-RPC types from the installed Codex App Server schema for compatibility tests.
 - [ ] Preserve unknown fields and retain raw source event type/version for diagnostics.
-- [ ] Add per-version contract fixtures so vendor updates cannot silently change behavior.
+- [x] Add per-version contract fixtures so vendor updates cannot silently change behavior.
 
 ### Future plugin host
 
@@ -163,13 +163,13 @@ Define a versioned `AgentAdapter` interface with:
 
 ### Connector responsibilities
 
-- [ ] Pair and authenticate mobile devices.
+- [x] Pair and authenticate mobile devices.
 - [ ] Maintain direct and relay transports.
 - [ ] Own desired configuration and observed runtime state.
 - [x] Supervise managed OpenCode and Codex processes.
 - [ ] Adopt compatible externally launched runtimes when a stable endpoint is supplied.
-- [ ] Normalize and journal source events.
-- [ ] Deduplicate and execute remote commands.
+- [x] Normalize and journal source events.
+- [x] Deduplicate and execute remote commands.
 - [ ] Store credentials and assignments.
 - [ ] Reconcile after every connector, runtime, host, or network restart.
 - [ ] Produce local, redacted diagnostics and audit events.
@@ -233,7 +233,7 @@ state/
 - [ ] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
 - [ ] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
 - [ ] Keep `vault.sealed` independent of metadata and event-journal migrations.
-- [ ] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
+- [x] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
 - [ ] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
 
 ## 8. Credential security architecture
@@ -272,14 +272,14 @@ secret_handle          # opaque reference into vault
 ```
 
 - [ ] Display only labels, last validation time, account fingerprint, and status.
-- [ ] Never reveal a stored API key after enrollment.
+- [x] Never reveal a stored API key after enrollment.
 - [x] Detect accidental duplicate enrollment using a non-reversible keyed fingerprint.
 - [ ] Provide disable and revoke separately; local disable must not falsely claim the provider key was revoked upstream.
 
 ### Mobile secret handling
 
 - [x] Store the mobile device identity in Keychain/Android Keystore.
-- [ ] Keep provider secrets off the phone by default.
+- [x] Keep provider secrets off the phone by default.
 - [ ] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
 - [ ] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
 - [ ] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
@@ -317,7 +317,7 @@ secret_handle          # opaque reference into vault
 - [x] Separate command, command-result, event, snapshot, acknowledgement, and error envelopes.
 - [ ] Limit frame size and chunk large diffs/attachments with hashes.
 - [ ] Use explicit redaction types so a secret cannot be serialized into an ordinary event by mistake.
-- [ ] Maintain golden cross-language fixtures in CI.
+- [x] Maintain golden cross-language fixtures in CI.
 
 ### Command semantics
 
@@ -346,7 +346,7 @@ secret_handle          # opaque reference into vault
 - [x] Replace cache with a snapshot after a gap, incompatible version, or journal reset.
 - [x] Deduplicate by event ID and source object version.
 - [x] Keep optimistic UI limited to commands with reversible presentation; show “pending” until connector acknowledgement.
-- [ ] Never show an approval as accepted until the source runtime confirms the response.
+- [x] Never show an approval as accepted until the source runtime confirms the response.
 
 ## 11. Lifecycle and restart recovery
 
@@ -431,7 +431,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [x] Acquire a single-instance lock without deleting another process's lock blindly.
 - [ ] Open stores read-only first, verify schema and integrity, then migrate one subsystem at a time.
-- [ ] Load desired runtime configuration and operation ledger.
+- [x] Load desired runtime configuration and operation ledger.
 - [ ] Unlock vault or enter `vault_locked`.
 - [x] Generate a new connector boot epoch.
 - [ ] Discover existing managed child processes using verifiable PID, executable path, start time, and profile markers; do not trust PID alone.
@@ -447,7 +447,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Use exponential backoff with jitter and a configurable cap.
 - [x] Enter `crash_loop` after five failures within ten minutes by default.
 - [ ] Preserve exit code, signal, stderr tail, source version, and profile ID in redacted diagnostics.
-- [ ] Never include environment values or tokens in captured crash output.
+- [x] Never include environment values or tokens in captured crash output.
 - [ ] Require a fresh health check, account readback, session snapshot, and event subscription before declaring recovery complete.
 
 ### Host reboot and vault unlock
@@ -462,7 +462,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Single-runtime switch transaction
 
-- [ ] Create an operation with a unique idempotency key.
+- [x] Create an operation with a unique idempotency key.
 - [ ] Check actor authorization and require biometric step-up on mobile.
 - [x] Confirm target profile is compatible with runtime/provider.
 - [x] Resolve the secret handle locally on the target host.
@@ -534,7 +534,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] List all sessions and compare source IDs, message counts, statuses, and active permissions to the last snapshot.
 - [ ] Emit synthetic reconciliation events for changes that occurred during downtime.
 - [ ] Expire approvals that no longer exist at the source.
-- [ ] Never recreate or manually modify OpenCode's internal session database.
+- [x] Never recreate or manually modify OpenCode's internal session database.
 
 ## 14. Codex adapter implementation
 
@@ -581,7 +581,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] QR host pairing and safety-code verification.
 - [x] Host fleet overview.
 - [ ] Host/runtime/project detail.
-- [ ] Unified OpenCode/Codex session timeline.
+- [x] Unified OpenCode/Codex session timeline.
 - [x] Approval inbox.
 - [x] Credential profiles and validation status.
 - [ ] Assignment matrix by host/runtime/project.
