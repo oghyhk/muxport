@@ -162,7 +162,9 @@ impl SecureEnvelopeSession {
             Some(muxport_envelope::Payload::Command(command)) => command,
             _ => return Err(SecureSessionError::UnexpectedPayload),
         };
-        if header.request_id != command.command_id {
+        if header.request_id != command.command_id
+            || header.expires_at_ms != command.deadline_ms
+        {
             return Err(SecureSessionError::InvalidEnvelopeHeader);
         }
         Ok(AuthenticatedCommand {
