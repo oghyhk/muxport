@@ -752,6 +752,37 @@ class AuthenticatedDirectConnection {
     );
   }
 
+  /// Requests a policy-governed rotation for one managed runtime. Forced
+  /// rotation is intentionally not exposed: it would bypass the connector's
+  /// drain, cooldown, and provider-safety checks.
+  Future<wire.CommandResult> rotateCredential({
+    required String commandId,
+    required String idempotencyKey,
+    required String rotationPoolId,
+    required String runtimeId,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        rotationPoolId.trim().isEmpty ||
+        runtimeId.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'credential rotation requires a pool, runtime, and positive deadline',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        rotateCredential: wire.RotateCredentialCmd(
+          poolId: rotationPoolId,
+          targetRuntimeId: runtimeId,
+          force: false,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
   /// Consumes and clears [secret] after encrypting it with the dedicated
   /// provisioning key. The plaintext never enters a normal command field.
   Future<wire.CommandResult> provisionCredential({

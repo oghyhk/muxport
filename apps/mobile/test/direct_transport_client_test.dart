@@ -313,6 +313,52 @@ void main() {
     await server.close();
   });
 
+  test('mobile client requests only guarded credential rotation', () async {
+    final hostIdentity = await Ed25519().newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 91),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final hostPublicHex = _hex(hostPublic.bytes);
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(47),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final serverTask = _serveProbe(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+      expectedDeviceId: mobileIdentity.deviceId,
+      expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+      expectedRotationPool: 'opencode-go-pool',
+      expectedRotationRuntime: 'opencode-managed-work',
+    );
+
+    final connection = await AuthenticatedDirectConnection.connect(
+      address: InternetAddress.loopbackIPv4.address,
+      port: server.port,
+      pinnedHost: PinnedHostIdentity(
+        hostId: 'host-1',
+        publicKeyHex: hostPublicHex,
+      ),
+      identity: mobileIdentity,
+    );
+    final result = await connection.rotateCredential(
+      commandId: 'rotation-command-1',
+      idempotencyKey: 'rotation-idempotency-1',
+      rotationPoolId: 'opencode-go-pool',
+      runtimeId: 'opencode-managed-work',
+    );
+    expect(result.success, isTrue);
+    expect(result.commandId, 'rotation-command-1');
+
+    await connection.close();
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
   test(
     'mobile client rejects a challenge outside the pinned identity',
     () async {
@@ -897,6 +943,8 @@ Future<void> _serveProbe({
   String? expectedQueryTarget,
   String? expectedAssignmentRuntime,
   String? expectedAssignmentProfile,
+  String? expectedRotationPool,
+  String? expectedRotationRuntime,
 }) async {
   final socket = await server.first;
   final reader = _TestRecordReader(socket);
@@ -1000,6 +1048,16 @@ Future<void> _serveProbe({
       expect(request.command.approveAction.approvalId, 'approval-1');
       expect(request.command.approveAction.approved, isFalse);
       expect(request.command.approveAction.decisionReason, 'Rejected in test');
+    } else if (expectedRotationPool != null) {
+      expect(request.command.commandId, 'rotation-command-1');
+      expect(request.header.idempotencyKey, 'rotation-idempotency-1');
+      expect(request.command.hasRotateCredential(), isTrue);
+      expect(request.command.rotateCredential.poolId, expectedRotationPool);
+      expect(
+        request.command.rotateCredential.targetRuntimeId,
+        expectedRotationRuntime,
+      );
+      expect(request.command.rotateCredential.force, isFalse);
     } else if (expectedAssignmentRuntime != null) {
       expect(request.command.commandId, 'assignment-command-1');
       expect(request.header.idempotencyKey, 'assignment-idempotency-1');
