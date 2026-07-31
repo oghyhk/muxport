@@ -18,11 +18,13 @@ use muxport_protocol::{
     event, AgentType, ConnectorState, CredentialProfileInfo, Event, RuntimeState,
     RuntimeStateEvent,
 };
-use std::collections::{HashMap, VecDeque};
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
+use std::fs;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -37,6 +39,9 @@ const DELTAS_PER_SNAPSHOT: usize = 100;
 const SOURCE_UPDATE_CAPACITY: usize = 512;
 const MANAGED_RESTART_WINDOW: Duration = Duration::from_secs(60);
 const MAX_MANAGED_RESTARTS_PER_WINDOW: usize = 5;
+const RUNTIME_MANIFEST_VERSION: u32 = 1;
+const MAX_RUNTIME_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_MANAGED_RUNTIMES: usize = 64;
 
 type DynError = Box<dyn Error + Send + Sync>;
 
@@ -44,9 +49,54 @@ type DynError = Box<dyn Error + Send + Sync>;
 struct RuntimeConfig {
     runtime_id: String,
     agent_type: AgentType,
-    runtime_name: &'static str,
+    runtime_name: String,
     credential_profile_id: String,
     managed_opencode: Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeManifest {
+    version: u32,
+    profiles_root: PathBuf,
+    runtimes: Vec<RuntimeManifestEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
+#[serde(rename_all = "lowercase")]
+enum ManifestAgentType {
+    Opencode,
+    Codex,
+}
+
+impl ManifestAgentType {
+    fn protocol_type(self) -> AgentType {
+        match self {
+            Self::Opencode => AgentType::Opencode,
+            Self::Codex => AgentType::Codex,
+        }
+    }
+
+    fn default_name(self) -> &'static str {
+        match self {
+            Self::Opencode => "OpenCode",
+            Self::Codex => "Codex",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeManifestEntry {
+    runtime_id: String,
+    agent_type: ManifestAgentType,
+    profile_id: String,
+    executable: PathBuf,
+    project_directory: PathBuf,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 struct ManagedOpenCodeChild {
@@ -223,76 +273,15 @@ async fn main() -> Result<(), DynError> {
     mirror.set_connector_state(ConnectorState::Recovering);
     mirror.save_snapshot(&journal)?;
 
-    let managed_opencode_profile_id = nonempty_env("MUXPORT_OPENCODE_PROFILE_ID");
-    let (opencode, default_opencode_runtime_id, managed_opencode): (
-        Arc<dyn AgentAdapter>,
-        String,
-        Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
-    ) =
-        if let Some(profile_id) = managed_opencode_profile_id.as_deref() {
-            let profile = managed_opencode_profile(profile_id)?;
-            let password = nonempty_env("MUXPORT_OPENCODE_PASSWORD")
-                .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-            let adapter = profile.adapter(password.clone())?;
-            let managed = ManagedOpenCodeChild::start(profile.clone(), password)?;
-            info!(
-                profile_id,
-                profile_root = %profile.profile_root().display(),
-                endpoint = %profile.base_url(),
-                "connector-managed isolated OpenCode runtime started"
-            );
-            (
-                Arc::new(adapter),
-                format!("opencode-managed-{profile_id}"),
-                Some(Arc::new(tokio::sync::Mutex::new(managed))),
-            )
-        } else {
-            let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:4096".into());
-            let opencode_password = nonempty_env("MUXPORT_OPENCODE_PASSWORD");
-            (
-                Arc::new(OpenCodeAdapter::new(opencode_url, opencode_password)),
-                "opencode-local".into(),
-                None,
-            )
-        };
-    let opencode_config = RuntimeConfig {
-        runtime_id: nonempty_env("MUXPORT_OPENCODE_RUNTIME_ID")
-            .unwrap_or(default_opencode_runtime_id),
-        agent_type: AgentType::Opencode,
-        runtime_name: "OpenCode",
-        credential_profile_id: managed_opencode_profile_id.unwrap_or_default(),
-        managed_opencode,
-    };
-
-    let managed_codex_profile_id = nonempty_env("MUXPORT_CODEX_PROFILE_ID");
-    let (codex, default_codex_runtime_id): (Arc<dyn AgentAdapter>, String) =
-        if let Some(profile_id) = managed_codex_profile_id.as_deref() {
-            let profile = managed_codex_profile(profile_id)?;
-            info!(
-                profile_id,
-                profile_root = %profile.profile_root().display(),
-                "connector-managed isolated Codex App Server configured"
-            );
-            (Arc::new(profile.adapter()), format!("codex-managed-{profile_id}"))
-        } else {
-            let codex_path =
-                nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
-            (Arc::new(CodexAdapter::new(codex_path)), "codex-local".into())
-        };
-    let codex_config = RuntimeConfig {
-        runtime_id: nonempty_env("MUXPORT_CODEX_RUNTIME_ID")
-            .unwrap_or(default_codex_runtime_id),
-        agent_type: AgentType::Codex,
-        runtime_name: "Codex",
-        credential_profile_id: managed_codex_profile_id.unwrap_or_default(),
-        managed_opencode: None,
-    };
-
-    let runtimes = vec![
-        (opencode_config, opencode),
-        (codex_config, codex),
-    ];
+    let runtimes = load_configured_runtimes().await?;
+    let configured_runtime_ids = runtimes
+        .iter()
+        .map(|(config, _)| config.runtime_id.clone())
+        .collect::<Vec<_>>();
+    if mirror.retain_configured_runtimes(&configured_runtime_ids) {
+        mirror.save_snapshot(&journal)?;
+        info!("removed stale runtime projections absent from current configuration");
+    }
     let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
         .unwrap_or_else(|_| "muxport-pairing.db".into());
     let mut pairing_store = PairingStore::open_sqlite(&pairing_db)?;
@@ -582,7 +571,7 @@ fn apply_source_update(
             mirror.reconcile_runtime(
                 &config.runtime_id,
                 config.agent_type,
-                config.runtime_name,
+                &config.runtime_name,
                 projects,
                 sessions,
             );
@@ -594,7 +583,7 @@ fn apply_source_update(
             mirror.save_snapshot(journal)?;
             info!(
                 runtime_id = %config.runtime_id,
-                runtime = config.runtime_name,
+                runtime = %config.runtime_name,
                 "runtime mirror synchronized"
             );
         }
@@ -630,7 +619,7 @@ fn apply_source_update(
             record_degraded(journal, mirror, &config, &details)?;
             warn!(
                 runtime_id = %config.runtime_id,
-                runtime = config.runtime_name,
+                runtime = %config.runtime_name,
                 %details,
                 "runtime mirror became stale"
             );
@@ -678,7 +667,7 @@ async fn monitor_runtime(
                 warn!(
                     %error,
                     runtime_id = %config.runtime_id,
-                    runtime = config.runtime_name,
+                    runtime = %config.runtime_name,
                     "runtime synchronization failed"
                 );
                 if !degraded_reported {
@@ -830,6 +819,325 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
         .checked_mul(2)
         .unwrap_or(MAX_RECONNECT_DELAY)
         .min(MAX_RECONNECT_DELAY)
+}
+
+async fn load_configured_runtimes(
+) -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>, DynError> {
+    let Some(manifest_path) = nonempty_env("MUXPORT_RUNTIME_MANIFEST") else {
+        return load_legacy_runtimes();
+    };
+    let manifest = read_runtime_manifest(Path::new(&manifest_path))?;
+    build_manifest_runtimes(manifest).await
+}
+
+fn read_runtime_manifest(path: &Path) -> Result<RuntimeManifest, DynError> {
+    if !path.is_absolute() {
+        return Err(invalid_manifest(
+            "MUXPORT_RUNTIME_MANIFEST must be an absolute path",
+        )
+        .into());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(invalid_manifest("runtime manifest must not be a symbolic link").into());
+    }
+    if !metadata.is_file() {
+        return Err(invalid_manifest("runtime manifest must be a regular file").into());
+    }
+    if metadata.len() > MAX_RUNTIME_MANIFEST_BYTES {
+        return Err(invalid_manifest("runtime manifest exceeds the 1 MiB limit").into());
+    }
+    let bytes = fs::read(path)?;
+    parse_runtime_manifest(&bytes).map_err(Into::into)
+}
+
+fn parse_runtime_manifest(bytes: &[u8]) -> Result<RuntimeManifest, io::Error> {
+    let manifest: RuntimeManifest = serde_json::from_slice(bytes).map_err(|error| {
+        invalid_manifest(format!("runtime manifest JSON is invalid: {error}"))
+    })?;
+    if manifest.version != RUNTIME_MANIFEST_VERSION {
+        return Err(invalid_manifest(format!(
+            "unsupported runtime manifest version {}; expected {}",
+            manifest.version, RUNTIME_MANIFEST_VERSION
+        )));
+    }
+    if !manifest.profiles_root.is_absolute() {
+        return Err(invalid_manifest("profiles_root must be an absolute path"));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&manifest.profiles_root) {
+        if metadata.file_type().is_symlink() {
+            return Err(invalid_manifest(
+                "profiles_root must not be a symbolic link",
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(invalid_manifest("profiles_root must be a directory"));
+        }
+    }
+    if manifest.runtimes.is_empty() {
+        return Err(invalid_manifest(
+            "runtime manifest must configure at least one runtime",
+        ));
+    }
+    if manifest.runtimes.len() > MAX_MANAGED_RUNTIMES {
+        return Err(invalid_manifest(format!(
+            "runtime manifest may configure at most {MAX_MANAGED_RUNTIMES} runtimes"
+        )));
+    }
+
+    let mut runtime_ids = HashSet::new();
+    let mut profiles = HashSet::new();
+    let mut opencode_ports = HashSet::new();
+    for entry in &manifest.runtimes {
+        if !valid_manifest_identifier(&entry.runtime_id) {
+            return Err(invalid_manifest(format!(
+                "runtime_id {:?} is invalid",
+                entry.runtime_id
+            )));
+        }
+        if !valid_manifest_identifier(&entry.profile_id) {
+            return Err(invalid_manifest(format!(
+                "profile_id for runtime {:?} is invalid",
+                entry.runtime_id
+            )));
+        }
+        if !runtime_ids.insert(entry.runtime_id.clone()) {
+            return Err(invalid_manifest(format!(
+                "duplicate runtime_id {:?}",
+                entry.runtime_id
+            )));
+        }
+        if !profiles.insert((entry.agent_type, entry.profile_id.clone())) {
+            return Err(invalid_manifest(format!(
+                "profile {:?} is assigned to more than one {:?} runtime",
+                entry.profile_id, entry.agent_type
+            )));
+        }
+        if !entry.executable.is_absolute() {
+            return Err(invalid_manifest(format!(
+                "executable for runtime {:?} must be an absolute path",
+                entry.runtime_id
+            )));
+        }
+        if !entry.project_directory.is_absolute() {
+            return Err(invalid_manifest(format!(
+                "project_directory for runtime {:?} must be an absolute path",
+                entry.runtime_id
+            )));
+        }
+        if let Some(display_name) = &entry.display_name {
+            let display_name = display_name.trim();
+            if display_name.is_empty()
+                || display_name.len() > 128
+                || display_name.chars().any(char::is_control)
+            {
+                return Err(invalid_manifest(format!(
+                    "display_name for runtime {:?} is invalid",
+                    entry.runtime_id
+                )));
+            }
+        }
+        match entry.agent_type {
+            ManifestAgentType::Opencode => {
+                let port = entry.port.ok_or_else(|| {
+                    invalid_manifest(format!(
+                        "OpenCode runtime {:?} requires a port",
+                        entry.runtime_id
+                    ))
+                })?;
+                if port == 0 {
+                    return Err(invalid_manifest(format!(
+                        "OpenCode runtime {:?} port must be from 1 to 65535",
+                        entry.runtime_id
+                    )));
+                }
+                if !opencode_ports.insert(port) {
+                    return Err(invalid_manifest(format!(
+                        "OpenCode port {port} is assigned more than once"
+                    )));
+                }
+            }
+            ManifestAgentType::Codex if entry.port.is_some() => {
+                return Err(invalid_manifest(format!(
+                    "Codex runtime {:?} must not configure a port",
+                    entry.runtime_id
+                )));
+            }
+            ManifestAgentType::Codex => {}
+        }
+    }
+    Ok(manifest)
+}
+
+async fn build_manifest_runtimes(
+    manifest: RuntimeManifest,
+) -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>, DynError> {
+    let mut runtimes = Vec::with_capacity(manifest.runtimes.len());
+    for entry in manifest.runtimes {
+        let runtime_name = entry
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_else(|| entry.agent_type.default_name())
+            .to_owned();
+        let built: Result<(RuntimeConfig, Arc<dyn AgentAdapter>), DynError> =
+            (|| match entry.agent_type {
+                ManifestAgentType::Opencode => {
+                    let profile = ManagedOpenCodeProfile::prepare(
+                        &manifest.profiles_root,
+                        &entry.profile_id,
+                        &entry.executable,
+                        &entry.project_directory,
+                        entry.port.expect("validated OpenCode port"),
+                    )?;
+                    let password = uuid::Uuid::new_v4().simple().to_string();
+                    let adapter = profile.adapter(password.clone())?;
+                    let managed = ManagedOpenCodeChild::start(profile.clone(), password)?;
+                    info!(
+                        runtime_id = %entry.runtime_id,
+                        profile_id = %entry.profile_id,
+                        profile_root = %profile.profile_root().display(),
+                        endpoint = %profile.base_url(),
+                        "connector-managed isolated OpenCode runtime started from manifest"
+                    );
+                    Ok((
+                        RuntimeConfig {
+                            runtime_id: entry.runtime_id,
+                            agent_type: entry.agent_type.protocol_type(),
+                            runtime_name,
+                            credential_profile_id: entry.profile_id,
+                            managed_opencode: Some(Arc::new(tokio::sync::Mutex::new(managed))),
+                        },
+                        Arc::new(adapter) as Arc<dyn AgentAdapter>,
+                    ))
+                }
+                ManifestAgentType::Codex => {
+                    let profile = ManagedCodexProfile::prepare(
+                        &manifest.profiles_root,
+                        &entry.profile_id,
+                        &entry.executable,
+                        &entry.project_directory,
+                    )?;
+                    info!(
+                        runtime_id = %entry.runtime_id,
+                        profile_id = %entry.profile_id,
+                        profile_root = %profile.profile_root().display(),
+                        "connector-managed isolated Codex App Server configured from manifest"
+                    );
+                    Ok((
+                        RuntimeConfig {
+                            runtime_id: entry.runtime_id,
+                            agent_type: entry.agent_type.protocol_type(),
+                            runtime_name,
+                            credential_profile_id: entry.profile_id,
+                            managed_opencode: None,
+                        },
+                        Arc::new(profile.adapter()) as Arc<dyn AgentAdapter>,
+                    ))
+                }
+            })();
+        match built {
+            Ok(runtime) => runtimes.push(runtime),
+            Err(error) => {
+                stop_managed_opencode_children(&runtimes).await;
+                return Err(error);
+            }
+        }
+    }
+    Ok(runtimes)
+}
+
+fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>, DynError> {
+    let managed_opencode_profile_id = nonempty_env("MUXPORT_OPENCODE_PROFILE_ID");
+    let (opencode, default_opencode_runtime_id, managed_opencode): (
+        Arc<dyn AgentAdapter>,
+        String,
+        Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
+    ) = if let Some(profile_id) = managed_opencode_profile_id.as_deref() {
+        let profile = managed_opencode_profile(profile_id)?;
+        let password = nonempty_env("MUXPORT_OPENCODE_PASSWORD")
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        let adapter = profile.adapter(password.clone())?;
+        let managed = ManagedOpenCodeChild::start(profile.clone(), password)?;
+        info!(
+            profile_id,
+            profile_root = %profile.profile_root().display(),
+            endpoint = %profile.base_url(),
+            "connector-managed isolated OpenCode runtime started"
+        );
+        (
+            Arc::new(adapter),
+            format!("opencode-managed-{profile_id}"),
+            Some(Arc::new(tokio::sync::Mutex::new(managed))),
+        )
+    } else {
+        let opencode_url = std::env::var("MUXPORT_OPENCODE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:4096".into());
+        let opencode_password = nonempty_env("MUXPORT_OPENCODE_PASSWORD");
+        (
+            Arc::new(OpenCodeAdapter::new(opencode_url, opencode_password)),
+            "opencode-local".into(),
+            None,
+        )
+    };
+    let opencode_config = RuntimeConfig {
+        runtime_id: nonempty_env("MUXPORT_OPENCODE_RUNTIME_ID")
+            .unwrap_or(default_opencode_runtime_id),
+        agent_type: AgentType::Opencode,
+        runtime_name: "OpenCode".into(),
+        credential_profile_id: managed_opencode_profile_id.unwrap_or_default(),
+        managed_opencode,
+    };
+
+    let managed_codex_profile_id = nonempty_env("MUXPORT_CODEX_PROFILE_ID");
+    let (codex, default_codex_runtime_id): (Arc<dyn AgentAdapter>, String) =
+        if let Some(profile_id) = managed_codex_profile_id.as_deref() {
+            let profile = managed_codex_profile(profile_id)?;
+            info!(
+                profile_id,
+                profile_root = %profile.profile_root().display(),
+                "connector-managed isolated Codex App Server configured"
+            );
+            (Arc::new(profile.adapter()), format!("codex-managed-{profile_id}"))
+        } else {
+            let codex_path =
+                nonempty_env("MUXPORT_CODEX_PATH").unwrap_or_else(|| "codex".into());
+            (Arc::new(CodexAdapter::new(codex_path)), "codex-local".into())
+        };
+    let codex_config = RuntimeConfig {
+        runtime_id: nonempty_env("MUXPORT_CODEX_RUNTIME_ID")
+            .unwrap_or(default_codex_runtime_id),
+        agent_type: AgentType::Codex,
+        runtime_name: "Codex".into(),
+        credential_profile_id: managed_codex_profile_id.unwrap_or_default(),
+        managed_opencode: None,
+    };
+    Ok(vec![(opencode_config, opencode), (codex_config, codex)])
+}
+
+async fn stop_managed_opencode_children(
+    runtimes: &[(RuntimeConfig, Arc<dyn AgentAdapter>)],
+) {
+    for (config, _) in runtimes {
+        if let Some(managed) = config.managed_opencode.as_ref() {
+            let _ = managed.lock().await.stop().await;
+        }
+    }
+}
+
+fn valid_manifest_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn invalid_manifest(message: impl Into<String>) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("invalid runtime manifest: {}", message.into()),
+    )
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
@@ -1138,13 +1446,177 @@ mod tests {
         );
     }
 
+    fn test_runtime_manifest() -> serde_json::Value {
+        let root = std::env::temp_dir().join("muxport-manifest-test");
+        serde_json::json!({
+            "version": 1,
+            "profiles_root": root.join("profiles"),
+            "runtimes": [
+                {
+                    "runtime_id": "opencode-work",
+                    "agent_type": "opencode",
+                    "profile_id": "work",
+                    "executable": root.join("opencode"),
+                    "project_directory": root.join("work-project"),
+                    "port": 43101,
+                    "display_name": "Work OpenCode"
+                },
+                {
+                    "runtime_id": "codex-personal",
+                    "agent_type": "codex",
+                    "profile_id": "personal",
+                    "executable": root.join("codex"),
+                    "project_directory": root.join("personal-project")
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn runtime_manifest_accepts_multiple_isolated_agent_instances() {
+        let bytes = serde_json::to_vec(&test_runtime_manifest()).unwrap();
+        let manifest = parse_runtime_manifest(&bytes).unwrap();
+        assert_eq!(manifest.runtimes.len(), 2);
+        assert_eq!(
+            manifest.runtimes[0].agent_type,
+            ManifestAgentType::Opencode
+        );
+        assert_eq!(manifest.runtimes[1].agent_type, ManifestAgentType::Codex);
+    }
+
+    #[test]
+    fn runtime_manifest_rejects_runtime_profile_and_port_collisions() {
+        for (field, value, expected) in [
+            ("runtime_id", serde_json::json!("opencode-work"), "runtime_id"),
+            ("profile_id", serde_json::json!("work"), "profile"),
+        ] {
+            let mut document = test_runtime_manifest();
+            document["runtimes"][1]["agent_type"] = serde_json::json!("opencode");
+            document["runtimes"][1]["port"] = serde_json::json!(43102);
+            document["runtimes"][1][field] = value;
+            let error =
+                parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let mut document = test_runtime_manifest();
+        document["runtimes"][1]["agent_type"] = serde_json::json!("opencode");
+        document["runtimes"][1]["port"] = serde_json::json!(43101);
+        let error = parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("port 43101"), "{error}");
+    }
+
+    #[test]
+    fn runtime_manifest_rejects_secrets_and_agent_specific_mistakes() {
+        let mut document = test_runtime_manifest();
+        document["runtimes"][0]["password"] = serde_json::json!("must-not-be-here");
+        let error = parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+
+        let mut document = test_runtime_manifest();
+        document["runtimes"][1]["port"] = serde_json::json!(43102);
+        let error = parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("must not configure a port"), "{error}");
+    }
+
+    #[test]
+    fn runtime_manifest_is_versioned_and_bounded() {
+        let mut document = test_runtime_manifest();
+        document["version"] = serde_json::json!(2);
+        let error = parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("version 2"), "{error}");
+
+        let mut document = test_runtime_manifest();
+        document["runtimes"] = serde_json::json!([]);
+        let error = parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("at least one runtime"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_manifest_builds_and_stops_multiple_managed_instances() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "muxport-multi-runtime-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let executable = root.join("fake-agent");
+        std::fs::write(&executable, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let document = serde_json::json!({
+            "version": 1,
+            "profiles_root": root.join("profiles"),
+            "runtimes": [
+                {
+                    "runtime_id": "opencode-a",
+                    "agent_type": "opencode",
+                    "profile_id": "account-a",
+                    "executable": executable,
+                    "project_directory": project,
+                    "port": 43111
+                },
+                {
+                    "runtime_id": "opencode-b",
+                    "agent_type": "opencode",
+                    "profile_id": "account-b",
+                    "executable": executable,
+                    "project_directory": project,
+                    "port": 43112
+                },
+                {
+                    "runtime_id": "codex-a",
+                    "agent_type": "codex",
+                    "profile_id": "account-a",
+                    "executable": executable,
+                    "project_directory": project
+                },
+                {
+                    "runtime_id": "codex-b",
+                    "agent_type": "codex",
+                    "profile_id": "account-b",
+                    "executable": executable,
+                    "project_directory": project
+                }
+            ]
+        });
+        let manifest =
+            parse_runtime_manifest(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let runtimes = build_manifest_runtimes(manifest).await.unwrap();
+        assert_eq!(runtimes.len(), 4);
+        assert_eq!(
+            runtimes
+                .iter()
+                .filter(|(config, _)| config.managed_opencode.is_some())
+                .count(),
+            2
+        );
+        assert!(root.join("profiles/opencode/account-a").is_dir());
+        assert!(root.join("profiles/opencode/account-b").is_dir());
+        assert!(root.join("profiles/codex/account-a").is_dir());
+        assert!(root.join("profiles/codex/account-b").is_dir());
+
+        stop_managed_opencode_children(&runtimes).await;
+        for (config, _) in &runtimes {
+            if let Some(managed) = config.managed_opencode.as_ref() {
+                assert!(managed.lock().await.child.is_none());
+            }
+        }
+        drop(runtimes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn synchronization_brackets_subscription_with_snapshots() {
         let adapter = DeterministicFakeAdapter::new(AgentType::Codex);
         let config = RuntimeConfig {
             runtime_id: "codex-test".into(),
             agent_type: AgentType::Codex,
-            runtime_name: "Codex",
+            runtime_name: "Codex".into(),
             credential_profile_id: String::new(),
             managed_opencode: None,
         };

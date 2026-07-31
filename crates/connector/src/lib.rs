@@ -170,6 +170,27 @@ impl RuntimeMirror {
         }
     }
 
+    /// Removes projections for runtimes no longer present in connector
+    /// configuration. This is applied after restart before new source
+    /// snapshots arrive, so deleted manifest entries cannot survive as stale
+    /// runtimes or sessions on mobile.
+    pub fn retain_configured_runtimes(&mut self, runtime_ids: &[String]) -> bool {
+        let runtime_count = self.snapshot.runtimes.len();
+        let session_count = self.snapshot.active_sessions.len();
+        self.snapshot.runtimes.retain(|runtime| {
+            runtime_ids
+                .iter()
+                .any(|runtime_id| runtime_id == &runtime.runtime_id)
+        });
+        self.snapshot.active_sessions.retain(|session| {
+            runtime_ids
+                .iter()
+                .any(|runtime_id| runtime_id == &session.runtime_id)
+        });
+        runtime_count != self.snapshot.runtimes.len()
+            || session_count != self.snapshot.active_sessions.len()
+    }
+
     pub fn replace_credential_profiles(&mut self, mut profiles: Vec<CredentialProfileInfo>) {
         profiles.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
         self.snapshot.credential_profiles = profiles;
@@ -743,5 +764,38 @@ mod tests {
             RuntimeState::try_from(snapshot.runtimes[0].state).unwrap(),
             RuntimeState::OnlineIdle
         );
+    }
+
+    #[test]
+    fn restart_configuration_removes_deleted_runtime_and_session_projections() {
+        let mut mirror =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Recovering, 0);
+        mirror.reconcile_runtime(
+            "opencode-keep",
+            AgentType::Opencode,
+            "OpenCode",
+            vec![],
+            vec![session("keep-session", "/keep", "Keep", "idle")],
+        );
+        mirror.reconcile_runtime(
+            "codex-delete",
+            AgentType::Codex,
+            "Codex",
+            vec![],
+            vec![session(
+                "delete-session",
+                "/delete",
+                "Delete",
+                "active",
+            )],
+        );
+
+        assert!(mirror.retain_configured_runtimes(&["opencode-keep".into()]));
+        let snapshot = mirror.snapshot_at(0);
+        assert_eq!(snapshot.runtimes.len(), 1);
+        assert_eq!(snapshot.runtimes[0].runtime_id, "opencode-keep");
+        assert_eq!(snapshot.active_sessions.len(), 1);
+        assert_eq!(snapshot.active_sessions[0].session_id, "keep-session");
+        assert!(!mirror.retain_configured_runtimes(&["opencode-keep".into()]));
     }
 }

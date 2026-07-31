@@ -130,13 +130,11 @@ The managed server binds only to `127.0.0.1` and uses a fresh in-memory server
 password unless `MUXPORT_OPENCODE_PASSWORD` is explicitly supplied. Its child
 environment is cleared before an OS bootstrap allowlist and the isolated
 profile paths are added, preventing unrelated provider variables from leaking
-into the managed runtime. This is a development path: crash adoption,
-multi-profile daemon registration, mobile enrollment, and production
-installers are not complete.
+into the managed runtime.
 
 ### Development managed Codex profile
 
-The connector can own one Codex account profile with separate configuration,
+The connector can own a Codex account profile with separate configuration,
 authentication, session, log, skill-metadata, and SQLite roots:
 
 ```sh
@@ -155,7 +153,44 @@ refresh. Muxport uses supported `account/*` methods and never reads, edits, or
 copies Codex credential/database files. The local enrollment command uses
 Codex's device-code flow, displays only the verification URL/code, waits for
 the supported completion notification, and confirms `account/read`. Mobile
-account enrollment and multi-profile daemon registration remain incomplete.
+account enrollment and production installers remain incomplete.
+
+### Multiple managed OpenCode and Codex instances
+
+Set `MUXPORT_RUNTIME_MANIFEST` to an absolute versioned JSON manifest to
+supervise up to 64 isolated runtimes in one connector:
+
+```json
+{
+  "version": 1,
+  "profiles_root": "/absolute/path/to/muxport-profiles",
+  "runtimes": [
+    {
+      "runtime_id": "opencode-work",
+      "agent_type": "opencode",
+      "profile_id": "work",
+      "executable": "/absolute/path/to/opencode",
+      "project_directory": "/absolute/path/to/work-project",
+      "port": 4096
+    },
+    {
+      "runtime_id": "codex-personal",
+      "agent_type": "codex",
+      "profile_id": "personal",
+      "executable": "/absolute/path/to/codex",
+      "project_directory": "/absolute/path/to/personal-project"
+    }
+  ]
+}
+```
+
+Do not put credentials in this file. Unknown fields are rejected, OpenCode
+ports must be unique, and duplicate runtime/profile assignments fail before
+startup. See
+[the managed runtime manifest design](docs/architecture/runtime-manifest.md)
+for enrollment, validation, synchronization, and restart behavior. The legacy
+single-runtime environment variables remain available when the manifest
+variable is unset.
 
 ## Security
 

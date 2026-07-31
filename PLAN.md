@@ -166,7 +166,7 @@ Define a versioned `AgentAdapter` interface with:
 - [ ] Pair and authenticate mobile devices.
 - [ ] Maintain direct and relay transports.
 - [ ] Own desired configuration and observed runtime state.
-- [ ] Supervise managed OpenCode and Codex processes.
+- [x] Supervise managed OpenCode and Codex processes.
 - [ ] Adopt compatible externally launched runtimes when a stable endpoint is supplied.
 - [ ] Normalize and journal source events.
 - [ ] Deduplicate and execute remote commands.
