@@ -29,6 +29,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn, Level};
@@ -45,6 +46,7 @@ const MAX_MANAGED_FAILURES_PER_WINDOW: usize = 5;
 const RUNTIME_MANIFEST_VERSION: u32 = 1;
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_MANAGED_RUNTIMES: usize = 64;
+const MAX_MANAGED_STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 type DynError = Box<dyn Error + Send + Sync>;
 
@@ -141,6 +143,8 @@ struct ManagedOpenCodeChild {
     child: Option<tokio::process::Child>,
     restart_attempts: VecDeque<Instant>,
     crash_loop_tripped: bool,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+    last_exit_diagnostic: Option<String>,
 }
 
 impl ManagedOpenCodeChild {
@@ -148,13 +152,15 @@ impl ManagedOpenCodeChild {
         profile: ManagedOpenCodeProfile,
         server_password: String,
     ) -> Result<Self, adapter_opencode::ManagedOpenCodeError> {
-        let child = profile.spawn(&server_password)?;
+        let (child, stderr_tail) = capture_managed_stderr(profile.spawn(&server_password)?);
         Ok(Self {
             profile,
             server_password,
             child: Some(child),
             restart_attempts: VecDeque::new(),
             crash_loop_tripped: false,
+            stderr_tail,
+            last_exit_diagnostic: None,
         })
     }
 
@@ -164,16 +170,21 @@ impl ManagedOpenCodeChild {
                 "managed OpenCode crash loop is latched; operator restart is required".into(),
             ));
         }
-        let restart = match self.child.as_mut() {
+        let exited = match self.child.as_mut() {
             Some(child) => child.try_wait().map_err(|error| {
                 AdapterError::InitFailed(format!(
                     "managed OpenCode process status failed: {error}"
                 ))
-            })?.is_some(),
-            None => true,
+            })?,
+            None => None,
         };
-        if !restart {
+        if self.child.is_some() && exited.is_none() {
             return Ok(false);
+        }
+        if let Some(status) = exited {
+            let diagnostic = managed_exit_diagnostic(&self.profile, &status, &self.stderr_tail);
+            warn!(detail = %diagnostic, "managed OpenCode exited; only redacted crash metadata was retained");
+            self.last_exit_diagnostic = Some(diagnostic);
         }
         let now = Instant::now();
         while self
@@ -188,16 +199,19 @@ impl ManagedOpenCodeChild {
             self.child = None;
             self.crash_loop_tripped = true;
             return Err(AdapterError::InitFailed(format!(
-                "managed OpenCode crash loop: {} failures within {} seconds; automatic restart stopped",
+                "managed OpenCode crash loop: {} failures within {} seconds; automatic restart stopped ({})",
                 MAX_MANAGED_FAILURES_PER_WINDOW,
-                MANAGED_RESTART_WINDOW.as_secs()
+                MANAGED_RESTART_WINDOW.as_secs(),
+                self.last_exit_diagnostic.as_deref().unwrap_or("no exit metadata available")
             )));
         }
-        self.child = Some(self.profile.spawn(&self.server_password).map_err(|error| {
+        let (child, stderr_tail) = capture_managed_stderr(self.profile.spawn(&self.server_password).map_err(|error| {
             AdapterError::InitFailed(format!(
                 "managed OpenCode process restart failed: {error}"
             ))
         })?);
+        self.child = Some(child);
+        self.stderr_tail = stderr_tail;
         Ok(true)
     }
 
@@ -216,6 +230,67 @@ impl ManagedOpenCodeChild {
         }
         Ok(())
     }
+}
+
+/// Captures a small private tail for crash attribution. Raw stderr is never
+/// logged or exported: vendor processes may include secrets in arbitrary error
+/// text, so diagnostics expose only its byte count and SHA-256 fingerprint.
+fn capture_managed_stderr(
+    mut child: tokio::process::Child,
+) -> (tokio::process::Child, Arc<Mutex<Vec<u8>>>) {
+    let tail = Arc::new(Mutex::new(Vec::new()));
+    if let Some(mut stderr) = child.stderr.take() {
+        let destination = Arc::clone(&tail);
+        tokio::spawn(async move {
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let Ok(read) = stderr.read(&mut chunk).await else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                let Ok(mut captured) = destination.lock() else {
+                    break;
+                };
+                captured.extend_from_slice(&chunk[..read]);
+                if captured.len() > MAX_MANAGED_STDERR_TAIL_BYTES {
+                    let excess = captured.len() - MAX_MANAGED_STDERR_TAIL_BYTES;
+                    captured.drain(..excess);
+                }
+            }
+        });
+    }
+    (child, tail)
+}
+
+fn managed_exit_diagnostic(
+    profile: &ManagedOpenCodeProfile,
+    status: &std::process::ExitStatus,
+    stderr_tail: &Arc<Mutex<Vec<u8>>>,
+) -> String {
+    let (stderr_bytes, stderr_sha256) = match stderr_tail.lock() {
+        Ok(bytes) => (bytes.len(), format!("{:x}", Sha256::digest(&*bytes))),
+        Err(_) => (0, "unavailable".into()),
+    };
+    let exit_code = status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".into());
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .signal()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".into())
+    };
+    #[cfg(not(unix))]
+    let signal = "unavailable".to_owned();
+    format!(
+        "profile_id={} exit_code={} signal={} stderr_tail_bytes={} stderr_tail_sha256={}",
+        profile.profile_id(), exit_code, signal, stderr_bytes, stderr_sha256
+    )
 }
 
 enum SourceUpdate {
@@ -2661,6 +2736,37 @@ mod tests {
             5
         );
         managed.stop().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_exit_diagnostic_never_exposes_raw_stderr() {
+        let root = std::env::temp_dir().join(format!(
+            "muxport-redacted-stderr-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let profile = ManagedOpenCodeProfile::prepare(
+            &root,
+            "profile-a",
+            "/bin/sh",
+            &project,
+            43120,
+        )
+        .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .status()
+            .unwrap();
+        let tail = Arc::new(Mutex::new(b"provider_token=do-not-log".to_vec()));
+        let diagnostic = managed_exit_diagnostic(&profile, &status, &tail);
+        assert!(diagnostic.contains("profile_id=profile-a"));
+        assert!(diagnostic.contains("exit_code=7"));
+        assert!(diagnostic.contains("stderr_tail_sha256="));
+        assert!(!diagnostic.contains("do-not-log"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

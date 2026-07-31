@@ -152,7 +152,10 @@ impl ManagedOpenCodeProfile {
             .env("OPENCODE_SERVER_PASSWORD", server_password)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // The connector consumes stderr into a bounded private buffer.
+            // It never inherits the connector's output stream, where a vendor
+            // error could otherwise leak account or credential material.
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         command.spawn().map_err(ManagedOpenCodeError::Io)
     }
