@@ -282,6 +282,7 @@ pub fn resolve_assignment(
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SwitchImpactTarget {
+    pub host_id: String,
     pub runtime_id: String,
     pub provider_compatible: bool,
     pub online: bool,
@@ -304,7 +305,7 @@ impl SwitchImpactPlan {
     pub fn build(targets: &[SwitchImpactTarget]) -> Self {
         let mut plan = Self::default();
         for target in targets {
-            let id = target.runtime_id.clone();
+            let id = format!("{}/{}", target.host_id, target.runtime_id);
             if !target.provider_compatible {
                 plan.incompatible.push(id.clone());
             }
@@ -1128,6 +1129,7 @@ mod tests {
     fn switch_impact_plan_separates_every_unsafe_dimension() {
         let plan = SwitchImpactPlan::build(&[
             SwitchImpactTarget {
+                host_id: "host-a".into(),
                 runtime_id: "ready".into(),
                 provider_compatible: true,
                 online: true,
@@ -1136,6 +1138,7 @@ mod tests {
                 active_turns: 0,
             },
             SwitchImpactTarget {
+                host_id: "host-b".into(),
                 runtime_id: "multi-risk".into(),
                 provider_compatible: false,
                 online: false,
@@ -1144,12 +1147,37 @@ mod tests {
                 active_turns: 2,
             },
         ]);
-        assert_eq!(plan.ready, ["ready"]);
-        assert_eq!(plan.incompatible, ["multi-risk"]);
-        assert_eq!(plan.offline, ["multi-risk"]);
-        assert_eq!(plan.locked, ["multi-risk"]);
-        assert_eq!(plan.busy, ["multi-risk"]);
-        assert_eq!(plan.unmanaged, ["multi-risk"]);
+        assert_eq!(plan.ready, ["host-a/ready"]);
+        assert_eq!(plan.incompatible, ["host-b/multi-risk"]);
+        assert_eq!(plan.offline, ["host-b/multi-risk"]);
+        assert_eq!(plan.locked, ["host-b/multi-risk"]);
+        assert_eq!(plan.busy, ["host-b/multi-risk"]);
+        assert_eq!(plan.unmanaged, ["host-b/multi-risk"]);
+    }
+
+    #[test]
+    fn switch_impact_plan_keeps_same_named_runtimes_on_different_hosts_distinct() {
+        let plan = SwitchImpactPlan::build(&[
+            SwitchImpactTarget {
+                host_id: "host-a".into(),
+                runtime_id: "opencode".into(),
+                provider_compatible: true,
+                online: true,
+                credential_unlocked: true,
+                managed: true,
+                active_turns: 0,
+            },
+            SwitchImpactTarget {
+                host_id: "host-b".into(),
+                runtime_id: "opencode".into(),
+                provider_compatible: true,
+                online: true,
+                credential_unlocked: true,
+                managed: true,
+                active_turns: 0,
+            },
+        ]);
+        assert_eq!(plan.ready, ["host-a/opencode", "host-b/opencode"]);
     }
 
     #[test]
