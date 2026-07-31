@@ -703,6 +703,18 @@ impl CommandLedger {
         Ok(())
     }
 
+    pub fn ensure_runtime_assignment(
+        &mut self,
+        runtime_id: &str,
+        default_profile_id: &str,
+    ) -> Result<String, CoreError> {
+        if let Some(existing) = self.runtime_assignments.get(runtime_id) {
+            return Ok(existing.clone());
+        }
+        self.set_runtime_assignment(runtime_id, default_profile_id)?;
+        Ok(default_profile_id.trim().to_owned())
+    }
+
     pub fn runtime_assignment(&self, runtime_id: &str) -> Option<&str> {
         self.runtime_assignments
             .get(runtime_id)
@@ -1102,10 +1114,16 @@ mod tests {
             );
         }
         {
-            let ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
             assert_eq!(
                 ledger.runtime_assignment("codex-work"),
                 Some("profile-work")
+            );
+            assert_eq!(
+                ledger
+                    .ensure_runtime_assignment("codex-work", "stale-manifest-default")
+                    .unwrap(),
+                "profile-work"
             );
         }
         let _ = std::fs::remove_file(&db_path);

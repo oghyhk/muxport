@@ -26,7 +26,7 @@ use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -52,8 +52,17 @@ struct RuntimeConfig {
     runtime_id: String,
     agent_type: AgentType,
     runtime_name: String,
-    credential_profile_id: String,
+    credential_profile_id: Arc<RwLock<String>>,
     managed_opencode: Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
+}
+
+impl RuntimeConfig {
+    fn credential_profile_id(&self) -> String {
+        self.credential_profile_id
+            .read()
+            .map(|profile| profile.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +393,24 @@ async fn main() -> Result<(), DynError> {
             (config.runtime_id.clone(), Arc::clone(adapter))
         })
         .collect();
+    let assignment_targets = runtimes
+        .iter()
+        .map(|(config, _)| {
+            (
+                config.runtime_id.clone(),
+                Arc::clone(&config.credential_profile_id),
+            )
+        })
+        .collect();
+    let assignment_defaults = runtimes
+        .iter()
+        .map(|(config, _)| {
+            (
+                config.runtime_id.clone(),
+                config.credential_profile_id(),
+            )
+        })
+        .collect::<Vec<_>>();
     let command_router = match credential_vault.as_ref() {
         Some(vault) => CommandRouter::open_sqlite_with_vault(
             &command_db,
@@ -392,7 +419,11 @@ async fn main() -> Result<(), DynError> {
         )?,
         None => CommandRouter::open_sqlite(&command_db, adapter_registry)?,
     }
-    .with_host_id(host_id.clone());
+    .with_host_id(host_id.clone())
+    .with_assignment_targets(assignment_targets);
+    command_router
+        .initialize_runtime_assignments(&assignment_defaults)
+        .await?;
     let command_router = Arc::new(command_router);
     info!(path = %command_db, "persistent command ledger initialized");
     if let Some(vault) = credential_vault.as_ref() {
@@ -597,7 +628,7 @@ fn apply_source_update(
                 );
                 mirror.set_runtime_active_profile(
                     &config.runtime_id,
-                    &config.credential_profile_id,
+                    &config.credential_profile_id(),
                 );
                 mirror.save_snapshot(journal)?;
                 info!(
@@ -674,7 +705,7 @@ async fn monitor_runtime(
                 if managed.lock().await.ensure_running()? {
                     info!(
                         runtime_id = %config.runtime_id,
-                        profile_id = %config.credential_profile_id,
+                        profile_id = %config.credential_profile_id(),
                         "managed OpenCode process restarted in the same isolated profile"
                     );
                 }
@@ -838,7 +869,7 @@ fn record_degraded(
             runtime_id: config.runtime_id.clone(),
             agent_type: config.agent_type as i32,
             state: RuntimeState::Degraded as i32,
-            active_profile_id: config.credential_profile_id.clone(),
+            active_profile_id: config.credential_profile_id(),
             details: details.to_owned(),
         })),
     };
@@ -1100,7 +1131,7 @@ async fn build_manifest_runtimes(
                             runtime_id: entry.runtime_id,
                             agent_type: entry.agent_type.protocol_type(),
                             runtime_name,
-                            credential_profile_id: entry.profile_id,
+                            credential_profile_id: Arc::new(RwLock::new(entry.profile_id)),
                             managed_opencode: Some(Arc::new(tokio::sync::Mutex::new(managed))),
                         },
                         Arc::new(adapter) as Arc<dyn AgentAdapter>,
@@ -1124,7 +1155,7 @@ async fn build_manifest_runtimes(
                             runtime_id: entry.runtime_id,
                             agent_type: entry.agent_type.protocol_type(),
                             runtime_name,
-                            credential_profile_id: entry.profile_id,
+                            credential_profile_id: Arc::new(RwLock::new(entry.profile_id)),
                             managed_opencode: None,
                         },
                         Arc::new(profile.adapter()) as Arc<dyn AgentAdapter>,
@@ -1210,7 +1241,9 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
             .unwrap_or(default_opencode_runtime_id),
         agent_type: AgentType::Opencode,
         runtime_name: "OpenCode".into(),
-        credential_profile_id: managed_opencode_profile_id.unwrap_or_default(),
+        credential_profile_id: Arc::new(RwLock::new(
+            managed_opencode_profile_id.unwrap_or_default(),
+        )),
         managed_opencode,
     };
 
@@ -1234,7 +1267,9 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
             .unwrap_or(default_codex_runtime_id),
         agent_type: AgentType::Codex,
         runtime_name: "Codex".into(),
-        credential_profile_id: managed_codex_profile_id.unwrap_or_default(),
+        credential_profile_id: Arc::new(RwLock::new(
+            managed_codex_profile_id.unwrap_or_default(),
+        )),
         managed_opencode: None,
     };
     Ok(vec![(opencode_config, opencode), (codex_config, codex)])
@@ -1791,7 +1826,7 @@ mod tests {
             runtime_id: "codex-test".into(),
             agent_type: AgentType::Codex,
             runtime_name: "Codex".into(),
-            credential_profile_id: String::new(),
+            credential_profile_id: Arc::new(RwLock::new(String::new())),
             managed_opencode: None,
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(4);

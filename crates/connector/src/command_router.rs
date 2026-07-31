@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify};
 
@@ -37,6 +37,7 @@ pub struct CommandRouter {
     host_id: String,
     ledger: Mutex<CommandLedger>,
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
+    assignment_targets: HashMap<String, Arc<StdRwLock<String>>>,
     vault: Option<Arc<Mutex<PersistentVault>>>,
     in_flight: StdMutex<HashMap<String, Arc<Notify>>>,
 }
@@ -50,6 +51,7 @@ impl CommandRouter {
             host_id: "unconfigured-host".into(),
             ledger: Mutex::new(ledger),
             adapters,
+            assignment_targets: HashMap::new(),
             vault: None,
             in_flight: StdMutex::new(HashMap::new()),
         }
@@ -58,6 +60,36 @@ impl CommandRouter {
     pub fn with_host_id(mut self, host_id: impl Into<String>) -> Self {
         self.host_id = host_id.into();
         self
+    }
+
+    pub fn with_assignment_targets(
+        mut self,
+        targets: HashMap<String, Arc<StdRwLock<String>>>,
+    ) -> Self {
+        self.assignment_targets = targets;
+        self
+    }
+
+    pub async fn initialize_runtime_assignments(
+        &self,
+        defaults: &[(String, String)],
+    ) -> Result<(), CommandDispatchError> {
+        let resolved = {
+            let mut ledger = self.ledger.lock().await;
+            let mut resolved = Vec::with_capacity(defaults.len());
+            for (runtime_id, profile_id) in defaults {
+                resolved.push((
+                    runtime_id.clone(),
+                    ledger.ensure_runtime_assignment(runtime_id, profile_id)?,
+                ));
+            }
+            resolved
+        };
+        for (runtime_id, profile_id) in resolved {
+            self.update_assignment_target(&runtime_id, &profile_id)
+                .map_err(|_| CommandDispatchError::StateLockPoisoned)?;
+        }
+        Ok(())
     }
 
     pub fn open_sqlite(
@@ -76,6 +108,7 @@ impl CommandRouter {
             host_id: "unconfigured-host".into(),
             ledger: Mutex::new(CommandLedger::open_sqlite(path)?),
             adapters,
+            assignment_targets: HashMap::new(),
             vault: Some(vault),
             in_flight: StdMutex::new(HashMap::new()),
         })
@@ -363,15 +396,8 @@ impl CommandRouter {
                 .await
                 .map_err(map_credential_switch_error)?;
                 drop(vault);
-                self.ledger
-                    .lock()
-                    .await
-                    .set_runtime_assignment(&request.target_id, profile_id)
-                    .map_err(|error| {
-                        AdapterError::OutcomeUnknown(format!(
-                            "credential activation succeeded but durable assignment recording failed; reconcile before retrying: {error}"
-                        ))
-                    })?;
+                self.commit_runtime_assignment(&request.target_id, profile_id)
+                    .await?;
                 Ok(json!({
                     "profile_id": result.profile_id,
                     "provider_id": result.provider_id,
@@ -476,18 +502,11 @@ impl CommandRouter {
                 .await
                 .map_err(map_credential_switch_error)?;
                 drop(vault);
-                self.ledger
-                    .lock()
-                    .await
-                    .set_runtime_assignment(
-                        &request.target_runtime_id,
-                        &decision.selected_profile_id,
-                    )
-                    .map_err(|error| {
-                        AdapterError::OutcomeUnknown(format!(
-                            "rotation succeeded but durable assignment recording failed; reconcile before retrying: {error}"
-                        ))
-                    })?;
+                self.commit_runtime_assignment(
+                    &request.target_runtime_id,
+                    &decision.selected_profile_id,
+                )
+                .await?;
                 Ok(json!({
                     "pool_id": decision.pool_id,
                     "profile_id": result.profile_id,
@@ -512,6 +531,39 @@ impl CommandRouter {
         self.adapters.get(runtime_id).cloned().ok_or_else(|| {
             AdapterError::InvalidInput(format!("runtime {runtime_id:?} is not registered"))
         })
+    }
+
+    async fn commit_runtime_assignment(
+        &self,
+        runtime_id: &str,
+        profile_id: &str,
+    ) -> Result<(), AdapterError> {
+        self.ledger
+            .lock()
+            .await
+            .set_runtime_assignment(runtime_id, profile_id)
+            .map_err(|error| {
+                AdapterError::OutcomeUnknown(format!(
+                    "credential activation succeeded but durable assignment recording failed; reconcile before retrying: {error}"
+                ))
+            })?;
+        self.update_assignment_target(runtime_id, profile_id)?;
+        Ok(())
+    }
+
+    fn update_assignment_target(
+        &self,
+        runtime_id: &str,
+        profile_id: &str,
+    ) -> Result<(), AdapterError> {
+        if let Some(target) = self.assignment_targets.get(runtime_id) {
+            *target.write().map_err(|_| {
+                AdapterError::OutcomeUnknown(
+                    "durable assignment changed but runtime projection lock is unavailable".into(),
+                )
+            })? = profile_id.to_owned();
+        }
+        Ok(())
     }
 
     async fn persist_result(
@@ -992,9 +1044,6 @@ mod tests {
         {
             let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
             ledger
-                .set_runtime_assignment("codex-test", "profile-a")
-                .unwrap();
-            ledger
                 .upsert_rotation_pool(RotationPool {
                     pool_id: "pool-a".into(),
                     provider_id: "openai".into(),
@@ -1014,10 +1063,24 @@ mod tests {
         let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
         let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
         adapters.insert("codex-test".into(), adapter);
+        let projected_assignment = Arc::new(StdRwLock::new("profile-a".to_owned()));
+        let mut assignment_targets = HashMap::new();
+        assignment_targets.insert(
+            "codex-test".into(),
+            Arc::clone(&projected_assignment),
+        );
         let router =
             CommandRouter::open_sqlite_with_vault(&db_path, adapters, Arc::clone(&vault))
                 .unwrap()
-                .with_host_id("host-test");
+                .with_host_id("host-test")
+                .with_assignment_targets(assignment_targets);
+        router
+            .initialize_runtime_assignments(&[(
+                "codex-test".into(),
+                "profile-a".into(),
+            )])
+            .await
+            .unwrap();
 
         let result = router
             .dispatch(
@@ -1044,6 +1107,10 @@ mod tests {
                 .runtime_assignment("codex-test"),
             Some("profile-b")
         );
+        assert_eq!(
+            projected_assignment.read().unwrap().as_str(),
+            "profile-b"
+        );
         let rotated = router
             .dispatch("rotation-idempotency-key", &rotation_command("pool-a"))
             .await
@@ -1056,6 +1123,10 @@ mod tests {
                 .await
                 .runtime_assignment("codex-test"),
             Some("profile-a")
+        );
+        assert_eq!(
+            projected_assignment.read().unwrap().as_str(),
+            "profile-a"
         );
 
         let _ = std::fs::remove_file(&db_path);
