@@ -4,6 +4,7 @@ const int mobileProtocolVersion = 1;
 const int _recentEventLimit = 256;
 
 enum HostSyncPhase {
+  pairingPending,
   cachedStale,
   reconnecting,
   replaying,
@@ -32,18 +33,16 @@ enum MobileOperationState {
 }
 
 class SyncCursor {
-  const SyncCursor({
-    required this.hostEpoch,
-    required this.sequence,
-  }) : assert(sequence >= 0);
+  const SyncCursor({required this.hostEpoch, required this.sequence})
+    : assert(sequence >= 0);
 
   final String hostEpoch;
   final int sequence;
 
   Map<String, Object?> toJson() => {
-        'hostEpoch': hostEpoch,
-        'sequence': sequence,
-      };
+    'hostEpoch': hostEpoch,
+    'sequence': sequence,
+  };
 
   factory SyncCursor.fromJson(Map<String, Object?> json) {
     return SyncCursor(
@@ -124,19 +123,15 @@ class PendingOperation {
       RemoteOpState.expired => MobileOperationState.expired,
       RemoteOpState.cancelled ||
       RemoteOpState.rejectedOffline ||
-      RemoteOpState.failed =>
-        MobileOperationState.failed,
+      RemoteOpState.failed => MobileOperationState.failed,
       RemoteOpState.outcomeUnknown ||
       RemoteOpState.reconciliationRequired ||
-      RemoteOpState.unspecified =>
-        MobileOperationState.reconciliationRequired,
+      RemoteOpState.unspecified => MobileOperationState.reconciliationRequired,
       RemoteOpState.sourceAcknowledged ||
-      RemoteOpState.reconciled =>
-        MobileOperationState.connectorAcknowledged,
+      RemoteOpState.reconciled => MobileOperationState.connectorAcknowledged,
       RemoteOpState.created ||
       RemoteOpState.persisted ||
-      RemoteOpState.dispatched =>
-        MobileOperationState.pending,
+      RemoteOpState.dispatched => MobileOperationState.pending,
     };
     return copyWith(state: nextState);
   }
@@ -160,13 +155,13 @@ class PendingOperation {
   }
 
   Map<String, Object?> toJson() => {
-        'idempotencyKey': idempotencyKey,
-        'kind': kind,
-        'createdAtMs': createdAtMs,
-        'deadlineMs': deadlineMs,
-        'state': state.name,
-        'requiresSourceConfirmation': requiresSourceConfirmation,
-      };
+    'idempotencyKey': idempotencyKey,
+    'kind': kind,
+    'createdAtMs': createdAtMs,
+    'deadlineMs': deadlineMs,
+    'state': state.name,
+    'requiresSourceConfirmation': requiresSourceConfirmation,
+  };
 
   factory PendingOperation.fromJson(Map<String, Object?> json) {
     return PendingOperation(
@@ -192,21 +187,35 @@ class HostSyncState {
     required this.displayName,
     required this.protocolVersion,
     required this.phase,
+    this.directAddress,
+    this.directPort,
+    this.pairingPending = false,
     required Map<String, Object?> snapshot,
     required this.cursor,
     required Map<String, int> sourceVersions,
     required List<String> recentEventIds,
     required Map<String, PendingOperation> pendingOperations,
-  })  : snapshot = Map.unmodifiable(snapshot),
-        sourceVersions = Map.unmodifiable(sourceVersions),
-        recentEventIds = List.unmodifiable(recentEventIds),
-        pendingOperations = Map.unmodifiable(pendingOperations);
+  }) : assert(
+         (directAddress == null && directPort == null) ||
+             (directAddress != null &&
+                 directAddress.trim().isNotEmpty &&
+                 directPort != null &&
+                 directPort >= 1 &&
+                 directPort <= 65535),
+       ),
+       snapshot = Map.unmodifiable(snapshot),
+       sourceVersions = Map.unmodifiable(sourceVersions),
+       recentEventIds = List.unmodifiable(recentEventIds),
+       pendingOperations = Map.unmodifiable(pendingOperations);
 
   final String hostId;
   final String pinnedHostKey;
   final String displayName;
   final int protocolVersion;
   final HostSyncPhase phase;
+  final String? directAddress;
+  final int? directPort;
+  final bool pairingPending;
   final Map<String, Object?> snapshot;
   final SyncCursor? cursor;
   final Map<String, int> sourceVersions;
@@ -216,6 +225,8 @@ class HostSyncState {
   bool get canMutate => phase == HostSyncPhase.synchronized;
 
   bool get needsSnapshot => phase == HostSyncPhase.snapshotRequired;
+
+  bool get canReconnect => directAddress != null && directPort != null;
 
   List<String> get operationIdsRequiringStatusQuery => pendingOperations.values
       .where((operation) => operation.requiresStatusQuery)
@@ -266,19 +277,22 @@ class HostSyncState {
   }
 
   Map<String, Object?> toCacheJson() => {
-        'schemaVersion': 1,
-        'hostId': hostId,
-        'pinnedHostKey': pinnedHostKey,
-        'displayName': displayName,
-        'protocolVersion': protocolVersion,
-        'snapshot': snapshot,
-        'cursor': cursor?.toJson(),
-        'sourceVersions': sourceVersions,
-        'recentEventIds': recentEventIds,
-        'pendingOperations': pendingOperations.values
-            .map((operation) => operation.toJson())
-            .toList(growable: false),
-      };
+    'schemaVersion': 1,
+    'hostId': hostId,
+    'pinnedHostKey': pinnedHostKey,
+    'displayName': displayName,
+    'protocolVersion': protocolVersion,
+    'directAddress': directAddress,
+    'directPort': directPort,
+    'pairingPending': pairingPending,
+    'snapshot': snapshot,
+    'cursor': cursor?.toJson(),
+    'sourceVersions': sourceVersions,
+    'recentEventIds': recentEventIds,
+    'pendingOperations': pendingOperations.values
+        .map((operation) => operation.toJson())
+        .toList(growable: false),
+  };
 
   factory HostSyncState.fromCacheJson(Map<String, Object?> json) {
     if (json['schemaVersion'] != 1) {
@@ -286,8 +300,9 @@ class HostSyncState {
     }
 
     final rawCursor = json['cursor'];
-    final rawSourceVersions =
-        Map<String, Object?>.from(json['sourceVersions']! as Map);
+    final rawSourceVersions = Map<String, Object?>.from(
+      json['sourceVersions']! as Map,
+    );
     final rawOperations = json['pendingOperations']! as List;
 
     return HostSyncState(
@@ -295,7 +310,12 @@ class HostSyncState {
       pinnedHostKey: json['pinnedHostKey']! as String,
       displayName: json['displayName']! as String,
       protocolVersion: json['protocolVersion']! as int,
-      phase: HostSyncPhase.cachedStale,
+      phase: json['pairingPending'] == true
+          ? HostSyncPhase.pairingPending
+          : HostSyncPhase.cachedStale,
+      directAddress: json['directAddress'] as String?,
+      directPort: json['directPort'] as int?,
+      pairingPending: json['pairingPending'] as bool? ?? false,
       snapshot: Map<String, Object?>.from(json['snapshot']! as Map),
       cursor: rawCursor == null
           ? null
@@ -304,12 +324,13 @@ class HostSyncState {
         for (final entry in rawSourceVersions.entries)
           entry.key: entry.value! as int,
       },
-      recentEventIds:
-          List<String>.from(json['recentEventIds']! as List<dynamic>),
+      recentEventIds: List<String>.from(
+        json['recentEventIds']! as List<dynamic>,
+      ),
       pendingOperations: {
         for (final rawOperation in rawOperations)
-          (rawOperation as Map)['idempotencyKey']! as String:
-              PendingOperation.fromJson(
+          (rawOperation as Map)['idempotencyKey']!
+              as String: PendingOperation.fromJson(
             Map<String, Object?>.from(rawOperation),
           ),
       },
@@ -330,6 +351,9 @@ class HostSyncState {
       displayName: displayName,
       protocolVersion: protocolVersion,
       phase: phase ?? this.phase,
+      directAddress: directAddress,
+      directPort: directPort,
+      pairingPending: pairingPending,
       snapshot: snapshot ?? this.snapshot,
       cursor: cursor ?? this.cursor,
       sourceVersions: sourceVersions ?? this.sourceVersions,
@@ -347,8 +371,8 @@ class NormalizedSyncEvent {
     required this.sourceObjectId,
     required this.sourceObjectVersion,
     required this.payload,
-  })  : assert(sequence > 0),
-        assert(sourceObjectVersion >= 0);
+  }) : assert(sequence > 0),
+       assert(sourceObjectVersion >= 0);
 
   final String eventId;
   final String hostEpoch;
@@ -374,10 +398,11 @@ class AuthoritativeHostSnapshot {
   final Map<String, int> sourceVersions;
 }
 
-typedef SnapshotEventReducer = Map<String, Object?> Function(
-  Map<String, Object?> currentSnapshot,
-  NormalizedSyncEvent event,
-);
+typedef SnapshotEventReducer =
+    Map<String, Object?> Function(
+      Map<String, Object?> currentSnapshot,
+      NormalizedSyncEvent event,
+    );
 
 class EventApplyTransition {
   const EventApplyTransition({
@@ -509,10 +534,7 @@ class MobileSyncReducer {
 
     final recentEventIds = [...state.recentEventIds, event.eventId];
     if (recentEventIds.length > _recentEventLimit) {
-      recentEventIds.removeRange(
-        0,
-        recentEventIds.length - _recentEventLimit,
-      );
+      recentEventIds.removeRange(0, recentEventIds.length - _recentEventLimit);
     }
 
     final nextState = HostSyncState(
@@ -524,10 +546,7 @@ class MobileSyncReducer {
       snapshot: isStaleSourceVersion
           ? state.snapshot
           : reduceSnapshot(state.snapshot, event),
-      cursor: SyncCursor(
-        hostEpoch: event.hostEpoch,
-        sequence: event.sequence,
-      ),
+      cursor: SyncCursor(hostEpoch: event.hostEpoch, sequence: event.sequence),
       sourceVersions: sourceVersions,
       recentEventIds: recentEventIds,
       pendingOperations: state.pendingOperations,
@@ -551,9 +570,7 @@ class MobileSyncReducer {
         state.phase != HostSyncPhase.replaying &&
         state.phase != HostSyncPhase.snapshotRequired &&
         state.phase != HostSyncPhase.synchronized) {
-      throw StateError(
-        'cannot accept a snapshot before host authentication',
-      );
+      throw StateError('cannot accept a snapshot before host authentication');
     }
     if (snapshot.hostId != state.hostId) {
       throw StateError('snapshot host identity does not match the cache');
@@ -581,11 +598,7 @@ class MobileSyncReducer {
   }
 }
 
-T _enumByName<T extends Enum>(
-  List<T> values,
-  String name,
-  T fallback,
-) {
+T _enumByName<T extends Enum>(List<T> values, String name, T fallback) {
   for (final value in values) {
     if (value.name == name) {
       return value;

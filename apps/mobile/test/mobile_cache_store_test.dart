@@ -54,6 +54,34 @@ void main() {
     expect(await partial.exists(), isTrue);
   });
 
+  test('pending pairing endpoint and host pin survive restart', () async {
+    final pending = HostSyncState(
+      hostId: 'host-pairing',
+      pinnedHostKey: 'ed25519-host-pin',
+      displayName: 'Pairing host',
+      protocolVersion: mobileProtocolVersion,
+      phase: HostSyncPhase.pairingPending,
+      directAddress: '192.0.2.10',
+      directPort: 45821,
+      pairingPending: true,
+      snapshot: const {},
+      cursor: null,
+      sourceVersions: const {},
+      recentEventIds: const [],
+      pendingOperations: const {},
+    );
+    await store.save(MobileCacheSnapshot(hosts: [pending]));
+
+    final restored = (await store.loadLatest()).snapshot.hosts['host-pairing']!;
+
+    expect(restored.phase, HostSyncPhase.pairingPending);
+    expect(restored.pairingPending, isTrue);
+    expect(restored.directAddress, '192.0.2.10');
+    expect(restored.directPort, 45821);
+    expect(restored.pinnedHostKey, 'ed25519-host-pin');
+    expect(restored.canMutate, isFalse);
+  });
+
   test('all corrupt generations fail without deleting evidence', () async {
     final corrupt = File(
       '${temporaryDirectory.path}${Platform.pathSeparator}'

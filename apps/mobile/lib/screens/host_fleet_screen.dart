@@ -8,12 +8,14 @@ class HostFleetScreen extends StatelessWidget {
     required this.hosts,
     required this.cacheStatus,
     required this.identityStatus,
+    required this.onPairHost,
     super.key,
   });
 
   final List<HostSyncState> hosts;
   final CacheBootstrapStatus cacheStatus;
   final IdentityBootstrapStatus identityStatus;
+  final VoidCallback? onPairHost;
 
   @override
   Widget build(BuildContext context) {
@@ -22,9 +24,11 @@ class HostFleetScreen extends StatelessWidget {
         title: const Text('Host Fleet'),
         actions: [
           IconButton(
-            tooltip: 'Pairing transport is not connected yet',
+            tooltip: onPairHost == null
+                ? 'Pairing is unavailable until protected local state is ready'
+                : 'Pair a host from a signed pairing code',
             icon: const Icon(Icons.qr_code_scanner),
-            onPressed: null,
+            onPressed: onPairHost,
           ),
         ],
       ),
@@ -179,6 +183,10 @@ class _HostCard extends StatelessWidget {
             ),
             const Divider(height: 24),
             Text('Host ID: ${host.hostId}'),
+            if (host.canReconnect) ...[
+              const SizedBox(height: 4),
+              Text('Direct endpoint: ${host.directAddress}:${host.directPort}'),
+            ],
             const SizedBox(height: 4),
             Text(
               cursor == null
@@ -204,6 +212,7 @@ class _HostCard extends StatelessWidget {
 
   static String _statusLabel(HostSyncPhase phase) {
     return switch (phase) {
+      HostSyncPhase.pairingPending => 'Awaiting host confirmation',
       HostSyncPhase.cachedStale => 'Cached • stale',
       HostSyncPhase.reconnecting => 'Reconnecting',
       HostSyncPhase.replaying => 'Replaying',
@@ -217,6 +226,7 @@ class _HostCard extends StatelessWidget {
 
   static Color _statusColor(HostSyncPhase phase) {
     return switch (phase) {
+      HostSyncPhase.pairingPending => Colors.blue,
       HostSyncPhase.synchronized => Colors.green,
       HostSyncPhase.reconnecting ||
       HostSyncPhase.replaying ||

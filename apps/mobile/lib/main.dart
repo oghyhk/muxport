@@ -2,12 +2,17 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'pairing/signed_pairing_offer.dart';
 import 'screens/host_fleet_screen.dart';
 import 'screens/session_timeline_screen.dart';
 import 'screens/approval_inbox_screen.dart';
 import 'screens/credential_matrix_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'state/app_bootstrap.dart';
+import 'state/mobile_cache_store.dart';
+import 'state/mobile_sync_state.dart';
+import 'transport/direct_transport_client.dart';
+import 'transport/direct_transport_protocol.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -130,14 +135,23 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
+  late Map<String, HostSyncState> _hosts;
+  bool _pairingInProgress = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _hosts = Map.of(widget.bootstrap.cache.hosts);
+  }
 
   @override
   Widget build(BuildContext context) {
     final screens = [
       HostFleetScreen(
-        hosts: widget.bootstrap.cache.hosts.values.toList(growable: false),
+        hosts: _hosts.values.toList(growable: false),
         cacheStatus: widget.bootstrap.cacheStatus,
         identityStatus: widget.bootstrap.identityStatus,
+        onPairHost: _canPairHost ? _pairHost : null,
       ),
       const SessionTimelineScreen(),
       const ApprovalInboxScreen(),
@@ -165,5 +179,186 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         ],
       ),
     );
+  }
+
+  bool get _canPairHost =>
+      !_pairingInProgress &&
+      widget.bootstrap.canAuthenticateTransport &&
+      widget.bootstrap.cacheStore != null;
+
+  Future<void> _pairHost() async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (identity == null || cacheStore == null || !_canPairHost) {
+      return;
+    }
+    final encoded = await _showPairingCodeDialog();
+    if (!mounted || encoded == null) {
+      return;
+    }
+    setState(() {
+      _pairingInProgress = true;
+    });
+    PendingDirectPairing? pairing;
+    try {
+      final offer = await SignedPairingOffer.parseAndVerify(
+        encoded,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      final existing = _hosts[offer.hostId];
+      if (existing != null &&
+          existing.pinnedHostKey != offer.hostIdentityPublicKeyHex) {
+        throw const DirectTransportProtocolException(
+          'this host id is already pinned to a different identity',
+        );
+      }
+      pairing = await PendingDirectPairing.connect(
+        offer: offer,
+        identity: identity,
+        deviceName: 'Muxport mobile',
+      );
+      if (!mounted) {
+        await pairing.close();
+        return;
+      }
+      final confirmed = await _showSasConfirmationDialog(
+        hostname: offer.hostname,
+        sas: pairing.sas,
+      );
+      if (!mounted || confirmed != true) {
+        await pairing.close();
+        return;
+      }
+      final enrollment = await pairing.confirm();
+      pairing = null;
+      final enrolledHost = HostSyncState(
+        hostId: enrollment.hostId,
+        pinnedHostKey: enrollment.hostIdentityPublicKeyHex,
+        displayName: enrollment.hostname,
+        protocolVersion: mobileProtocolVersion,
+        phase: enrollment.awaitingHostConfirmation
+            ? HostSyncPhase.pairingPending
+            : HostSyncPhase.cachedStale,
+        directAddress: enrollment.address,
+        directPort: enrollment.port,
+        pairingPending: enrollment.awaitingHostConfirmation,
+        snapshot: const {},
+        cursor: null,
+        sourceVersions: const {},
+        recentEventIds: const [],
+        pendingOperations: const {},
+      );
+      final nextHosts = {..._hosts, enrolledHost.hostId: enrolledHost};
+      await cacheStore.save(MobileCacheSnapshot(hosts: nextHosts.values));
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _hosts = nextHosts;
+      });
+      _showMessage(
+        enrollment.awaitingHostConfirmation
+            ? 'Phone confirmed. Confirm the same SAS on the host to finish.'
+            : 'Host paired. State sync will begin when the connector stream is available.',
+      );
+    } on Object catch (error) {
+      await pairing?.close();
+      if (mounted) {
+        _showMessage('Pairing failed safely: $error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _pairingInProgress = false;
+        });
+      }
+    }
+  }
+
+  Future<String?> _showPairingCodeDialog() {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Pair a host'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          minLines: 4,
+          maxLines: 10,
+          decoration: const InputDecoration(
+            labelText: 'Signed pairing code',
+            hintText: 'Paste the JSON pairing code from the host',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = controller.text.trim();
+              if (value.isNotEmpty) {
+                Navigator.pop(context, value);
+              }
+            },
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
+  }
+
+  Future<bool?> _showSasConfirmationDialog({
+    required String hostname,
+    required String sas,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Compare security code'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Check that this code exactly matches the trusted display on $hostname.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            SelectableText(
+              sas,
+              style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                letterSpacing: 8,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Do not continue if the codes differ. This confirmation window closes after two minutes.',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Codes differ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Codes match'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 }

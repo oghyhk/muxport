@@ -17,6 +17,7 @@ class AppBootstrapState {
     required this.cacheStatus,
     required this.identity,
     required this.identityStatus,
+    this.cacheStore,
   });
 
   factory AppBootstrapState.emptyForTest() {
@@ -26,6 +27,7 @@ class AppBootstrapState {
       cacheStatus: CacheBootstrapStatus.ready,
       identity: null,
       identityStatus: IdentityBootstrapStatus.unavailable,
+      cacheStore: null,
     );
   }
 
@@ -34,6 +36,7 @@ class AppBootstrapState {
   final CacheBootstrapStatus cacheStatus;
   final MobileDeviceIdentity? identity;
   final IdentityBootstrapStatus identityStatus;
+  final GenerationMobileCacheStore? cacheStore;
 
   bool get canAuthenticateTransport =>
       (cacheStatus == CacheBootstrapStatus.ready ||
@@ -49,10 +52,11 @@ class PlatformAppBootstrap {
     var cache = MobileCacheSnapshot.empty();
     var cacheGeneration = 0;
     var cacheStatus = CacheBootstrapStatus.ready;
+    GenerationMobileCacheStore? cacheStore;
 
     try {
-      final store = await GenerationMobileCacheStore.createDefault();
-      final result = await store.loadLatest();
+      cacheStore = await GenerationMobileCacheStore.createDefault();
+      final result = await cacheStore.loadLatest();
       cache = result.snapshot;
       cacheGeneration = result.generation;
       cacheStatus = result.recoveredFromPreviousGeneration
@@ -83,6 +87,7 @@ class PlatformAppBootstrap {
       cacheStatus: cacheStatus,
       identity: identity,
       identityStatus: identityStatus,
+      cacheStore: cacheStore,
     );
   }
 }
