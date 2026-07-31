@@ -11,27 +11,27 @@ $outputDirectory = Join-Path (Join-Path $outputDirectory 'src') 'generated'
 $schemaFile = Join-Path $schemaDirectory 'muxport.proto'
 $toolRoot = Join-Path (Join-Path $repositoryRoot '.tools') "protoc-$protocVersion"
 
-$isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+$runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
   [System.Runtime.InteropServices.OSPlatform]::Windows
 )
-$isLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+$runningOnLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
   [System.Runtime.InteropServices.OSPlatform]::Linux
 )
-$isMacOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+$runningOnMacOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
   [System.Runtime.InteropServices.OSPlatform]::OSX
 )
 $architecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
 
-if ($isWindows -and $architecture -eq 'X64') {
+if ($runningOnWindows -and $architecture -eq 'X64') {
   $assetName = "protoc-$protocVersion-win64.zip"
   $expectedDigest = 'b6dbc741897760694630ca9ee6a22fda589647b573fd6843d6943b72ceb05c15'
-} elseif ($isLinux -and $architecture -eq 'X64') {
+} elseif ($runningOnLinux -and $architecture -eq 'X64') {
   $assetName = "protoc-$protocVersion-linux-x86_64.zip"
   $expectedDigest = 'b52e803fad2f63232f75351c0ff735e891f40262de791bade78a3636831a522a'
-} elseif ($isMacOS -and $architecture -eq 'Arm64') {
+} elseif ($runningOnMacOS -and $architecture -eq 'Arm64') {
   $assetName = "protoc-$protocVersion-osx-aarch_64.zip"
   $expectedDigest = '90ced886e57a96a1ec98bf1f23bef2532bb1636ca8b27bb5eb34fea89cd6ef8b'
-} elseif ($isMacOS -and $architecture -eq 'X64') {
+} elseif ($runningOnMacOS -and $architecture -eq 'X64') {
   $assetName = "protoc-$protocVersion-osx-x86_64.zip"
   $expectedDigest = '8538ec43139ce2759ffd0840954cc0415796934b20c2a86fe493c9af2277cbea'
 } else {
@@ -39,7 +39,7 @@ if ($isWindows -and $architecture -eq 'X64') {
 }
 
 $archive = Join-Path $toolRoot $assetName
-$protocName = if ($isWindows) { 'protoc.exe' } else { 'protoc' }
+$protocName = if ($runningOnWindows) { 'protoc.exe' } else { 'protoc' }
 $protocPath = Join-Path (Join-Path $toolRoot 'bin') $protocName
 if (-not (Test-Path -LiteralPath $archive)) {
   New-Item -ItemType Directory -Path $toolRoot -Force | Out-Null
@@ -53,7 +53,7 @@ if ($actualDigest -ne $expectedDigest) {
 if (-not (Test-Path -LiteralPath $protocPath)) {
   Expand-Archive -LiteralPath $archive -DestinationPath $toolRoot -Force
 }
-if (-not $isWindows) {
+if (-not $runningOnWindows) {
   & chmod +x $protocPath
   if ($LASTEXITCODE -ne 0) {
     throw 'could not mark protoc executable'
@@ -70,7 +70,7 @@ if ($activePackages -notmatch "(?m)^protoc_plugin\s+$([regex]::Escape($dartPlugi
 $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $pubCache = if ($env:PUB_CACHE) {
   $env:PUB_CACHE
-} elseif ($isWindows) {
+} elseif ($runningOnWindows) {
   Join-Path (Join-Path $env:LOCALAPPDATA 'Pub') 'Cache'
 } else {
   Join-Path $userProfile '.pub-cache'
