@@ -313,6 +313,54 @@ void main() {
     await server.close();
   });
 
+  test('mobile client starts an authenticated remote session', () async {
+    final hostIdentity = await Ed25519().newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index + 81),
+    );
+    final hostPublic = await hostIdentity.extractPublicKey();
+    final hostPublicHex = _hex(hostPublic.bytes);
+    final mobileIdentity = await DeviceIdentityManager(
+      secureStore: _MemorySecureStore(),
+      random: Random(47),
+    ).loadOrCreate();
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final serverTask = _serveProbe(
+      server: server,
+      hostIdentity: hostIdentity,
+      hostPublicHex: hostPublicHex,
+      expectedDeviceId: mobileIdentity.deviceId,
+      expectedDevicePublicKeyHex: _hex(mobileIdentity.publicKeyBytes),
+      expectedSessionRuntime: 'codex-managed-work',
+      expectedSessionProject: '/srv/work',
+      expectedSessionPrompt: 'Implement the next task',
+    );
+    final connection = await AuthenticatedDirectConnection.connect(
+      address: InternetAddress.loopbackIPv4.address,
+      port: server.port,
+      pinnedHost: PinnedHostIdentity(
+        hostId: 'host-1',
+        publicKeyHex: hostPublicHex,
+      ),
+      identity: mobileIdentity,
+    );
+    final result = await connection.startSession(
+      commandId: 'start-command-1',
+      idempotencyKey: 'start-idempotency-1',
+      runtimeId: 'codex-managed-work',
+      projectPath: '/srv/work',
+      prompt: 'Implement the next task',
+      credentialProfileId: 'profile-work',
+    );
+    expect(result.success, isTrue);
+    expect(result.commandId, 'start-command-1');
+
+    await connection.close();
+    await serverTask;
+    await mobileIdentity.destroy();
+    hostIdentity.destroy();
+    await server.close();
+  });
+
   test('mobile client requests only guarded credential rotation', () async {
     final hostIdentity = await Ed25519().newKeyPairFromSeed(
       List<int>.generate(32, (index) => index + 91),
@@ -945,6 +993,9 @@ Future<void> _serveProbe({
   String? expectedAssignmentProfile,
   String? expectedRotationPool,
   String? expectedRotationRuntime,
+  String? expectedSessionRuntime,
+  String? expectedSessionProject,
+  String? expectedSessionPrompt,
 }) async {
   final socket = await server.first;
   final reader = _TestRecordReader(socket);
@@ -1039,7 +1090,15 @@ Future<void> _serveProbe({
     expect(request.header.senderId, expectedDeviceId);
     expect(request.header.recipientId, 'host-1');
     expect(request.header.sequence.toInt(), requestFrame.sequence);
-    if (expectApproval) {
+    if (expectedSessionRuntime != null) {
+      expect(request.command.commandId, 'start-command-1');
+      expect(request.header.idempotencyKey, 'start-idempotency-1');
+      expect(request.command.hasStartSession(), isTrue);
+      expect(request.command.startSession.runtimeId, expectedSessionRuntime);
+      expect(request.command.startSession.projectPath, expectedSessionProject);
+      expect(request.command.startSession.prompt, expectedSessionPrompt);
+      expect(request.command.startSession.credentialProfileId, 'profile-work');
+    } else if (expectApproval) {
       expect(request.command.commandId, 'approval-command-1');
       expect(request.header.idempotencyKey, 'approval-idempotency-1');
       expect(request.command.hasApproveAction(), isTrue);

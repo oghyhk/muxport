@@ -3,9 +3,44 @@ import 'package:flutter/material.dart';
 import '../state/mobile_sync_state.dart';
 
 class SessionTimelineScreen extends StatelessWidget {
-  const SessionTimelineScreen({required this.hosts, super.key});
+  const SessionTimelineScreen({
+    required this.hosts,
+    this.onStartSession,
+    this.onSendInput,
+    this.onSteerSession,
+    this.onInterruptSession,
+    super.key,
+  });
 
   final Iterable<HostSyncState> hosts;
+  final Future<void> Function(
+    HostSyncState host,
+    String runtimeId,
+    String projectPath,
+    String prompt,
+    String credentialProfileId,
+  )?
+  onStartSession;
+  final Future<void> Function(
+    HostSyncState host,
+    String runtimeId,
+    String sessionId,
+    String text,
+  )?
+  onSendInput;
+  final Future<void> Function(
+    HostSyncState host,
+    String runtimeId,
+    String sessionId,
+    String instruction,
+  )?
+  onSteerSession;
+  final Future<void> Function(
+    HostSyncState host,
+    String runtimeId,
+    String sessionId,
+  )?
+  onInterruptSession;
 
   @override
   Widget build(BuildContext context) {
@@ -25,6 +60,13 @@ class SessionTimelineScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Unified Session Timeline')),
+      floatingActionButton: onStartSession == null
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: () => _startSession(context),
+              icon: const Icon(Icons.add_comment_outlined),
+              label: const Text('New session'),
+            ),
       body: sessions.isEmpty
           ? const _EmptySessions()
           : ListView.separated(
@@ -67,6 +109,10 @@ class SessionTimelineScreen extends StatelessWidget {
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    onTap: onSendInput == null || !item.host.canMutate
+                        ? null
+                        : () =>
+                              _showSessionActions(context, item.host, session),
                     trailing: _StatusBadge(
                       status: statusLabel,
                       stale: !item.host.canMutate,
@@ -77,6 +123,235 @@ class SessionTimelineScreen extends StatelessWidget {
             ),
     );
   }
+
+  Future<void> _startSession(BuildContext context) async {
+    if (onStartSession == null) {
+      return;
+    }
+    final navigator = Navigator.of(context);
+    final targets = <_StartTarget>[];
+    for (final host in hosts) {
+      if (!host.canMutate) {
+        continue;
+      }
+      for (final raw in host.snapshot['runtimes'] as List? ?? const []) {
+        if (raw is! Map) {
+          continue;
+        }
+        final runtime = Map<String, Object?>.from(raw);
+        final runtimeId = _text(runtime['runtimeId']);
+        final profileId = _text(runtime['activeCredentialProfileId']);
+        final paths = runtime['projectPaths'] as List? ?? const [];
+        if (runtimeId.isEmpty) {
+          continue;
+        }
+        for (final rawPath in paths) {
+          final projectPath = _text(rawPath);
+          if (projectPath.isNotEmpty) {
+            targets.add(
+              _StartTarget(
+                host: host,
+                runtimeId: runtimeId,
+                runtimeName: _text(runtime['name'], fallback: runtimeId),
+                projectPath: projectPath,
+                credentialProfileId: profileId,
+              ),
+            );
+          }
+        }
+      }
+    }
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No mutable runtime with a known project is available.',
+          ),
+        ),
+      );
+      return;
+    }
+    final selected = await showModalBottomSheet<_StartTarget>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('Start a remote session'),
+              subtitle: Text(
+                'Choose the host, runtime, and project. The configured '
+                'credential is used for this new session.',
+              ),
+            ),
+            for (final target in targets)
+              ListTile(
+                leading: const Icon(Icons.terminal),
+                title: Text(
+                  '${target.host.displayName} · ${target.runtimeName}',
+                ),
+                subtitle: Text(target.projectPath),
+                onTap: () => Navigator.of(sheetContext).pop(target),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !navigator.mounted) {
+      return;
+    }
+    final prompt = await _askForText(
+      navigator.context,
+      title: 'Start ${selected.runtimeName}',
+      label: 'Prompt',
+      helper:
+          'The prompt is sent only through the authenticated host connection.',
+      action: 'Start',
+    );
+    if (prompt == null || prompt.isEmpty) {
+      return;
+    }
+    await onStartSession!(
+      selected.host,
+      selected.runtimeId,
+      selected.projectPath,
+      prompt,
+      selected.credentialProfileId,
+    );
+  }
+
+  Future<void> _showSessionActions(
+    BuildContext context,
+    HostSyncState host,
+    Map<String, Object?> session,
+  ) async {
+    final runtimeId = _text(session['runtimeId']);
+    final sessionId = _text(session['sessionId']);
+    if (runtimeId.isEmpty || sessionId.isEmpty || onSendInput == null) {
+      return;
+    }
+    final navigator = Navigator.of(context);
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              title: Text(_text(session['title'], fallback: 'Session actions')),
+              subtitle: const Text(
+                'Commands are routed to this exact session.',
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.send_outlined),
+              title: const Text('Send input'),
+              subtitle: const Text('Continue this session'),
+              onTap: () => Navigator.of(sheetContext).pop('input'),
+            ),
+            if (onSteerSession != null)
+              ListTile(
+                leading: const Icon(Icons.alt_route),
+                title: const Text('Steer'),
+                subtitle: const Text('Add a high-priority instruction'),
+                onTap: () => Navigator.of(sheetContext).pop('steer'),
+              ),
+            if (onInterruptSession != null)
+              ListTile(
+                leading: const Icon(Icons.stop_circle_outlined),
+                title: const Text('Interrupt'),
+                subtitle: const Text(
+                  'Stop the active turn without retrying it',
+                ),
+                onTap: () => Navigator.of(sheetContext).pop('interrupt'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !navigator.mounted) {
+      return;
+    }
+    if (action == 'interrupt') {
+      await onInterruptSession!(host, runtimeId, sessionId);
+      return;
+    }
+    final isSteer = action == 'steer';
+    final text = await _askForText(
+      navigator.context,
+      title: isSteer ? 'Steer session' : 'Send input',
+      label: isSteer ? 'Instruction' : 'Message',
+      helper: isSteer
+          ? 'Steering is delivered to the current turn.'
+          : 'The message continues the current session.',
+      action: isSteer ? 'Steer' : 'Send',
+    );
+    if (text == null || text.isEmpty) {
+      return;
+    }
+    if (isSteer) {
+      await onSteerSession!(host, runtimeId, sessionId, text);
+    } else {
+      await onSendInput!(host, runtimeId, sessionId, text);
+    }
+  }
+
+  Future<String?> _askForText(
+    BuildContext context, {
+    required String title,
+    required String label,
+    required String helper,
+    required String action,
+  }) async {
+    final controller = TextEditingController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(title),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            autocorrect: false,
+            minLines: 3,
+            maxLines: 8,
+            decoration: InputDecoration(labelText: label, helperText: helper),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(controller.text.trim()),
+              child: Text(action),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+}
+
+class _StartTarget {
+  const _StartTarget({
+    required this.host,
+    required this.runtimeId,
+    required this.runtimeName,
+    required this.projectPath,
+    required this.credentialProfileId,
+  });
+
+  final HostSyncState host;
+  final String runtimeId;
+  final String runtimeName;
+  final String projectPath;
+  final String credentialProfileId;
 }
 
 class _EmptySessions extends StatelessWidget {

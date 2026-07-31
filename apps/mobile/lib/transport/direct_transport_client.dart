@@ -664,6 +664,130 @@ class AuthenticatedDirectConnection {
     );
   }
 
+  /// Starts a new remote session. The connector resolves the configured
+  /// runtime credential; callers may only repeat its currently assigned
+  /// profile, never select an arbitrary secret for this request.
+  Future<wire.CommandResult> startSession({
+    required String commandId,
+    required String idempotencyKey,
+    required String runtimeId,
+    required String projectPath,
+    required String prompt,
+    String credentialProfileId = '',
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        runtimeId.trim().isEmpty ||
+        projectPath.trim().isEmpty ||
+        prompt.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'session start requires a runtime, project path, prompt, and positive deadline',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        startSession: wire.StartSessionCmd(
+          runtimeId: runtimeId,
+          projectPath: projectPath,
+          prompt: prompt,
+          credentialProfileId: credentialProfileId,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
+  Future<wire.CommandResult> sendInput({
+    required String commandId,
+    required String idempotencyKey,
+    required String runtimeId,
+    required String sessionId,
+    required String text,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        runtimeId.trim().isEmpty ||
+        sessionId.trim().isEmpty ||
+        text.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'input requires runtime and session routing, text, and a positive deadline',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        sendInput: wire.SendInputCmd(
+          runtimeId: runtimeId,
+          sessionId: sessionId,
+          text: text,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
+  Future<wire.CommandResult> steer({
+    required String commandId,
+    required String idempotencyKey,
+    required String runtimeId,
+    required String sessionId,
+    required String instruction,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        runtimeId.trim().isEmpty ||
+        sessionId.trim().isEmpty ||
+        instruction.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'steering requires runtime and session routing, an instruction, and a positive deadline',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        steer: wire.SteerCmd(
+          runtimeId: runtimeId,
+          sessionId: sessionId,
+          instruction: instruction,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
+  Future<wire.CommandResult> interrupt({
+    required String commandId,
+    required String idempotencyKey,
+    required String runtimeId,
+    required String sessionId,
+    String reason = 'Interrupted from Muxport mobile',
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero ||
+        runtimeId.trim().isEmpty ||
+        sessionId.trim().isEmpty) {
+      throw const DirectTransportProtocolException(
+        'interrupt requires runtime and session routing and a positive deadline',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        interrupt: wire.InterruptCmd(
+          runtimeId: runtimeId,
+          sessionId: sessionId,
+          reason: reason,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
   Future<wire.CommandResult> respondToApproval({
     required String commandId,
     required String idempotencyKey,

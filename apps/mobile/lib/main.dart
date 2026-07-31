@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_protocol/flutter_protocol.dart';
+import 'package:flutter_protocol/wire_protocol.dart' as wire;
 
 import 'pairing/signed_pairing_offer.dart';
 import 'security/device_identity.dart';
@@ -263,7 +264,15 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         identityStatus: widget.bootstrap.identityStatus,
         onPairHost: _canPairHost ? _pairHost : null,
       ),
-      SessionTimelineScreen(hosts: _hosts.values),
+      SessionTimelineScreen(
+        hosts: _hosts.values,
+        onStartSession: _canOperateSessions ? _startRemoteSession : null,
+        onSendInput: _canOperateSessions ? _sendRemoteInput : null,
+        onSteerSession: _canOperateSessions ? _steerRemoteSession : null,
+        onInterruptSession: _canOperateSessions
+            ? _interruptRemoteSession
+            : null,
+      ),
       ApprovalInboxScreen(
         hosts: _hosts.values,
         onDecision: widget.bootstrap.canAuthenticateTransport
@@ -326,6 +335,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       widget.bootstrap.identity != null &&
       widget.bootstrap.canAuthenticateTransport &&
       widget.bootstrap.cacheStore != null;
+
+  bool get _canOperateSessions => _canAssignCredential;
 
   Future<void> _openCredentialProvisioning() async {
     final identity = widget.bootstrap.identity;
@@ -528,6 +539,164 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       await _persistHost(unresolved, cacheStore);
       _showMessage(
         'Rotation outcome is unknown; verify host state before retrying: $error',
+      );
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  Future<void> _startRemoteSession(
+    HostSyncState host,
+    String runtimeId,
+    String projectPath,
+    String prompt,
+    String credentialProfileId,
+  ) {
+    return _dispatchSessionOperation(
+      host: host,
+      kind: 'start-session:$runtimeId',
+      successMessage: 'Remote session started. Synchronizing its timeline now.',
+      dispatch: (connection, operationId) => connection.startSession(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: runtimeId,
+        projectPath: projectPath,
+        prompt: prompt,
+        credentialProfileId: credentialProfileId,
+      ),
+    );
+  }
+
+  Future<void> _sendRemoteInput(
+    HostSyncState host,
+    String runtimeId,
+    String sessionId,
+    String text,
+  ) {
+    return _dispatchSessionOperation(
+      host: host,
+      kind: 'send-input:$sessionId',
+      successMessage: 'Input was sent to the remote session.',
+      dispatch: (connection, operationId) => connection.sendInput(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: runtimeId,
+        sessionId: sessionId,
+        text: text,
+      ),
+    );
+  }
+
+  Future<void> _steerRemoteSession(
+    HostSyncState host,
+    String runtimeId,
+    String sessionId,
+    String instruction,
+  ) {
+    return _dispatchSessionOperation(
+      host: host,
+      kind: 'steer:$sessionId',
+      successMessage: 'Steering instruction was sent to the remote session.',
+      dispatch: (connection, operationId) => connection.steer(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: runtimeId,
+        sessionId: sessionId,
+        instruction: instruction,
+      ),
+    );
+  }
+
+  Future<void> _interruptRemoteSession(
+    HostSyncState host,
+    String runtimeId,
+    String sessionId,
+  ) {
+    return _dispatchSessionOperation(
+      host: host,
+      kind: 'interrupt:$sessionId',
+      successMessage:
+          'Interrupt was sent. The connector will reconcile the turn.',
+      dispatch: (connection, operationId) => connection.interrupt(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: runtimeId,
+        sessionId: sessionId,
+      ),
+    );
+  }
+
+  Future<void> _dispatchSessionOperation({
+    required HostSyncState host,
+    required String kind,
+    required String successMessage,
+    required Future<wire.CommandResult> Function(
+      AuthenticatedDirectConnection connection,
+      String operationId,
+    )
+    dispatch,
+  }) async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (!host.canMutate ||
+        identity == null ||
+        cacheStore == null ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      _showMessage(
+        'This session command is not safely routable from current host state.',
+      );
+      return;
+    }
+    final now = DateTime.now();
+    final operationId =
+        'session-${identity.deviceId}-${now.microsecondsSinceEpoch}';
+    final pending = PendingOperation.local(
+      idempotencyKey: operationId,
+      kind: kind,
+      createdAtMs: now.millisecondsSinceEpoch,
+      deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
+    );
+    final pendingHost = host.addPendingOperation(pending);
+    await _persistHost(pendingHost, cacheStore);
+
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await dispatch(connection, operationId);
+      final state =
+          result.state.value >= 0 &&
+              result.state.value < RemoteOpState.values.length
+          ? RemoteOpState.values[result.state.value]
+          : RemoteOpState.reconciliationRequired;
+      final resolved = (_hosts[host.hostId] ?? pendingHost).resolveOperation(
+        operationId,
+        state,
+      );
+      await _persistHost(resolved, cacheStore);
+      _showMessage(
+        result.success
+            ? successMessage
+            : 'Connector did not confirm this session command: ${result.errorMessage}',
+      );
+      unawaited(_syncAllHosts());
+    } on Object catch (error) {
+      final current = _hosts[host.hostId] ?? pendingHost;
+      final unresolved = current.resolveOperation(
+        operationId,
+        RemoteOpState.reconciliationRequired,
+      );
+      await _persistHost(unresolved, cacheStore);
+      _showMessage(
+        'Session command outcome is unknown; verify host state before retrying: $error',
       );
     } finally {
       await connection?.close();
