@@ -424,7 +424,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Re-establish transport and verify host identity before accepting events.
 - [x] Query status of every locally pending operation by idempotency key.
 - [x] Resolve each operation to succeeded, failed, expired, or reconciliation required.
-- [ ] Clear local plaintext inputs and temporary attachment files left by an OS kill.
+- [x] Clear local plaintext inputs and temporary attachment files left by an OS kill.
 - [ ] Re-register push token only after E2EE identity is restored.
 
 ### Connector restart checklist

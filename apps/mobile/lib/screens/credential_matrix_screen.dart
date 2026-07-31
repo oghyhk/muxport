@@ -9,16 +9,12 @@ class CredentialMatrixScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final profiles =
-        <({HostSyncState host, Map<String, Object?> profile})>[];
+    final profiles = <({HostSyncState host, Map<String, Object?> profile})>[];
     for (final host in hosts) {
       final raw = host.snapshot['credentialProfiles'] as List? ?? const [];
       for (final value in raw) {
         if (value is Map) {
-          profiles.add((
-            host: host,
-            profile: Map<String, Object?>.from(value),
-          ));
+          profiles.add((host: host, profile: Map<String, Object?>.from(value)));
         }
       }
     }
@@ -49,10 +45,7 @@ class CredentialMatrixScreen extends StatelessWidget {
                 final item = profiles[index];
                 final profile = item.profile;
                 final profileId = _string(profile['profileId']);
-                final assignments = _runtimeAssignments(
-                  item.host,
-                  profileId,
-                );
+                final assignments = _runtimeAssignments(item.host, profileId);
                 final status = _credentialStatus(profile['status']);
                 return Card(
                   child: ListTile(
@@ -71,7 +64,10 @@ class CredentialMatrixScreen extends StatelessWidget {
                     subtitle: Text(
                       [
                         item.host.displayName,
-                        _string(profile['provider'], fallback: 'unknown provider'),
+                        _string(
+                          profile['provider'],
+                          fallback: 'unknown provider',
+                        ),
                         _maskedFingerprint(profile['accountFingerprint']),
                         if (assignments.isNotEmpty)
                           'assigned to ${assignments.join(', ')}',
@@ -85,10 +81,7 @@ class CredentialMatrixScreen extends StatelessWidget {
                         if (!item.host.canMutate)
                           const Text(
                             'STALE',
-                            style: TextStyle(
-                              color: Colors.amber,
-                              fontSize: 10,
-                            ),
+                            style: TextStyle(color: Colors.amber, fontSize: 10),
                           ),
                       ],
                     ),

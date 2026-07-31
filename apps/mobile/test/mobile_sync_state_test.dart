@@ -22,7 +22,9 @@ void main() {
       expect(restored.phase, HostSyncPhase.cachedStale);
       expect(restored.canMutate, isFalse);
       expect(
-          restored.cursor, const SyncCursor(hostEpoch: 'epoch-a', sequence: 4));
+        restored.cursor,
+        const SyncCursor(hostEpoch: 'epoch-a', sequence: 4),
+      );
       expect(restored.snapshot, {'session': 'cached'});
       expect(restored.operationIdsRequiringStatusQuery, ['approval-1']);
     });
@@ -120,11 +122,7 @@ void main() {
           cursorSequence: 5,
           recentEventIds: const ['event-5'],
         ),
-        event: _event(
-          eventId: 'event-5',
-          sequence: 5,
-          sourceVersion: 2,
-        ),
+        event: _event(eventId: 'event-5', sequence: 5, sourceVersion: 2),
         reduceSnapshot: _mergeValue,
       );
 
@@ -137,11 +135,7 @@ void main() {
     test('event ID reuse at a new sequence forces a snapshot', () {
       final transition = MobileSyncReducer.applyEvent(
         state: _replayingState(recentEventIds: const ['event-5']),
-        event: _event(
-          eventId: 'event-5',
-          sequence: 5,
-          sourceVersion: 2,
-        ),
+        event: _event(eventId: 'event-5', sequence: 5, sourceVersion: 2),
         reduceSnapshot: _mergeValue,
       );
 
@@ -173,11 +167,7 @@ void main() {
     test('sequence gap blocks mutations and forces snapshot recovery', () {
       final transition = MobileSyncReducer.applyEvent(
         state: _replayingState(),
-        event: _event(
-          eventId: 'event-7',
-          sequence: 7,
-          sourceVersion: 2,
-        ),
+        event: _event(eventId: 'event-7', sequence: 7, sourceVersion: 2),
         reduceSnapshot: _mergeValue,
       );
 
@@ -256,10 +246,9 @@ void main() {
         sourceAcknowledged.pendingOperations['approval-1']?.state,
         MobileOperationState.connectorAcknowledged,
       );
-      expect(
-        sourceAcknowledged.operationIdsRequiringStatusQuery,
-        ['approval-1'],
-      );
+      expect(sourceAcknowledged.operationIdsRequiringStatusQuery, [
+        'approval-1',
+      ]);
       expect(
         succeeded.pendingOperations['approval-1']?.state,
         MobileOperationState.succeeded,
@@ -376,8 +365,5 @@ Map<String, Object?> _mergeValue(
   Map<String, Object?> snapshot,
   NormalizedSyncEvent event,
 ) {
-  return {
-    ...snapshot,
-    'session': event.payload['value'],
-  };
+  return {...snapshot, 'session': event.payload['value']};
 }

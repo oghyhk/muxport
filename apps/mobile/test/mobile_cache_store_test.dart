@@ -37,28 +37,31 @@ void main() {
     expect(loaded.snapshot.hosts['host-1']?.snapshot['session'], 'live');
   });
 
-  test('multiple hosts retain independent identities cursors and state', () async {
-    final first = _host(session: 'first-host-session');
-    final second = _host(
-      hostId: 'host-2',
-      pinnedHostKey: 'second-public-host-key',
-      displayName: 'Second host',
-      session: 'second-host-session',
-      cursor: const SyncCursor(hostEpoch: 'epoch-b', sequence: 19),
-    );
-    await store.save(MobileCacheSnapshot(hosts: [first, second]));
+  test(
+    'multiple hosts retain independent identities cursors and state',
+    () async {
+      final first = _host(session: 'first-host-session');
+      final second = _host(
+        hostId: 'host-2',
+        pinnedHostKey: 'second-public-host-key',
+        displayName: 'Second host',
+        session: 'second-host-session',
+        cursor: const SyncCursor(hostEpoch: 'epoch-b', sequence: 19),
+      );
+      await store.save(MobileCacheSnapshot(hosts: [first, second]));
 
-    final hosts = (await store.loadLatest()).snapshot.hosts;
+      final hosts = (await store.loadLatest()).snapshot.hosts;
 
-    expect(hosts.keys, ['host-1', 'host-2']);
-    expect(hosts['host-1']?.pinnedHostKey, 'public-host-key');
-    expect(hosts['host-1']?.cursor?.hostEpoch, 'epoch-a');
-    expect(hosts['host-1']?.snapshot['session'], 'first-host-session');
-    expect(hosts['host-2']?.pinnedHostKey, 'second-public-host-key');
-    expect(hosts['host-2']?.cursor?.hostEpoch, 'epoch-b');
-    expect(hosts['host-2']?.cursor?.sequence, 19);
-    expect(hosts['host-2']?.snapshot['session'], 'second-host-session');
-  });
+      expect(hosts.keys, ['host-1', 'host-2']);
+      expect(hosts['host-1']?.pinnedHostKey, 'public-host-key');
+      expect(hosts['host-1']?.cursor?.hostEpoch, 'epoch-a');
+      expect(hosts['host-1']?.snapshot['session'], 'first-host-session');
+      expect(hosts['host-2']?.pinnedHostKey, 'second-public-host-key');
+      expect(hosts['host-2']?.cursor?.hostEpoch, 'epoch-b');
+      expect(hosts['host-2']?.cursor?.sequence, 19);
+      expect(hosts['host-2']?.snapshot['session'], 'second-host-session');
+    },
+  );
 
   test('partial newest generation falls back to last valid cache', () async {
     await store.save(MobileCacheSnapshot(hosts: [_host(session: 'first')]));

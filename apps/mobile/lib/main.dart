@@ -6,6 +6,7 @@ import 'package:flutter_protocol/flutter_protocol.dart';
 
 import 'pairing/signed_pairing_offer.dart';
 import 'security/device_identity.dart';
+import 'security/sensitive_inputs.dart';
 import 'screens/host_fleet_screen.dart';
 import 'screens/session_timeline_screen.dart';
 import 'screens/approval_inbox_screen.dart';
@@ -146,6 +147,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
   bool _syncInProgress = false;
   Timer? _syncTimer;
   bool _isForeground = true;
+  final SensitiveInputRegistry _sensitiveInputs = SensitiveInputRegistry();
   final HostSyncOrchestrator _syncOrchestrator = const HostSyncOrchestrator();
 
   @override
@@ -164,6 +166,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _syncTimer?.cancel();
+    _sensitiveInputs.dispose();
     super.dispose();
   }
 
@@ -183,6 +186,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         _isForeground = false;
         _syncTimer?.cancel();
         _syncTimer = null;
+        _sensitiveInputs.clear();
+        unawaited(_clearSensitiveArtifacts());
         unawaited(_persistBeforeSuspension());
         break;
     }
@@ -234,6 +239,15 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       return;
     }
     await cacheStore.save(MobileCacheSnapshot(hosts: _hosts.values));
+  }
+
+  Future<void> _clearSensitiveArtifacts() async {
+    try {
+      await widget.bootstrap.sensitiveArtifactStore?.clear();
+    } on Object {
+      // Cleanup is best-effort during OS suspension. Startup repeats it before
+      // any durable state is loaded.
+    }
   }
 
   @override
@@ -373,40 +387,44 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     }
   }
 
-  Future<String?> _showPairingCodeDialog() {
-    final controller = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Pair a host'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          minLines: 4,
-          maxLines: 10,
-          decoration: const InputDecoration(
-            labelText: 'Signed pairing code',
-            hintText: 'Paste the JSON pairing code from the host',
-            border: OutlineInputBorder(),
+  Future<String?> _showPairingCodeDialog() async {
+    final controller = _sensitiveInputs.createController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Pair a host'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            minLines: 4,
+            maxLines: 10,
+            decoration: const InputDecoration(
+              labelText: 'Signed pairing code',
+              hintText: 'Paste the JSON pairing code from the host',
+              border: OutlineInputBorder(),
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = controller.text.trim();
+                if (value.isNotEmpty) {
+                  Navigator.pop(context, value);
+                }
+              },
+              child: const Text('Connect'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final value = controller.text.trim();
-              if (value.isNotEmpty) {
-                Navigator.pop(context, value);
-              }
-            },
-            child: const Text('Connect'),
-          ),
-        ],
-      ),
-    ).whenComplete(controller.dispose);
+      );
+    } finally {
+      _sensitiveInputs.release(controller);
+    }
   }
 
   Future<bool?> _showSasConfirmationDialog({

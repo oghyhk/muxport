@@ -1,4 +1,5 @@
 import '../security/device_identity.dart';
+import '../security/sensitive_artifacts.dart';
 import 'mobile_cache_store.dart';
 
 enum CacheBootstrapStatus {
@@ -18,6 +19,7 @@ class AppBootstrapState {
     required this.identity,
     required this.identityStatus,
     this.cacheStore,
+    this.sensitiveArtifactStore,
   });
 
   factory AppBootstrapState.emptyForTest() {
@@ -28,6 +30,7 @@ class AppBootstrapState {
       identity: null,
       identityStatus: IdentityBootstrapStatus.unavailable,
       cacheStore: null,
+      sensitiveArtifactStore: null,
     );
   }
 
@@ -37,6 +40,7 @@ class AppBootstrapState {
   final MobileDeviceIdentity? identity;
   final IdentityBootstrapStatus identityStatus;
   final GenerationMobileCacheStore? cacheStore;
+  final SensitiveArtifactStore? sensitiveArtifactStore;
 
   bool get canAuthenticateTransport =>
       (cacheStatus == CacheBootstrapStatus.ready ||
@@ -49,6 +53,14 @@ class PlatformAppBootstrap {
   const PlatformAppBootstrap._();
 
   static Future<AppBootstrapState> load() async {
+    SensitiveArtifactStore? sensitiveArtifactStore;
+    try {
+      sensitiveArtifactStore = await SensitiveArtifactStore.createDefault();
+      await sensitiveArtifactStore.clear();
+    } on Object {
+      sensitiveArtifactStore = null;
+    }
+
     var cache = MobileCacheSnapshot.empty();
     var cacheGeneration = 0;
     var cacheStatus = CacheBootstrapStatus.ready;
@@ -88,6 +100,7 @@ class PlatformAppBootstrap {
       identity: identity,
       identityStatus: identityStatus,
       cacheStore: cacheStore,
+      sensitiveArtifactStore: sensitiveArtifactStore,
     );
   }
 }

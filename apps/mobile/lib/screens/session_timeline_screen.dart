@@ -14,17 +14,13 @@ class SessionTimelineScreen extends StatelessWidget {
       final raw = host.snapshot['activeSessions'] as List? ?? const [];
       for (final value in raw) {
         if (value is Map) {
-          sessions.add((
-            host: host,
-            session: Map<String, Object?>.from(value),
-          ));
+          sessions.add((host: host, session: Map<String, Object?>.from(value)));
         }
       }
     }
     sessions.sort(
-      (left, right) => _text(
-        left.session['title'],
-      ).compareTo(_text(right.session['title'])),
+      (left, right) =>
+          _text(left.session['title']).compareTo(_text(right.session['title'])),
     );
 
     return Scaffold(
@@ -55,8 +51,14 @@ class SessionTimelineScreen extends StatelessWidget {
                     subtitle: Text(
                       [
                         item.host.displayName,
-                        _text(session['runtimeId'], fallback: 'unknown runtime'),
-                        _text(session['projectPath'], fallback: 'unknown project'),
+                        _text(
+                          session['runtimeId'],
+                          fallback: 'unknown runtime',
+                        ),
+                        _text(
+                          session['projectPath'],
+                          fallback: 'unknown project',
+                        ),
                         if (profile.isNotEmpty) 'profile $profile',
                       ].join(' • '),
                       maxLines: 3,
