@@ -601,6 +601,49 @@ impl PairingStore {
         )
     }
 
+    /// Replaces the host-signed registry in one transaction. This does not
+    /// alter provider credentials or the OS-protected host identity.
+    pub fn revoke_device(
+        &mut self,
+        expected_host_id: &str,
+        host_identity: &SigningKey,
+        device_id: &str,
+    ) -> Result<bool, PairingStoreError> {
+        if expected_host_id.trim().is_empty()
+            || device_id.trim().is_empty()
+            || device_id.len() > 256
+        {
+            return Err(PairingStoreError::InvalidPairingState);
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut registry = load_registry_tx(&tx, expected_host_id, host_identity)?;
+        let is_active = registry
+            .list_devices()
+            .into_iter()
+            .find(|device| device.device_id == device_id)
+            .is_some_and(|device| !device.is_revoked);
+        if !is_active {
+            tx.commit()?;
+            return Ok(false);
+        }
+        debug_assert!(registry.revoke_device(device_id));
+        let signed = registry.signed_snapshot(expected_host_id, host_identity)?;
+        tx.execute(
+            "INSERT INTO signed_device_registry
+                (singleton, signed_blob, updated_at_ms)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(singleton) DO UPDATE SET
+                signed_blob = excluded.signed_blob,
+                updated_at_ms = excluded.updated_at_ms",
+            params![signed, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn cancel(&mut self, pairing_id: &str) -> Result<bool, PairingStoreError> {
         let changed = self.conn.execute(
             "UPDATE pairing_sessions SET state_code = ?1
@@ -1118,6 +1161,50 @@ mod tests {
             store.bind_host_identity("host-2", &first.verifying_key()),
             Err(PairingStoreError::HostIdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn device_revocation_is_signed_durable_and_rejected_after_restart() {
+        let db_path = std::env::temp_dir().join(format!(
+            "muxport-pairing-revoke-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let host_identity = SigningKey::generate(&mut OsRng);
+        let device_identity = SigningKey::generate(&mut OsRng);
+        {
+            let mut store = PairingStore::open_sqlite(&db_path).unwrap();
+            let (pairing_id, _) = claim_pairing(&mut store, "host-1", &device_identity);
+            store
+                .confirm_sas(&pairing_id, "123456", ConfirmingParty::Phone)
+                .unwrap();
+            store
+                .confirm_sas(&pairing_id, "123456", ConfirmingParty::Host)
+                .unwrap();
+            let device = store
+                .finalize(&pairing_id, "host-1", &host_identity)
+                .unwrap();
+            assert!(store
+                .load_registry("host-1", &host_identity)
+                .unwrap()
+                .is_authorized(&device.device_id, &device.public_key_hex));
+            assert!(store
+                .revoke_device("host-1", &host_identity, &device.device_id)
+                .unwrap());
+            assert!(!store
+                .revoke_device("host-1", &host_identity, &device.device_id)
+                .unwrap());
+        }
+        {
+            let store = PairingStore::open_sqlite(&db_path).unwrap();
+            let registry = store.load_registry("host-1", &host_identity).unwrap();
+            let device = registry.list_devices().into_iter().next().unwrap();
+            assert!(device.is_revoked);
+            assert!(!registry.is_authorized(&device.device_id, &device.public_key_hex));
+        }
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 
     #[test]

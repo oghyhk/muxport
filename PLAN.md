@@ -820,7 +820,7 @@ Exit: release criteria in Section 22 pass for two consecutive candidate builds.
 
 ## 21. Operational runbooks
 
-- [ ] Lost phone/device revocation.
+- [x] Lost phone/device revocation.
 - [ ] Host replacement and re-pairing.
 - [ ] Vault unlock failure.
 - [ ] Credential suspected compromised.

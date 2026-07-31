@@ -1375,6 +1375,8 @@ async fn run_local_subcommand() -> Result<bool, DynError> {
     };
     match command.as_str() {
         "pairing-confirm" => run_pairing_confirm(arguments)?,
+        "pairing-list" => run_pairing_list(arguments)?,
+        "pairing-revoke" => run_pairing_revoke(arguments)?,
         "opencode-profile-auth" => {
             let profile_id = arguments
                 .next()
@@ -1902,6 +1904,72 @@ fn run_pairing_confirm(
             );
         }
         Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn run_pairing_revoke(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<(), DynError> {
+    let host_id = arguments
+        .next()
+        .ok_or("pairing-revoke requires HOST_ID DEVICE_ID")?;
+    let device_id = arguments
+        .next()
+        .ok_or("pairing-revoke requires HOST_ID DEVICE_ID")?;
+    if arguments.next().is_some() {
+        return Err("pairing-revoke accepts exactly HOST_ID DEVICE_ID".into());
+    }
+    let identity = HostIdentityManager::new(OsHostIdentityStore::new())
+        .load_existing(&host_id)?
+        .ok_or("no existing protected identity exists for that host id")?;
+    let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
+        .unwrap_or_else(|_| "muxport-pairing.db".into());
+    let mut store = PairingStore::open_sqlite(&pairing_db)?;
+    store.bind_host_identity(
+        &host_id,
+        &identity.signing_key().verifying_key(),
+    )?;
+    if store.revoke_device(&host_id, identity.signing_key(), &device_id)? {
+        println!(
+            "device {device_id} is revoked durably; restart the connector now to terminate its existing listener state"
+        );
+    } else {
+        println!("device {device_id} was not present or was already revoked");
+    }
+    Ok(())
+}
+
+fn run_pairing_list(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<(), DynError> {
+    let host_id = arguments
+        .next()
+        .ok_or("pairing-list requires HOST_ID")?;
+    if arguments.next().is_some() {
+        return Err("pairing-list accepts exactly HOST_ID".into());
+    }
+    let identity = HostIdentityManager::new(OsHostIdentityStore::new())
+        .load_existing(&host_id)?
+        .ok_or("no existing protected identity exists for that host id")?;
+    let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
+        .unwrap_or_else(|_| "muxport-pairing.db".into());
+    let mut store = PairingStore::open_sqlite(&pairing_db)?;
+    store.bind_host_identity(
+        &host_id,
+        &identity.signing_key().verifying_key(),
+    )?;
+    for device in store
+        .load_registry(&host_id, identity.signing_key())?
+        .list_devices()
+    {
+        println!(
+            "{}\t{}\t{}\t{}",
+            device.device_id,
+            if device.is_revoked { "revoked" } else { "active" },
+            device.device_name,
+            device.public_key_hex
+        );
     }
     Ok(())
 }

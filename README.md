@@ -102,6 +102,18 @@ OS-protected host identity and fails closed for a wrong host ID. Once both
 sides confirm, the mobile app periodically authenticates, restores a snapshot,
 replays contiguous journal events, persists its cursor, and acknowledges it.
 
+For a lost phone, list and revoke the affected paired device from the same OS
+user account, then restart the connector so its listener reloads the signed
+registry:
+
+```sh
+cargo run -p connector --bin muxport-connector -- pairing-list HOST_ID
+cargo run -p connector --bin muxport-connector -- pairing-revoke HOST_ID DEVICE_ID
+```
+
+See the [lost-phone revocation runbook](docs/runbooks/lost-phone-revocation.md)
+before performing this recovery action.
+
 ### Development managed OpenCode profile
 
 Managed profiles keep OpenCode home, data, configuration, cache, and state in

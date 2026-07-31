@@ -269,6 +269,17 @@ impl PairingCoordinator {
             .load_registry(&self.host_id, &self.host_identity)?)
     }
 
+    pub fn revoke_device(
+        &mut self,
+        device_id: &str,
+    ) -> Result<bool, PairingCoordinatorError> {
+        Ok(self.store.revoke_device(
+            &self.host_id,
+            &self.host_identity,
+            device_id,
+        )?)
+    }
+
     fn discard_expired_offers(&mut self, now_ms: i64) {
         self.pending_offers
             .retain(|_, pending| pending.expires_at_ms >= now_ms);
