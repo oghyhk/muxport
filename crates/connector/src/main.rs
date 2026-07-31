@@ -19,6 +19,7 @@ use muxport_protocol::{
     RuntimeStateEvent,
 };
 use serde::Deserialize;
+use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fs;
@@ -34,6 +35,7 @@ use tracing_subscriber::FmtSubscriber;
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const MAX_CONFIGURED_RECONNECT_DELAY: Duration = Duration::from_secs(5 * 60);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const DELTAS_PER_SNAPSHOT: usize = 100;
 const SOURCE_UPDATE_CAPACITY: usize = 512;
@@ -274,6 +276,7 @@ async fn main() -> Result<(), DynError> {
     mirror.save_snapshot(&journal)?;
 
     let runtimes = load_configured_runtimes().await?;
+    let reconnect_delay_cap = configured_reconnect_delay_cap()?;
     let configured_runtime_ids = runtimes
         .iter()
         .map(|(config, _)| config.runtime_id.clone())
@@ -467,6 +470,7 @@ async fn main() -> Result<(), DynError> {
             config.clone(),
             updates_tx.clone(),
             shutdown_rx.clone(),
+            reconnect_delay_cap,
         )));
     }
     drop(updates_tx);
@@ -633,6 +637,7 @@ async fn monitor_runtime(
     config: RuntimeConfig,
     updates: mpsc::Sender<SourceUpdate>,
     mut shutdown: watch::Receiver<bool>,
+    reconnect_delay_cap: Duration,
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     let mut degraded_reported = false;
@@ -683,10 +688,10 @@ async fn monitor_runtime(
                     }
                     degraded_reported = true;
                 }
-                if wait_for_shutdown(&mut shutdown, reconnect_delay).await {
+                if wait_for_shutdown(&mut shutdown, jittered_reconnect_delay(reconnect_delay)).await {
                     return;
                 }
-                reconnect_delay = next_reconnect_delay(reconnect_delay);
+                reconnect_delay = next_reconnect_delay(reconnect_delay, reconnect_delay_cap);
                 continue;
             }
         };
@@ -745,10 +750,10 @@ async fn monitor_runtime(
             }
             degraded_reported = true;
         }
-        if wait_for_shutdown(&mut shutdown, reconnect_delay).await {
+        if wait_for_shutdown(&mut shutdown, jittered_reconnect_delay(reconnect_delay)).await {
             return;
         }
-        reconnect_delay = next_reconnect_delay(reconnect_delay);
+        reconnect_delay = next_reconnect_delay(reconnect_delay, reconnect_delay_cap);
     }
 }
 
@@ -830,11 +835,47 @@ async fn shutdown_signal() -> Result<(), io::Error> {
     }
 }
 
-fn next_reconnect_delay(delay: Duration) -> Duration {
+fn next_reconnect_delay(delay: Duration, cap: Duration) -> Duration {
     delay
         .checked_mul(2)
-        .unwrap_or(MAX_RECONNECT_DELAY)
-        .min(MAX_RECONNECT_DELAY)
+        .unwrap_or(cap)
+        .min(cap)
+}
+
+fn jittered_reconnect_delay(delay: Duration) -> Duration {
+    let percent = rand::thread_rng().gen_range(75_u32..=125);
+    reconnect_delay_with_jitter_percent(delay, percent)
+}
+
+fn reconnect_delay_with_jitter_percent(delay: Duration, percent: u32) -> Duration {
+    delay
+        .checked_mul(percent)
+        .and_then(|scaled| scaled.checked_div(100))
+        .unwrap_or(delay)
+}
+
+fn configured_reconnect_delay_cap() -> Result<Duration, io::Error> {
+    let Some(raw) = nonempty_env("MUXPORT_RECONNECT_MAX_MS") else {
+        return Ok(MAX_RECONNECT_DELAY);
+    };
+    let milliseconds = raw.parse::<u64>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MUXPORT_RECONNECT_MAX_MS must be an integer number of milliseconds",
+        )
+    })?;
+    let cap = Duration::from_millis(milliseconds);
+    if !(INITIAL_RECONNECT_DELAY..=MAX_CONFIGURED_RECONNECT_DELAY).contains(&cap) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MUXPORT_RECONNECT_MAX_MS must be between {} and {}",
+                INITIAL_RECONNECT_DELAY.as_millis(),
+                MAX_CONFIGURED_RECONNECT_DELAY.as_millis()
+            ),
+        ));
+    }
+    Ok(cap)
 }
 
 async fn load_configured_runtimes(
@@ -1501,12 +1542,28 @@ mod tests {
     #[test]
     fn reconnect_delay_is_bounded() {
         assert_eq!(
-            next_reconnect_delay(Duration::from_secs(1)),
+            next_reconnect_delay(Duration::from_secs(1), MAX_RECONNECT_DELAY),
             Duration::from_secs(2)
         );
         assert_eq!(
-            next_reconnect_delay(Duration::from_secs(30)),
+            next_reconnect_delay(Duration::from_secs(30), MAX_RECONNECT_DELAY),
             MAX_RECONNECT_DELAY
+        );
+        assert_eq!(
+            next_reconnect_delay(Duration::from_secs(20), Duration::from_secs(45)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            next_reconnect_delay(Duration::from_secs(40), Duration::from_secs(45)),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            reconnect_delay_with_jitter_percent(Duration::from_secs(20), 75),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            reconnect_delay_with_jitter_percent(Duration::from_secs(20), 125),
+            Duration::from_secs(25)
         );
     }
 

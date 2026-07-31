@@ -444,7 +444,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [ ] Distinguish connector-managed, user-managed, and externally adopted runtimes.
 - [ ] Automatically restart only connector-managed runtimes with restart policy enabled.
-- [ ] Use exponential backoff with jitter and a configurable cap.
+- [x] Use exponential backoff with jitter and a configurable cap.
 - [x] Enter `crash_loop` after five failures within ten minutes by default.
 - [ ] Preserve exit code, signal, stderr tail, source version, and profile ID in redacted diagnostics.
 - [x] Never include environment values or tokens in captured crash output.
