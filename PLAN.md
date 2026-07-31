@@ -484,7 +484,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Dispatch one independently idempotent child operation per host/runtime.
 - [x] Show partial progress and partial failure honestly.
 - [x] Do not claim global success until every selected target has reconciled.
-- [ ] Offer retry for failed targets with the original operation group ID.
+- [x] Offer retry for failed targets with the original operation group ID.
 - [ ] Never attempt distributed rollback of already successful hosts unless the user explicitly chooses “revert successful targets.”
 
 ### Rotation pools

@@ -296,6 +296,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onBulkAssignCredentials: _canAssignCredential
             ? _bulkAssignCredentials
             : null,
+        onRetryBulkSwitch: _canAssignCredential
+            ? _retryBulkCredentialSwitch
+            : null,
       ),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
@@ -460,20 +463,28 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
   }
 
   Future<void> _bulkAssignCredentials(
-    List<BulkCredentialSwitchTarget> targets,
-  ) async {
+    List<BulkCredentialSwitchTarget> targets, {
+    String? originalGroupId,
+    bool isRetry = false,
+  }) async {
     final identity = widget.bootstrap.identity;
     final cacheStore = widget.bootstrap.cacheStore;
     if (targets.isEmpty || identity == null || cacheStore == null) {
       return;
     }
+    final groupId =
+        originalGroupId ??
+        'switch-${identity.deviceId}-${DateTime.now().microsecondsSinceEpoch}';
     final authorized = await _stepUpAuthenticator.authorize(
       reason:
-          'Authorize changing credentials for ${targets.length} remote runtimes',
+          '${isRetry ? 'Authorize retrying' : 'Authorize changing'} credentials '
+          'for ${targets.length} remote runtimes',
     );
     if (!authorized || !mounted) {
       if (mounted) {
-        _showMessage('Device authentication is required. No changes were sent.');
+        _showMessage(
+          'Device authentication is required. No changes were sent.',
+        );
       }
       return;
     }
@@ -489,6 +500,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         identity,
         cacheStore,
         index,
+        groupId,
       );
       switch (outcome) {
         case _BulkAssignmentOutcome.confirmed:
@@ -503,7 +515,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     }
     if (mounted) {
       _showMessage(
-        'Multi-host switch: $confirmed confirmed, $rejected rejected, '
+        '${isRetry ? 'Bulk-switch retry' : 'Multi-host switch'}: '
+        '$confirmed confirmed, $rejected rejected, '
         '$unknown need reconciliation, $unavailable unavailable. '
         'No global success is claimed until every selected runtime reconciles.',
       );
@@ -511,11 +524,20 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     unawaited(_syncAllHosts());
   }
 
+  Future<void> _retryBulkCredentialSwitch(BulkSwitchRetryGroup group) {
+    return _bulkAssignCredentials(
+      group.failedTargets,
+      originalGroupId: group.groupId,
+      isRetry: true,
+    );
+  }
+
   Future<_BulkAssignmentOutcome> _dispatchBulkCredentialAssignment(
     BulkCredentialSwitchTarget target,
     MobileDeviceIdentity identity,
     GenerationMobileCacheStore cacheStore,
     int index,
+    String groupId,
   ) async {
     final host = _hosts[target.host.hostId];
     if (host == null ||
@@ -531,7 +553,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         'bulk-assignment-${identity.deviceId}-${now.microsecondsSinceEpoch}-$index';
     final pending = PendingOperation.local(
       idempotencyKey: operationId,
-      kind: 'assignment:${target.runtimeId}',
+      kind: bulkSwitchOperationKind(
+        groupId: groupId,
+        runtimeId: target.runtimeId,
+        credentialProfileId: target.credentialProfileId,
+      ),
       createdAtMs: now.millisecondsSinceEpoch,
       deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
     );

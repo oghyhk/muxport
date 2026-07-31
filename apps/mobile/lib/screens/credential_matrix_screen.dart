@@ -10,6 +10,7 @@ class CredentialMatrixScreen extends StatelessWidget {
     this.onAssignCredential,
     this.onRotateCredential,
     this.onBulkAssignCredentials,
+    this.onRetryBulkSwitch,
     super.key,
   });
 
@@ -29,6 +30,7 @@ class CredentialMatrixScreen extends StatelessWidget {
   onRotateCredential;
   final Future<void> Function(List<BulkCredentialSwitchTarget> targets)?
   onBulkAssignCredentials;
+  final Future<void> Function(BulkSwitchRetryGroup group)? onRetryBulkSwitch;
 
   @override
   Widget build(BuildContext context) {
@@ -47,6 +49,7 @@ class CredentialMatrixScreen extends StatelessWidget {
       ).compareTo(_string(right.profile['displayName'])),
     );
     final assignments = _assignmentRows(hosts);
+    final retryGroups = BulkSwitchRetryGroup.failedFromHosts(hosts);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Account Profiles & Assignments')),
@@ -74,7 +77,11 @@ class CredentialMatrixScreen extends StatelessWidget {
               separatorBuilder: (_, _) => const SizedBox(height: 8),
               itemBuilder: (context, index) {
                 if (index == 0) {
-                  return _AssignmentMatrixCard(rows: assignments);
+                  return _AssignmentMatrixCard(
+                    rows: assignments,
+                    retryGroups: retryGroups,
+                    onRetryBulkSwitch: onRetryBulkSwitch,
+                  );
                 }
                 final item = profiles[index - 1];
                 final profile = item.profile;
@@ -483,9 +490,15 @@ List<_AssignmentRow> _assignmentRows(Iterable<HostSyncState> hosts) {
 }
 
 class _AssignmentMatrixCard extends StatelessWidget {
-  const _AssignmentMatrixCard({required this.rows});
+  const _AssignmentMatrixCard({
+    required this.rows,
+    required this.retryGroups,
+    this.onRetryBulkSwitch,
+  });
 
   final List<_AssignmentRow> rows;
+  final List<BulkSwitchRetryGroup> retryGroups;
+  final Future<void> Function(BulkSwitchRetryGroup group)? onRetryBulkSwitch;
 
   @override
   Widget build(BuildContext context) {
@@ -504,6 +517,28 @@ class _AssignmentMatrixCard extends StatelessWidget {
               'Assignments affect new sessions only. Project paths are read-only source metadata.',
             ),
             const SizedBox(height: 8),
+            if (retryGroups.isNotEmpty) ...[
+              const Text(
+                'Failed bulk-switch targets can be retried independently. '
+                'Unknown outcomes are intentionally excluded.',
+              ),
+              for (final group in retryGroups)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.refresh),
+                    label: Text(
+                      'Retry ${group.failedTargets.length} failed target(s)',
+                    ),
+                    onPressed: onRetryBulkSwitch == null
+                        ? null
+                        : () {
+                            onRetryBulkSwitch!(group);
+                          },
+                  ),
+                ),
+              const SizedBox(height: 8),
+            ],
             if (rows.isEmpty)
               const Text('No runtime assignments are in the latest snapshots.')
             else

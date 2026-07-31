@@ -73,4 +73,52 @@ void main() {
       expect(plan.missingProfile, hasLength(1));
     },
   );
+
+  test(
+    'preserves group identity and retries only conclusively failed children',
+    () {
+      final kind = bulkSwitchOperationKind(
+        groupId: 'group-1',
+        runtimeId: 'runtime-1',
+        credentialProfileId: 'profile-1',
+      );
+      final ref = parseBulkSwitchOperationKind(kind);
+      expect(ref?.groupId, 'group-1');
+      expect(ref?.runtimeId, 'runtime-1');
+      expect(ref?.credentialProfileId, 'profile-1');
+
+      final host = HostSyncState(
+        hostId: 'host-1',
+        pinnedHostKey: 'key',
+        displayName: 'Host',
+        protocolVersion: mobileProtocolVersion,
+        phase: HostSyncPhase.synchronized,
+        snapshot: const {},
+        cursor: null,
+        sourceVersions: const {},
+        recentEventIds: const [],
+        pendingOperations: {
+          'failed': PendingOperation(
+            idempotencyKey: 'failed',
+            kind: kind,
+            createdAtMs: 1,
+            deadlineMs: 2,
+            state: MobileOperationState.failed,
+          ),
+          'unknown': PendingOperation(
+            idempotencyKey: 'unknown',
+            kind: kind,
+            createdAtMs: 1,
+            deadlineMs: 2,
+            state: MobileOperationState.reconciliationRequired,
+          ),
+        },
+      );
+      final groups = BulkSwitchRetryGroup.failedFromHosts([host]);
+      expect(groups, hasLength(1));
+      expect(groups.single.groupId, 'group-1');
+      expect(groups.single.failedTargets, hasLength(1));
+      expect(groups.single.failedTargets.single.runtimeId, 'runtime-1');
+    },
+  );
 }
