@@ -544,6 +544,15 @@ impl AgentAdapter for CodexAdapter {
             .collect()
     }
 
+    async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError> {
+        Self::validate_nonempty(session_id, "Codex session id")?;
+        self.list_sessions()
+            .await?
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .ok_or_else(|| AdapterError::SessionNotFound(session_id.to_owned()))
+    }
+
     async fn subscribe_events(&self) -> Result<EventStream, AdapterError> {
         self.ensure_client().await?;
         let receiver = self.state.events.subscribe();

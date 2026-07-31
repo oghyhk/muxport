@@ -17,6 +17,8 @@ pub enum AdapterError {
     ConnectionLostWithDetail(String),
     #[error("Approval target not found: {0}")]
     ApprovalNotFound(String),
+    #[error("Session not found: {0}")]
+    SessionNotFound(String),
     #[error("Credential validation failed: {0}")]
     CredentialInvalid(String),
     #[error("Invalid adapter input: {0}")]
@@ -144,6 +146,7 @@ pub trait AgentAdapter: Send + Sync {
     async fn probe(&self) -> Result<CapabilitySet, AdapterError>;
     async fn discover_projects(&self) -> Result<Vec<ProjectInfo>, AdapterError>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError>;
+    async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError>;
     async fn subscribe_events(&self) -> Result<EventStream, AdapterError>;
     async fn start_session(&self, project_path: &str, prompt: &str, profile_id: &str) -> Result<String, AdapterError>;
     async fn send_input(&self, session_id: &str, text: &str) -> Result<(), AdapterError>;

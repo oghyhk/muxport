@@ -132,7 +132,7 @@ Define a versioned `AgentAdapter` interface with:
 
 - [ ] `probe()` — executable version, API version, capabilities, and health.
 - [x] `discover_projects()` — repositories/workspaces visible to the runtime.
-- [ ] `list_sessions()` and `read_session()` — authoritative snapshot.
+- [x] `list_sessions()` and `read_session()` — authoritative snapshot.
 - [x] `subscribe()` — normalized live-event stream.
 - [x] `start_session()`, `send_input()`, `steer()`, and `interrupt()`.
 - [x] `respond_to_approval()` with source correlation identifiers.

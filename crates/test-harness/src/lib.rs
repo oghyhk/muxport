@@ -85,6 +85,14 @@ impl AgentAdapter for DeterministicFakeAdapter {
         }])
     }
 
+    async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError> {
+        self.list_sessions()
+            .await?
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .ok_or_else(|| AdapterError::SessionNotFound(session_id.to_owned()))
+    }
+
     async fn subscribe_events(&self) -> Result<EventStream, AdapterError> {
         Ok(Box::pin(stream::empty()))
     }
@@ -174,5 +182,16 @@ mod tests {
         let adapter2 = DeterministicFakeAdapter::new(AgentType::Opencode);
         adapter2.set_fail_mode(true);
         assert!(adapter2.probe().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fake_adapter_reads_one_authoritative_session_or_not_found() {
+        let adapter = DeterministicFakeAdapter::new(AgentType::Codex);
+        let session = adapter.read_session("fake-sess-1").await.unwrap();
+        assert_eq!(session.project_path, "/fake/repo");
+        assert!(matches!(
+            adapter.read_session("missing").await,
+            Err(AdapterError::SessionNotFound(id)) if id == "missing"
+        ));
     }
 }

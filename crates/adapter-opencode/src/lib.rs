@@ -805,6 +805,15 @@ impl AgentAdapter for OpenCodeAdapter {
         Ok(summaries)
     }
 
+    async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError> {
+        Self::validate_nonempty(session_id, "OpenCode session id")?;
+        self.list_sessions()
+            .await?
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .ok_or_else(|| AdapterError::SessionNotFound(session_id.to_owned()))
+    }
+
     async fn subscribe_events(&self) -> Result<EventStream, AdapterError> {
         let request = self
             .client
