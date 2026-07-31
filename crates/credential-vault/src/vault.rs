@@ -705,6 +705,98 @@ impl PersistentVault {
         Ok(())
     }
 
+    /// Stops local use of a credential while retaining its encrypted record.
+    /// This is deliberately distinct from upstream revocation: it makes no
+    /// provider-facing request and is projected as `Disabled`, never `Revoked`.
+    pub fn disable_credential(&mut self, profile_id: &str) -> Result<(), VaultError> {
+        let previous = self
+            .records
+            .get(profile_id)
+            .cloned()
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        let status = CredentialStatus::try_from(previous.status).map_err(|_| {
+            VaultError::InvalidOperation("credential has invalid status".into())
+        })?;
+        if !matches!(
+            status,
+            CredentialStatus::Active | CredentialStatus::Staged | CredentialStatus::CoolingDown
+        ) {
+            return Err(VaultError::InvalidOperation(
+                "credential is not eligible for local disable".into(),
+            ));
+        }
+        let record = self
+            .records
+            .get_mut(profile_id)
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        record.staged_payload_hex = None;
+        record.staged_nonce_hex = None;
+        record.staged_validated_at_ms = None;
+        record.status = CredentialStatus::Disabled as i32;
+        if let Err(error) = self.save() {
+            self.records.insert(profile_id.into(), previous);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Re-enables a credential previously disabled only by Muxport. A provider
+    /// validation/activation flow is still required before assigning it to a
+    /// runtime; this method merely restores local eligibility.
+    pub fn enable_credential(&mut self, profile_id: &str) -> Result<(), VaultError> {
+        let previous = self
+            .records
+            .get(profile_id)
+            .cloned()
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        if previous.status != CredentialStatus::Disabled as i32 {
+            return Err(VaultError::InvalidOperation(
+                "only a locally disabled credential can be enabled".into(),
+            ));
+        }
+        let record = self
+            .records
+            .get_mut(profile_id)
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        record.status = CredentialStatus::Active as i32;
+        if let Err(error) = self.save() {
+            self.records.insert(profile_id.into(), previous);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Records an upstream revocation only after the caller has independently
+    /// confirmed it with the provider. It never performs a provider request.
+    pub fn record_confirmed_upstream_revocation(
+        &mut self,
+        profile_id: &str,
+    ) -> Result<(), VaultError> {
+        let previous = self
+            .records
+            .get(profile_id)
+            .cloned()
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        if previous.status == CredentialStatus::Revoked as i32 {
+            return Err(VaultError::InvalidOperation(
+                "credential is already recorded as provider-revoked".into(),
+            ));
+        }
+        let record = self
+            .records
+            .get_mut(profile_id)
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        record.staged_payload_hex = None;
+        record.staged_nonce_hex = None;
+        record.staged_validated_at_ms = None;
+        record.status = CredentialStatus::Revoked as i32;
+        if let Err(error) = self.save() {
+            self.records.insert(profile_id.into(), previous);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn decrypt_active_secret(&self, profile_id: &str) -> Result<SecretBuffer, VaultError> {
         let record = self
             .records
@@ -1427,6 +1519,47 @@ mod tests {
         ));
         assert!(matches!(
             vault.stage_credential("profile-1", &vec![0_u8; MAX_SECRET_BYTES + 1]),
+            Err(VaultError::InvalidOperation(_))
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn local_disable_is_not_conflated_with_confirmed_provider_revocation() {
+        let path = unique_path("vault-disable");
+        let mut vault =
+            PersistentVault::open_or_create(&path, "host-1", kek(b"passphrase")).unwrap();
+        vault
+            .enroll_credential(enrollment("profile-1", "provider"), b"secret")
+            .unwrap();
+
+        vault.disable_credential("profile-1").unwrap();
+        assert_eq!(
+            vault.get_profile("profile-1").unwrap().status,
+            CredentialStatus::Disabled
+        );
+        assert!(matches!(
+            vault.decrypt_active_secret("profile-1"),
+            Err(VaultError::InvalidOperation(_))
+        ));
+        vault.enable_credential("profile-1").unwrap();
+        assert_eq!(
+            vault
+                .decrypt_active_secret("profile-1")
+                .unwrap()
+                .expose_secret(),
+            b"secret"
+        );
+
+        vault
+            .record_confirmed_upstream_revocation("profile-1")
+            .unwrap();
+        assert_eq!(
+            vault.get_profile("profile-1").unwrap().status,
+            CredentialStatus::Revoked
+        );
+        assert!(matches!(
+            vault.enable_credential("profile-1"),
             Err(VaultError::InvalidOperation(_))
         ));
         let _ = std::fs::remove_file(path);

@@ -175,6 +175,11 @@ class CredentialStatus extends $pb.ProtobufEnum {
   static const CredentialStatus CREDENTIAL_STATUS_REVOKED =
       CredentialStatus._(5, _omitEnumNames ? '' : 'CREDENTIAL_STATUS_REVOKED');
 
+  /// Disabled is a local Muxport state. It must never be presented as a claim
+  /// that the provider has revoked the remote credential.
+  static const CredentialStatus CREDENTIAL_STATUS_DISABLED =
+      CredentialStatus._(6, _omitEnumNames ? '' : 'CREDENTIAL_STATUS_DISABLED');
+
   static const $core.List<CredentialStatus> values = <CredentialStatus>[
     CREDENTIAL_STATUS_UNSPECIFIED,
     CREDENTIAL_STATUS_STAGED,
@@ -182,10 +187,11 @@ class CredentialStatus extends $pb.ProtobufEnum {
     CREDENTIAL_STATUS_COOLING_DOWN,
     CREDENTIAL_STATUS_INVALID,
     CREDENTIAL_STATUS_REVOKED,
+    CREDENTIAL_STATUS_DISABLED,
   ];
 
   static final $core.List<CredentialStatus?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 5);
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
   static CredentialStatus? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

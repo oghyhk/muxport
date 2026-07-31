@@ -55,6 +55,9 @@ enum CredentialStatus {
   CREDENTIAL_STATUS_COOLING_DOWN = 3;
   CREDENTIAL_STATUS_INVALID = 4;
   CREDENTIAL_STATUS_REVOKED = 5;
+  // Disabled is a local Muxport state. It must never be presented as a claim
+  // that the provider has revoked the remote credential.
+  CREDENTIAL_STATUS_DISABLED = 6;
 }
 
 // Agent Type

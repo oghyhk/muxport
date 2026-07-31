@@ -130,6 +130,7 @@ String _credentialStatus(Object? raw) {
     3 => 'Cooling down',
     4 => 'Invalid',
     5 => 'Revoked',
+    6 => 'Disabled locally',
     _ => 'Unknown',
   };
 }
