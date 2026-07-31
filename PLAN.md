@@ -180,7 +180,7 @@ Define a versioned `AgentAdapter` interface with:
 - [ ] Windows desktop: per-user background process installed through signed packaging; avoid a system service until user-vault behavior is proven.
 - [ ] Linux desktop: `systemd --user`.
 - [ ] Linux server: dedicated unprivileged service account with a systemd service and explicitly configured vault-unlock method.
-- [ ] Container: rootless image where possible, with project directories and encrypted vault storage mounted separately.
+- [x] Container: rootless image where possible, with project directories and encrypted vault storage mounted separately.
 - [ ] Never run the connector or agent runtimes as administrator/root unless a documented deployment explicitly requires it.
 
 ### Desired-state reconciler

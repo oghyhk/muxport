@@ -47,9 +47,11 @@ by host snapshots. Runtime updates share a bounded queue, but only the main
 daemon task writes the journal and projection; SQLite sequence order therefore
 remains deterministic across sources.
 
-The host ID persisted here is only a stable logical identifier. It is not a
-cryptographic host identity and must not be used as proof of pairing; durable
-signing keys and device certificates remain separate required work.
+The host ID persisted here is a stable logical identifier, not a key. Pairing
+separately loads or creates an OS-protected Ed25519 host identity, pins its
+public key in the pairing database, and rejects replacement or host-ID
+mismatch. Mobile accepts snapshots and events only after the pinned host
+identity completes the authenticated encrypted handshake.
 
 ## Live durability order
 
@@ -89,10 +91,14 @@ host snapshot.
   events; a new event is recorded after a real recovery and later failure.
 - Codex App Server loss discards process-bound active-turn IDs and approval
   callbacks. Durable threads are rediscovered with `thread/list`.
-- OpenCode is externally managed and is never killed by its HTTP adapter.
-- Shutdown signals every monitor, drops the update receiver to release blocked
-  producers, closes or terminates the owned Codex child, and writes a final
-  snapshot.
+- Externally adopted OpenCode is never killed by its HTTP adapter. Each
+  manifest-managed OpenCode child is restarted only by its own monitor and
+  stopped during graceful connector shutdown.
+- `SIGINT` and Unix `SIGTERM` signal every monitor, drop the update receiver to
+  release blocked producers, close or terminate owned children, and write a
+  final snapshot. Managed child handles are kill-on-drop if startup fails.
+- Five managed-runtime failures within ten minutes latch a crash loop until an
+  explicit connector restart.
 - A concurrent connector using the same lock path fails closed. The marker file
   is retained because only the live OS lock proves ownership; normal exit,
   crash, and reboot release the lock without stale-file deletion.
@@ -108,6 +114,7 @@ host snapshot.
 | `MUXPORT_VAULT_FILE` | Host-bound encrypted provider credential vault | `vault.sealed` |
 | `MUXPORT_HOST_ID` | Optional stable logical host ID; must match persisted state | generated once |
 | `MUXPORT_HOSTNAME` | Display hostname | OS hostname or `unnamed-host` |
+| `MUXPORT_RUNTIME_MANIFEST` | Absolute version 1 multi-runtime manifest; authoritative when set | unset |
 | `MUXPORT_OPENCODE_URL` | OpenCode server base URL | `http://127.0.0.1:4096` |
 | `MUXPORT_OPENCODE_PASSWORD` | OpenCode HTTP Basic password | unset |
 | `MUXPORT_OPENCODE_RUNTIME_ID` | Stable OpenCode runtime correlation ID | `opencode-local` |
@@ -122,6 +129,12 @@ events, or logs. A managed Codex profile uses supported App Server account
 methods inside its isolated roots; the connector never edits Codex's
 credential or SQLite files.
 
+For multi-instance deployments, the runtime manifest replaces the legacy
+single-runtime topology variables. It contains only runtime IDs, profile IDs,
+executables, projects, and unique OpenCode loopback ports. Unknown fields
+(including secret-shaped fields) fail closed. See
+[`runtime-manifest.md`](runtime-manifest.md).
+
 Desktop startup loads the host identity and provider-vault KEK from the native
 credential store. If either is locked or unavailable, non-secret runtime
 mirroring continues while pairing and/or credential operations remain disabled.
@@ -135,10 +148,9 @@ mirroring continues while pairing and/or credential operations remain disabled.
   commands carry `session_id` for restart-safe routing.
 - Codex active-turn and pending-approval state is process-bound and cannot be
   reconstructed after App Server loss from the currently used stable reads.
-- Relay/direct delivery, client acknowledgements, snapshot transfer, command
-  dispatch, and mobile application state replacement are not connected to this
-  mirror yet.
-- Managed OpenCode and Codex profiles are implemented for one configured
-  instance of each runtime. Multi-instance desired-state supervision,
-  surviving-child adoption, crash-loop policy, and Windows profile ACL
-  enforcement remain incomplete.
+- The authenticated direct path provides pairing, snapshot transfer, replay,
+  cursor acknowledgement, idempotent command dispatch, and mobile cache
+  replacement. The opaque relay path and push delivery remain incomplete.
+- Multi-instance manifest supervision and crash-loop latching are implemented.
+  Dynamic desired-state edits, surviving-child adoption after a hard connector
+  kill, and Windows profile ACL enforcement remain incomplete.

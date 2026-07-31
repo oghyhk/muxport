@@ -1,11 +1,26 @@
-FROM rust:1.85-slim as builder
+FROM rust:1.85-slim AS builder
 WORKDIR /usr/src/muxport
-RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release -p connector
+RUN cargo build --locked --release -p connector --bin muxport-connector
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 muxport \
+    && useradd --uid 10001 --gid muxport --shell /usr/sbin/nologin \
+        --home-dir /var/lib/muxport --create-home muxport \
+    && install -d -m 0700 -o muxport -g muxport \
+        /var/lib/muxport/state /var/lib/muxport/profiles /workspace
 COPY --from=builder /usr/src/muxport/target/release/muxport-connector /usr/local/bin/
-EXPOSE 4096
+ENV MUXPORT_STATE_DB=/var/lib/muxport/state/events.db \
+    MUXPORT_COMMAND_DB=/var/lib/muxport/state/commands.db \
+    MUXPORT_PAIRING_DB=/var/lib/muxport/state/pairing.db \
+    MUXPORT_VAULT_FILE=/var/lib/muxport/state/vault.sealed
+WORKDIR /var/lib/muxport
+USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/muxport-connector"]

@@ -192,6 +192,9 @@ for enrollment, validation, synchronization, and restart behavior. The legacy
 single-runtime environment variables remain available when the manifest
 variable is unset.
 
+For unattended VPS operation and the rootless container boundary, see the
+[Linux server deployment guide](docs/deployment/linux-server.md).
+
 ## Security
 
 Never report a security issue containing live credentials in a public issue.
