@@ -333,7 +333,7 @@ secret_handle          # opaque reference into vault
 - [x] Assign a connector-monotonic sequence to every normalized event.
 - [x] Include connector boot epoch so sequence resets are unambiguous.
 - [ ] Persist event and cursor before acknowledging it to the source adapter when possible.
-- [ ] Retain a bounded journal by age and size.
+- [x] Retain a bounded journal by age and size.
 - [x] Compact only events older than every connected client's acknowledged cursor or an explicit retention threshold.
 - [x] Store periodic authoritative snapshots.
 - [x] Detect cursor gaps and force snapshot reconciliation.

@@ -31,12 +31,32 @@ pub enum JournalError {
     InvalidSnapshotBoundary { snapshot: u64, current: u64 },
     #[error("Event journal integrity check failed: {0}")]
     IntegrityCheckFailed(String),
+    #[error("Invalid event journal retention policy: {0}")]
+    InvalidRetentionPolicy(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalRetentionPolicy {
+    pub max_event_age: Duration,
+    pub max_event_bytes: u64,
+    pub max_snapshots: usize,
+}
+
+impl Default for JournalRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_event_age: Duration::from_secs(30 * 24 * 60 * 60),
+            max_event_bytes: 64 * 1024 * 1024,
+            max_snapshots: 64,
+        }
+    }
 }
 
 pub struct EventJournal {
     conn: Connection,
     boot_epoch: u64,
     current_sequence: u64,
+    retention_policy: JournalRetentionPolicy,
 }
 
 impl EventJournal {
@@ -46,6 +66,7 @@ impl EventJournal {
             conn,
             boot_epoch,
             current_sequence: 0,
+            retention_policy: JournalRetentionPolicy::default(),
         };
         journal.init_tables()?;
         Ok(journal)
@@ -74,6 +95,7 @@ impl EventJournal {
             conn,
             boot_epoch,
             current_sequence: 0,
+            retention_policy: JournalRetentionPolicy::default(),
         };
         journal.init_tables()?;
         journal.load_max_sequence()?;
@@ -87,10 +109,33 @@ impl EventJournal {
                 boot_epoch INTEGER NOT NULL,
                 event_id TEXT NOT NULL,
                 timestamp_ms INTEGER NOT NULL,
+                recorded_at_ms INTEGER NOT NULL,
                 payload BLOB NOT NULL
             )",
             [],
         )?;
+        let has_recorded_at = {
+            let mut statement = self.conn.prepare("PRAGMA table_info(events)")?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for column in columns {
+                if column? == "recorded_at_ms" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_recorded_at {
+            self.conn.execute(
+                "ALTER TABLE events
+                 ADD COLUMN recorded_at_ms INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            self.conn.execute(
+                "UPDATE events SET recorded_at_ms = ?1 WHERE recorded_at_ms = 0",
+                params![chrono::Utc::now().timestamp_millis()],
+            )?;
+        }
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS snapshots (
@@ -112,6 +157,10 @@ impl EventJournal {
         )?;
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_recorded_at ON events(recorded_at_ms)",
             [],
         )?;
         Ok(())
@@ -148,9 +197,18 @@ impl EventJournal {
         let mut payload = Vec::new();
         event.encode(&mut payload)?;
 
+        let recorded_at_ms = chrono::Utc::now().timestamp_millis();
         if let Err(error) = self.conn.execute(
-            "INSERT INTO events (boot_epoch, event_id, timestamp_ms, payload) VALUES (?1, ?2, ?3, ?4)",
-            params![self.boot_epoch, event.event_id, event.timestamp_ms, payload],
+            "INSERT INTO events
+                (boot_epoch, event_id, timestamp_ms, recorded_at_ms, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                self.boot_epoch,
+                event.event_id,
+                event.timestamp_ms,
+                recorded_at_ms,
+                payload
+            ],
         ) {
             let is_duplicate = match &error {
                 rusqlite::Error::SqliteFailure(inner, _) => {
@@ -227,6 +285,7 @@ impl EventJournal {
             "INSERT INTO snapshots (sequence, boot_epoch, timestamp_ms, snapshot_blob) VALUES (?1, ?2, ?3, ?4)",
             params![snapshot.snapshot_sequence, self.boot_epoch, now_ms, blob],
         )?;
+        self.enforce_retention_at(now_ms)?;
         Ok(())
     }
 
@@ -284,6 +343,82 @@ impl EventJournal {
         Ok(())
     }
 
+    pub fn set_retention_policy(
+        &mut self,
+        policy: JournalRetentionPolicy,
+    ) -> Result<(), JournalError> {
+        validate_retention_policy(policy)?;
+        self.retention_policy = policy;
+        Ok(())
+    }
+
+    pub fn enforce_retention(&self) -> Result<usize, JournalError> {
+        self.enforce_retention_at(chrono::Utc::now().timestamp_millis())
+    }
+
+    fn enforce_retention_at(&self, now_ms: i64) -> Result<usize, JournalError> {
+        validate_retention_policy(self.retention_policy)?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let latest_snapshot_sequence: Option<u64> = transaction.query_row(
+            "SELECT MAX(sequence) FROM snapshots",
+            [],
+            |row| row.get(0),
+        )?;
+        let Some(latest_snapshot_sequence) = latest_snapshot_sequence else {
+            transaction.commit()?;
+            return Ok(0);
+        };
+        let max_age_ms = i64::try_from(self.retention_policy.max_event_age.as_millis())
+            .unwrap_or(i64::MAX);
+        let cutoff_ms = now_ms.saturating_sub(max_age_ms);
+        let mut statement = transaction.prepare(
+            "SELECT sequence, recorded_at_ms, length(payload)
+             FROM events
+             WHERE sequence <= ?1
+             ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map(params![latest_snapshot_sequence], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        })?;
+        let mut covered = Vec::new();
+        let mut total_bytes = 0_u64;
+        for row in rows {
+            let row = row?;
+            total_bytes = total_bytes.saturating_add(row.2);
+            covered.push(row);
+        }
+        drop(statement);
+        let mut delete_through = None;
+        for (sequence, timestamp_ms, payload_bytes) in covered {
+            if timestamp_ms < cutoff_ms || total_bytes > self.retention_policy.max_event_bytes {
+                delete_through = Some(sequence);
+                total_bytes = total_bytes.saturating_sub(payload_bytes);
+            }
+        }
+        let deleted = match delete_through {
+            Some(sequence) => transaction.execute(
+                "DELETE FROM events WHERE sequence <= ?1",
+                params![sequence],
+            )?,
+            None => 0,
+        };
+        transaction.execute(
+            "DELETE FROM snapshots
+             WHERE id NOT IN (
+                 SELECT id FROM snapshots
+                 ORDER BY sequence DESC, id DESC
+                 LIMIT ?1
+             )",
+            params![self.retention_policy.max_snapshots as i64],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
     pub fn get_cursor_ack(&self, client_id: &str) -> Result<Option<u64>, JournalError> {
         let mut stmt = self.conn.prepare("SELECT sequence FROM cursor_acks WHERE client_id = ?1")?;
         let mut rows = stmt.query(params![client_id])?;
@@ -326,6 +461,25 @@ impl EventJournal {
         let result: String = stmt.query_row([], |r| r.get(0))?;
         Ok(result == "ok")
     }
+}
+
+fn validate_retention_policy(policy: JournalRetentionPolicy) -> Result<(), JournalError> {
+    if policy.max_event_age.is_zero() {
+        return Err(JournalError::InvalidRetentionPolicy(
+            "max_event_age must be greater than zero".into(),
+        ));
+    }
+    if policy.max_event_bytes == 0 {
+        return Err(JournalError::InvalidRetentionPolicy(
+            "max_event_bytes must be greater than zero".into(),
+        ));
+    }
+    if policy.max_snapshots == 0 {
+        return Err(JournalError::InvalidRetentionPolicy(
+            "max_snapshots must be greater than zero".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -474,6 +628,94 @@ mod tests {
     }
 
     #[test]
+    fn retention_is_bounded_by_age_and_bytes_only_after_snapshot_coverage() {
+        let mut journal = EventJournal::open_in_memory(1).unwrap();
+        journal
+            .set_retention_policy(JournalRetentionPolicy {
+                max_event_age: Duration::from_secs(1),
+                max_event_bytes: 1,
+                max_snapshots: 2,
+            })
+            .unwrap();
+        for sequence in 1..=3 {
+            journal
+                .append_event(&Event {
+                    event_id: format!("event-{sequence}"),
+                    timestamp_ms: 1_000,
+                    inner: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(journal.enforce_retention().unwrap(), 0);
+        journal
+            .save_snapshot(&HostSnapshot {
+                host_id: "host-1".into(),
+                hostname: "test-host".into(),
+                connector_state: 0,
+                runtimes: vec![],
+                credential_profiles: vec![],
+                active_sessions: vec![],
+                snapshot_sequence: 3,
+            })
+            .unwrap();
+        let retained_count: u64 = journal
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained_count, 0, "byte retention did not delete events");
+        let replay = journal.get_events_after(0, 10);
+        assert!(matches!(
+            replay,
+            Err(JournalError::GapDetected {
+                expected: 1,
+                found: 4
+            })
+        ), "unexpected replay result: {replay:?}");
+        assert_eq!(journal.current_sequence(), 3);
+    }
+
+    #[test]
+    fn retention_age_uses_local_ingest_time_and_prunes_snapshot_generations() {
+        let mut journal = EventJournal::open_in_memory(1).unwrap();
+        journal
+            .set_retention_policy(JournalRetentionPolicy {
+                max_event_age: Duration::from_secs(1),
+                max_event_bytes: u64::MAX,
+                max_snapshots: 2,
+            })
+            .unwrap();
+        journal
+            .append_event(&Event {
+                event_id: "clock-skewed-source-event".into(),
+                timestamp_ms: -9_000_000_000,
+                inner: None,
+            })
+            .unwrap();
+        let snapshot = HostSnapshot {
+            host_id: "host-1".into(),
+            hostname: "test-host".into(),
+            connector_state: 0,
+            runtimes: vec![],
+            credential_profiles: vec![],
+            active_sessions: vec![],
+            snapshot_sequence: 1,
+        };
+        for _ in 0..4 {
+            journal.save_snapshot(&snapshot).unwrap();
+        }
+        journal.enforce_retention().unwrap();
+        assert_eq!(journal.get_events_after(0, 10).unwrap().len(), 1);
+        let snapshot_count: u64 = journal
+            .conn
+            .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(snapshot_count, 2);
+
+        let future = chrono::Utc::now().timestamp_millis() + 2_000;
+        assert_eq!(journal.enforce_retention_at(future).unwrap(), 1);
+    }
+
+    #[test]
     fn cursor_acknowledgements_are_bounded_and_monotonic() {
         let mut journal = EventJournal::open_in_memory(1).unwrap();
         journal
@@ -595,5 +837,52 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), corrupt_bytes);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_event_table_adds_local_ingest_time_without_losing_rows() {
+        let file_name = format!(
+            "muxport-event-journal-legacy-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(file_name);
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE events (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        boot_epoch INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        timestamp_ms INTEGER NOT NULL,
+                        payload BLOB NOT NULL
+                    );
+                    INSERT INTO events
+                        (boot_epoch, event_id, timestamp_ms, payload)
+                    VALUES (1, 'legacy-event', -9000000000, X'');",
+                )
+                .unwrap();
+        }
+
+        let journal = EventJournal::open_file(&path, 2).unwrap();
+        let (count, recorded_at_ms): (u64, i64) = journal
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MIN(recorded_at_ms) FROM events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(recorded_at_ms > 0);
+
+        drop(journal);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 }
