@@ -4,6 +4,8 @@ use adapter_api::AdapterError;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Stdio;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -161,6 +163,81 @@ fn create_private_directory(path: &Path) -> Result<(), ManagedCodexError> {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    harden_windows_directory(path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn harden_windows_directory(path: &Path) -> Result<(), ManagedCodexError> {
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Windows SystemRoot is unavailable",
+            )
+        })?;
+    let system32 = system_root.join("System32");
+    let identity = std::process::Command::new(system32.join("whoami.exe"))
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !identity.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "could not resolve the current Windows user SID",
+        )
+        .into());
+    }
+    let identity = String::from_utf8(identity.stdout).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Windows returned a non-UTF-8 user identity",
+        )
+    })?;
+    let sid = identity
+        .split(',')
+        .map(|field| field.trim().trim_matches('"'))
+        .find(|field| field.starts_with("S-1-"))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Windows user identity did not contain a SID",
+            )
+        })?;
+    let icacls = system32.join("icacls.exe");
+    let reset = std::process::Command::new(&icacls)
+        .arg(path)
+        .args(["/reset", "/Q"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !reset.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "could not reset managed Codex profile permissions",
+        )
+        .into());
+    }
+    let hardened = std::process::Command::new(&icacls)
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("*{sid}:(OI)(CI)F"))
+        .arg("/grant:r")
+        .arg("*S-1-5-18:(OI)(CI)F")
+        .arg("/Q")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !hardened.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "could not enforce owner-only managed Codex profile permissions",
+        )
+        .into());
     }
     Ok(())
 }

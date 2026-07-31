@@ -290,7 +290,7 @@ secret_handle          # opaque reference into vault
 
 - [x] Use supported login/auth APIs; never copy or edit vendor token databases.
 - [x] Protect each managed account with a separate runtime-state directory once supported isolation is validated.
-- [ ] Enforce owner-only filesystem permissions on profile directories.
+- [x] Enforce owner-only filesystem permissions on profile directories.
 - [ ] Record only an account fingerprint and plan label in Muxport metadata.
 - [ ] Do not include vendor-managed auth state in support bundles.
 

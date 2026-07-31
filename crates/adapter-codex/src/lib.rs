@@ -81,7 +81,6 @@ impl AppServerStartGuard {
 }
 
 struct CodexState {
-    profile_id: String,
     events: broadcast::Sender<AdapterMessage>,
     sessions: RwLock<HashMap<String, SessionContext>>,
     active_turns: RwLock<HashMap<String, ActiveTurn>>,
@@ -190,7 +189,6 @@ impl CodexAdapter {
             profile_id: profile_id.clone(),
             client: Arc::new(Mutex::new(None)),
             state: Arc::new(CodexState {
-                profile_id: profile_id.clone(),
                 events,
                 sessions: RwLock::new(HashMap::new()),
                 active_turns: RwLock::new(HashMap::new()),
