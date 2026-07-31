@@ -273,7 +273,7 @@ async fn main() -> Result<(), DynError> {
             journal.current_sequence(),
         ),
     };
-    mirror.set_connector_state(ConnectorState::Recovering);
+    mirror.begin_new_boot();
     mirror.save_snapshot(&journal)?;
 
     let runtimes = load_configured_runtimes().await?;
@@ -367,13 +367,15 @@ async fn main() -> Result<(), DynError> {
         }
     };
     let vault_available = credential_vault.is_some();
-    if !vault_available {
-        mirror.set_connector_state(ConnectorState::VaultLocked);
-        mirror.save_snapshot(&journal)?;
+    if vault_available {
+        mirror.transition_connector_state(ConnectorState::Recovering)?;
+    } else {
+        mirror.transition_connector_state(ConnectorState::VaultLocked)?;
         warn!(
             "connector entered vault_locked; non-credential recovery may continue but credential mutations are disabled"
         );
     }
+    mirror.save_snapshot(&journal)?;
     let command_db = std::env::var("MUXPORT_COMMAND_DB")
         .unwrap_or_else(|_| "muxport-commands.db".into());
     let adapter_registry = runtimes
@@ -452,7 +454,7 @@ async fn main() -> Result<(), DynError> {
                     "authenticated direct command transport listening"
                 );
                 if vault_available {
-                    mirror.set_connector_state(ConnectorState::Ready);
+                    mirror.transition_connector_state(ConnectorState::Ready)?;
                 }
                 mirror.save_snapshot(&journal)?;
                 Some(tokio::spawn(service.serve(
@@ -492,7 +494,7 @@ async fn main() -> Result<(), DynError> {
         );
     } else {
         if vault_available {
-            mirror.set_connector_state(ConnectorState::Degraded);
+            mirror.transition_connector_state(ConnectorState::Degraded)?;
         }
         mirror.save_snapshot(&journal)?;
         warn!(

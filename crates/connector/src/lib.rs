@@ -24,6 +24,7 @@ pub use secure_session::{
 };
 
 use adapter_api::{ProjectInfo, SessionSummary};
+use connector_core::{validate_connector_transition, CoreError};
 use event_journal::{EventJournal, JournalError};
 use muxport_protocol::{
     event, AgentType, ConnectorState, CredentialProfileInfo, Event, HostSnapshot, RuntimeInfo,
@@ -60,8 +61,18 @@ impl RuntimeMirror {
         Self { snapshot }
     }
 
-    pub fn set_connector_state(&mut self, state: ConnectorState) {
+    pub fn begin_new_boot(&mut self) {
+        self.snapshot.connector_state = ConnectorState::Starting as i32;
+    }
+
+    pub fn transition_connector_state(
+        &mut self,
+        state: ConnectorState,
+    ) -> Result<(), CoreError> {
+        let current = self.connector_state();
+        validate_connector_transition(current, state)?;
         self.snapshot.connector_state = state as i32;
+        Ok(())
     }
 
     /// Replaces one runtime's cached projection with an authoritative source
@@ -155,6 +166,11 @@ impl RuntimeMirror {
             || state == RuntimeState::CrashLoop)
             && connector_state != ConnectorState::VaultLocked
             && connector_state != ConnectorState::FatalError
+            && validate_connector_transition(
+                connector_state,
+                ConnectorState::Degraded,
+            )
+            .is_ok()
         {
             self.snapshot.connector_state = ConnectorState::Degraded as i32;
         }
@@ -583,6 +599,25 @@ mod tests {
             RuntimeState::Crashed,
         );
         assert_eq!(recovering.connector_state(), ConnectorState::Degraded);
+    }
+
+    #[test]
+    fn connector_lifecycle_rejects_impossible_state_changes() {
+        let mut mirror =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Ready, 0);
+        assert!(mirror
+            .transition_connector_state(ConnectorState::Recovering)
+            .is_err());
+        assert_eq!(mirror.connector_state(), ConnectorState::Ready);
+
+        mirror.begin_new_boot();
+        mirror
+            .transition_connector_state(ConnectorState::Recovering)
+            .unwrap();
+        mirror
+            .transition_connector_state(ConnectorState::Ready)
+            .unwrap();
+        assert_eq!(mirror.connector_state(), ConnectorState::Ready);
     }
 
     #[test]
