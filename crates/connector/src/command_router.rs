@@ -626,7 +626,11 @@ mod tests {
         let mut vault = PersistentVault::open_or_create(
             &vault_path,
             "host-test",
-            KeyEncryptionKey::generate(),
+            KeyEncryptionKey::derive_from_passphrase(
+                b"test-only-vault-passphrase",
+                &[7_u8; 16],
+            )
+            .unwrap(),
         )
         .unwrap();
         vault
