@@ -464,16 +464,16 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [ ] Create an operation with a unique idempotency key.
 - [ ] Check actor authorization and require biometric step-up on mobile.
-- [ ] Confirm target profile is compatible with runtime/provider.
-- [ ] Resolve the secret handle locally on the target host.
-- [ ] Stage the credential without changing the active assignment.
+- [x] Confirm target profile is compatible with runtime/provider.
+- [x] Resolve the secret handle locally on the target host.
+- [x] Stage the credential without changing the active assignment.
 - [ ] Validate through a non-destructive supported provider operation.
 - [ ] Inspect active turns.
 - [ ] If work is active, default to “apply to new sessions”; require explicit drain/restart confirmation for immediate mode.
-- [ ] Activate the credential through the supported adapter method.
-- [ ] Read back account fingerprint/provider state.
+- [x] Activate the credential through the supported adapter method.
+- [x] Read back account fingerprint/provider state.
 - [ ] Commit the assignment only after readback matches.
-- [ ] On failure, retain or restore the previous assignment.
+- [x] On failure, retain or restore the previous assignment.
 - [ ] Record a redacted audit event and per-host result.
 
 ### Bulk switch
@@ -501,10 +501,10 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Credential replacement
 
-- [ ] Add new secret as `staged`.
+- [x] Add new secret as `staged`.
 - [ ] Validate it without overwriting the current secret.
-- [ ] Atomically point the profile to the new secret version.
-- [ ] Retain the old encrypted version for a short rollback window unless the user requests immediate removal.
+- [x] Atomically point the profile to the new secret version.
+- [x] Retain the old encrypted version for a short rollback window unless the user requests immediate removal.
 - [ ] Confirm dependent runtimes can authenticate.
 - [ ] Mark old version superseded and securely remove it after the rollback window.
 - [ ] Clearly distinguish local deletion from upstream provider revocation.
@@ -519,10 +519,10 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Re-fetch affected source objects after ambiguous or incomplete SSE events.
 - [x] Use async prompt endpoints when appropriate and correlate returned/source IDs.
 - [x] Abort through the supported session abort endpoint.
-- [ ] Use provider/auth endpoints and runtime-discovered auth schemas for credential validation and activation.
+- [x] Use provider/auth endpoints and runtime-discovered auth schemas for credential validation and activation.
 - [x] Never assume a hard-coded OpenCode Go provider ID without verifying it against the installed version.
-- [ ] Support managed fixed host/port launch so the connector can reliably reconnect.
-- [ ] Protect the local OpenCode server with connector-only binding/authentication; do not expose port 4096 publicly.
+- [x] Support managed fixed host/port launch so the connector can reliably reconnect.
+- [x] Protect the local OpenCode server with connector-only binding/authentication; do not expose port 4096 publicly.
 - [ ] Test SSE reconnect, duplicate events, missing events, reordered mobile delivery, and source restart.
 
 ### OpenCode restart recovery

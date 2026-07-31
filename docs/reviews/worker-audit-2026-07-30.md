@@ -521,11 +521,44 @@ monotonic per-device acknowledgements. The app performs pinned reconnect polls
 every five seconds and keeps offline, pending-pairing, cached-stale, and
 synchronized states distinct.
 
+## Managed OpenCode profile and credential transaction
+
+Connector-managed OpenCode now launches with separate home, XDG data,
+configuration, cache, and state roots, a fixed loopback endpoint, and HTTP
+Basic authentication. The child environment is cleared before a minimal OS
+bootstrap allowlist is restored, so unrelated provider variables do not cross
+the profile boundary. Profile IDs reject traversal and Unix profile
+directories use owner-only mode.
+
+Local enrollment delegates to `opencode auth login --provider ...` inside the
+isolated environment; Muxport does not copy or edit vendor auth files.
+Externally adopted servers remain fail-closed for credential mutation.
+
+The host vault can expose a staged secret only in a zeroizing buffer. A
+transaction checks profile/provider compatibility, validates against the
+runtime-advertised auth method, activates through `PUT /auth/:providerID`,
+reads provider state back, and commits the encrypted vault slot only after
+readback. Failure reactivates the prior encrypted secret; a rollback failure is
+explicit and leaves the vault staged for reconciliation.
+
+The deterministic suite covers traversal, environment stripping, supported
+auth CLI invocation, schema rejection, activation/readback, vault commit
+ordering, and both successful and failed rollback. A separate ignored fixture
+was run manually against OpenCode 1.18.10 and proved an advertised API-key
+provider survived two starts under the same isolated profile. That fixture
+also showed OpenCode Go is not advertised by `/provider/auth` in 1.18.10, so
+Go-specific activation remains fail-closed pending a supported discovery and
+validation path.
+
 Automated evidence for these slices includes:
 
 ```text
 cargo test --workspace --locked
-105 tests passed across the Rust workspace; 0 failed
+115 tests passed across the Rust workspace; 0 failed
+
+MUXPORT_TEST_OPENCODE_PATH=... cargo test -p adapter-opencode \
+  live_opencode_profile_restarts_with_the_same_isolated_state -- --ignored
+1 live OpenCode 1.18.10 fixture passed; 0 failed
 
 flutter analyze
 No issues found
@@ -540,15 +573,16 @@ not claimed. Flutter verification ran on Windows. No physical iOS/Android,
 multi-host, hostile-network, external cryptographic, or penetration evidence
 is claimed.
 
-`PLAN.md` now has 57 verified checks and 379 incomplete checks (436 total).
+`PLAN.md` now has 69 verified checks and 367 incomplete checks (436 total).
 This is intentional: implementation primitives are checked only where the
 current automated evidence satisfies the item; phase exits, CI-only claims,
 physical device work, and external reviews remain unchecked.
 
 ## Major work still required
 
-- Prove OpenCode credential profile isolation with connector-managed runtimes,
-  then connect vault stage/validate/activate/readback/rollback to OpenCode Go.
+- Complete a supported OpenCode Go provider discovery and non-production key
+  validation path; OpenCode 1.18.10 does not advertise Go in
+  `/provider/auth`, so automatic Go rotation remains disabled.
 - Add Codex account/login/rate-limit compatibility fixtures and validated
   isolated profiles; current credential mutation remains fail-closed.
 - Add camera QR scanning, host-side tray/control UI, device revocation, and
