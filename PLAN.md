@@ -242,14 +242,14 @@ state/
 
 - [x] Generate a random data-encryption key for the vault.
 - [ ] Wrap that key using an OS-protected key-encryption key:
-  - [ ] macOS Keychain, hardware-backed when available.
-  - [ ] Windows DPAPI/Credential Manager under the connector user.
-  - [ ] Linux Secret Service when available.
+  - [x] macOS Keychain, hardware-backed when available.
+  - [x] Windows DPAPI/Credential Manager under the connector user.
+  - [x] Linux Secret Service when available.
   - [ ] Headless Linux fallback: Argon2id-derived wrapping key from an operator passphrase, TPM/systemd credential integration, or an explicitly configured external secret manager.
 - [x] Use a reviewed authenticated-encryption construction and a versioned envelope format.
 - [x] Bind ciphertext to profile ID, host ID, credential type, and schema version as authenticated data.
 - [x] Zeroize plaintext buffers and prevent them from entering panic reports.
-- [ ] Keep the vault locked after reboot until its configured unlock condition succeeds.
+- [x] Keep the vault locked after reboot until its configured unlock condition succeeds.
 - [x] Never use a compiled-in master key or relay-held decryption key.
 
 ### Credential records
@@ -282,9 +282,9 @@ secret_handle          # opaque reference into vault
 - [x] Keep provider secrets off the phone by default.
 - [ ] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
 - [ ] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
-- [ ] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
+- [x] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
 - [ ] Require biometric/device authentication before provisioning, bulk assignment, export, or rotation.
-- [ ] Exclude provider credentials and E2EE private keys from ordinary cloud backup.
+- [x] Exclude provider credentials and E2EE private keys from ordinary cloud backup.
 
 ### Codex and OpenCode vendor state
 
