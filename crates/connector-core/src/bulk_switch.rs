@@ -133,6 +133,16 @@ impl BulkSwitchOperation {
         })
     }
 
+    pub fn validate(&self) -> Result<(), BulkSwitchError> {
+        let _ = Self::new(
+            self.operation_id.clone(),
+            self.target_profile_id.clone(),
+            self.created_at_ms,
+            self.targets.clone(),
+        )?;
+        Ok(())
+    }
+
     pub fn summary(&self) -> BulkSwitchSummary {
         let mut summary = BulkSwitchSummary {
             planned: 0,

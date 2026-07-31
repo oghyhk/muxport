@@ -34,6 +34,8 @@ pub enum CoreError {
     EmptyCommandFingerprint,
     #[error("Command was not reserved before recording a result: {0}")]
     UnknownCommand(String),
+    #[error("Bulk switch operation does not exist: {0}")]
+    UnknownBulkSwitchOperation(String),
     #[error("Command ledger contains an invalid operation state: {0}")]
     InvalidStoredState(i32),
     #[error("Command ledger integrity check failed: {0}")]
@@ -59,6 +61,10 @@ pub enum CoreError {
     RotationPoolIdMismatch { row: String, policy: String },
     #[error("Rotation policy serialization failed: {0}")]
     RotationSerialization(#[from] serde_json::Error),
+    #[error("Bulk switch operation row id {row} does not match operation id {operation}")]
+    BulkSwitchOperationIdMismatch { row: String, operation: String },
+    #[error(transparent)]
+    BulkSwitch(#[from] BulkSwitchError),
     #[error(transparent)]
     Rotation(#[from] RotationError),
     #[error("Command ledger database error: {0}")]
@@ -343,6 +349,7 @@ pub struct CommandLedger {
     runtime_assignments: HashMap<String, String>,
     session_assignments: HashMap<(String, String), String>,
     rotation_pools: HashMap<String, RotationPool>,
+    bulk_switch_operations: HashMap<String, BulkSwitchOperation>,
     conn: Option<rusqlite::Connection>,
 }
 
@@ -393,7 +400,7 @@ impl Default for CommandLedger {
 }
 
 impl CommandLedger {
-    const SCHEMA_VERSION: u32 = 5;
+    const SCHEMA_VERSION: u32 = 6;
 
     pub fn new() -> Self {
         Self {
@@ -401,6 +408,7 @@ impl CommandLedger {
             runtime_assignments: HashMap::new(),
             session_assignments: HashMap::new(),
             rotation_pools: HashMap::new(),
+            bulk_switch_operations: HashMap::new(),
             conn: None,
         }
     }
@@ -501,6 +509,15 @@ impl CommandLedger {
             )",
             [],
         )?;
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS bulk_switch_operations (
+                operation_id TEXT PRIMARY KEY,
+                operation_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                CHECK (length(trim(operation_id)) > 0)
+            )",
+            [],
+        )?;
         transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         transaction.commit()?;
 
@@ -509,6 +526,7 @@ impl CommandLedger {
             runtime_assignments: HashMap::new(),
             session_assignments: HashMap::new(),
             rotation_pools: HashMap::new(),
+            bulk_switch_operations: HashMap::new(),
             conn: Some(conn),
         };
         ledger.load_from_db()?;
@@ -589,6 +607,26 @@ impl CommandLedger {
                     });
                 }
                 self.rotation_pools.insert(pool_id, policy);
+            }
+            drop(pool_stmt);
+            let mut bulk_switch_stmt = conn.prepare(
+                "SELECT operation_id, operation_json
+                 FROM bulk_switch_operations",
+            )?;
+            let operations = bulk_switch_stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for operation in operations {
+                let (operation_id, operation_json) = operation?;
+                let operation: BulkSwitchOperation = serde_json::from_str(&operation_json)?;
+                operation.validate()?;
+                if operation.operation_id != operation_id {
+                    return Err(CoreError::BulkSwitchOperationIdMismatch {
+                        row: operation_id,
+                        operation: operation.operation_id,
+                    });
+                }
+                self.bulk_switch_operations.insert(operation_id, operation);
             }
         }
         Ok(())
@@ -888,6 +926,65 @@ impl CommandLedger {
         let decision = updated.select(request, eligibility)?;
         self.upsert_rotation_pool(updated)?;
         Ok(decision)
+    }
+
+    /// Persists the full per-target result set before it is reported to a
+    /// caller. The operation is intentionally resumable; it does not imply an
+    /// all-or-nothing transaction across hosts.
+    pub fn upsert_bulk_switch_operation(
+        &mut self,
+        operation: BulkSwitchOperation,
+    ) -> Result<(), CoreError> {
+        operation.validate()?;
+        let operation_json = serde_json::to_string(&operation)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(ref conn) = self.conn {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO bulk_switch_operations
+                    (operation_id, operation_json, updated_at_ms)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(operation_id) DO UPDATE SET
+                    operation_json = excluded.operation_json,
+                    updated_at_ms = excluded.updated_at_ms",
+                rusqlite::params![&operation.operation_id, &operation_json, now],
+            )?;
+            transaction.commit()?;
+        }
+        self.bulk_switch_operations
+            .insert(operation.operation_id.clone(), operation);
+        Ok(())
+    }
+
+    pub fn bulk_switch_operation(
+        &self,
+        operation_id: &str,
+    ) -> Option<&BulkSwitchOperation> {
+        self.bulk_switch_operations.get(operation_id)
+    }
+
+    pub fn transition_bulk_switch_target(
+        &mut self,
+        operation_id: &str,
+        host_id: &str,
+        runtime_id: &str,
+        to: BulkSwitchTargetState,
+        detail: Option<String>,
+        completed_at_ms: Option<i64>,
+    ) -> Result<(), CoreError> {
+        let mut operation = self
+            .bulk_switch_operations
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| CoreError::UnknownBulkSwitchOperation(operation_id.to_owned()))?;
+        operation.transition_target(
+            host_id,
+            runtime_id,
+            to,
+            detail,
+            completed_at_ms,
+        )?;
+        self.upsert_bulk_switch_operation(operation)
     }
 }
 
@@ -1254,6 +1351,89 @@ mod tests {
                     .unwrap(),
                 "profile-work"
             );
+        }
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn bulk_switch_target_results_survive_restart_without_implicit_rollback() {
+        let db_path = std::env::temp_dir().join(format!(
+            "bulk-switch-ledger-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let operation = BulkSwitchOperation::new(
+            "bulk-1",
+            "profile-new",
+            100,
+            vec![
+                BulkSwitchTarget {
+                    host_id: "host-a".into(),
+                    runtime_id: "runtime-a".into(),
+                    prior_profile_id: "profile-old".into(),
+                    state: BulkSwitchTargetState::Planned,
+                    detail: None,
+                    completed_at_ms: None,
+                },
+                BulkSwitchTarget {
+                    host_id: "host-b".into(),
+                    runtime_id: "runtime-b".into(),
+                    prior_profile_id: "profile-old".into(),
+                    state: BulkSwitchTargetState::Planned,
+                    detail: None,
+                    completed_at_ms: None,
+                },
+            ],
+        )
+        .unwrap();
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            ledger.upsert_bulk_switch_operation(operation).unwrap();
+            for (host_id, runtime_id, final_state, detail) in [
+                (
+                    "host-a",
+                    "runtime-a",
+                    BulkSwitchTargetState::Succeeded,
+                    None,
+                ),
+                (
+                    "host-b",
+                    "runtime-b",
+                    BulkSwitchTargetState::OutcomeUnknown,
+                    Some("connection lost after dispatch".into()),
+                ),
+            ] {
+                ledger
+                    .transition_bulk_switch_target(
+                        "bulk-1",
+                        host_id,
+                        runtime_id,
+                        BulkSwitchTargetState::Dispatched,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                ledger
+                    .transition_bulk_switch_target(
+                        "bulk-1",
+                        host_id,
+                        runtime_id,
+                        final_state,
+                        detail,
+                        Some(200),
+                    )
+                    .unwrap();
+            }
+        }
+        {
+            let ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            let restored = ledger.bulk_switch_operation("bulk-1").unwrap();
+            assert_eq!(restored.summary().succeeded, 1);
+            assert_eq!(restored.summary().outcome_unknown, 1);
+            assert!(restored.summary().is_complete());
+            assert!(restored.summary().has_partial_failure());
         }
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
