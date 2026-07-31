@@ -387,7 +387,7 @@ created -> persisted -> dispatched -> source_acknowledged -> reconciled -> succe
                          └─ rejected_offline
 ```
 
-- [ ] Implement these as explicit enums with allowed transitions.
+- [x] Implement these as explicit enums with allowed transitions.
 - [ ] Persist every mutating transition transactionally.
 - [ ] Reject impossible transitions and emit a redacted diagnostic event.
 - [ ] Give the Flutter UI a consistent status and explanation for every state.

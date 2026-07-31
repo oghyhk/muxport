@@ -24,17 +24,27 @@ pub use secure_session::{
 };
 
 use adapter_api::{ProjectInfo, SessionSummary};
-use connector_core::{validate_connector_transition, CoreError};
+use connector_core::{
+    validate_connector_transition, validate_runtime_transition, CoreError,
+};
 use event_journal::{EventJournal, JournalError};
 use muxport_protocol::{
-    event, AgentType, ConnectorState, CredentialProfileInfo, Event, HostSnapshot, RuntimeInfo,
-    RuntimeState, SessionInfo,
+    event, AgentType, AuditLoggedEvent, ConnectorState, CredentialProfileInfo, Event,
+    HostSnapshot, RuntimeInfo, RuntimeState, SessionInfo,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StateTransitionDiagnostic {
+    runtime_id: String,
+    from: RuntimeState,
+    to: RuntimeState,
+}
 
 /// In-memory projection of authoritative runtime snapshots plus journaled
 /// normalized events. It contains no credentials or provider secrets.
 pub struct RuntimeMirror {
     snapshot: HostSnapshot,
+    state_diagnostics: Vec<StateTransitionDiagnostic>,
 }
 
 impl RuntimeMirror {
@@ -54,11 +64,15 @@ impl RuntimeMirror {
                 active_sessions: Vec::new(),
                 snapshot_sequence,
             },
+            state_diagnostics: Vec::new(),
         }
     }
 
     pub fn from_snapshot(snapshot: HostSnapshot) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            state_diagnostics: Vec::new(),
+        }
     }
 
     pub fn begin_new_boot(&mut self) {
@@ -111,27 +125,15 @@ impl RuntimeMirror {
             .active_sessions
             .sort_by(|left, right| left.session_id.cmp(&right.session_id));
 
-        match self
-            .snapshot
-            .runtimes
-            .iter_mut()
-            .find(|runtime| runtime.runtime_id == runtime_id)
+        let position = self.ensure_runtime(runtime_id, agent_type, runtime_name);
         {
-            Some(runtime) => {
-                runtime.agent_type = agent_type as i32;
-                runtime.name = runtime_name.to_owned();
-                runtime.state = runtime_state as i32;
-                runtime.project_paths = project_paths;
-            }
-            None => self.snapshot.runtimes.push(RuntimeInfo {
-                runtime_id: runtime_id.to_owned(),
-                agent_type: agent_type as i32,
-                name: runtime_name.to_owned(),
-                state: runtime_state as i32,
-                active_credential_profile_id: String::new(),
-                project_paths,
-            }),
+            let runtime = &mut self.snapshot.runtimes[position];
+            runtime.agent_type = agent_type as i32;
+            runtime.name = runtime_name.to_owned();
+            runtime.project_paths = project_paths;
         }
+        self.transition_runtime_to_synchronizing(runtime_id);
+        self.transition_existing_runtime_state(runtime_id, runtime_state);
         self.snapshot
             .runtimes
             .sort_by(|left, right| left.runtime_id.cmp(&right.runtime_id));
@@ -144,24 +146,21 @@ impl RuntimeMirror {
         runtime_name: &str,
         state: RuntimeState,
     ) {
-        match self
+        let existed = self
             .snapshot
             .runtimes
-            .iter_mut()
-            .find(|runtime| runtime.runtime_id == runtime_id)
-        {
-            Some(runtime) => runtime.state = state as i32,
-            None => self.snapshot.runtimes.push(RuntimeInfo {
-                runtime_id: runtime_id.to_owned(),
-                agent_type: agent_type as i32,
-                name: runtime_name.to_owned(),
-                state: state as i32,
-                active_credential_profile_id: String::new(),
-                project_paths: Vec::new(),
-            }),
+            .iter()
+            .any(|runtime| runtime.runtime_id == runtime_id);
+        self.ensure_runtime(runtime_id, agent_type, runtime_name);
+        if existed {
+            self.transition_existing_runtime_state(runtime_id, state);
+        } else {
+            self.initialize_runtime_state(runtime_id, state);
         }
+        let accepted = self.runtime_state(runtime_id) == Some(state);
         let connector_state = self.connector_state();
-        if (state == RuntimeState::Degraded
+        if accepted
+            && (state == RuntimeState::Degraded
             || state == RuntimeState::Crashed
             || state == RuntimeState::CrashLoop)
             && connector_state != ConnectorState::VaultLocked
@@ -223,6 +222,32 @@ impl RuntimeMirror {
 
     /// Applies an event only after it has been durably appended.
     pub fn apply_event(&mut self, runtime_id: &str, event: &Event) {
+        let requested_state = match event.inner.as_ref() {
+            Some(event::Inner::SessionUpdated(update)) if update.status != "deleted" => {
+                runtime_state_for_session_status(&update.status)
+            }
+            Some(event::Inner::StreamDelta(delta)) if !delta.is_final => {
+                Some(RuntimeState::OnlineRunning)
+            }
+            Some(event::Inner::ApprovalRequested(_)) => {
+                Some(RuntimeState::OnlineWaitingApproval)
+            }
+            Some(event::Inner::ApprovalResolved(_)) => Some(RuntimeState::OnlineRunning),
+            Some(event::Inner::RuntimeState(runtime)) if runtime.runtime_id == runtime_id => {
+                RuntimeState::try_from(runtime.state).ok()
+            }
+            _ => None,
+        };
+        if let (Some(from), Some(to)) = (self.runtime_state(runtime_id), requested_state) {
+            if from != to && validate_runtime_transition(from, to).is_err() {
+                self.state_diagnostics.push(StateTransitionDiagnostic {
+                    runtime_id: runtime_id.to_owned(),
+                    from,
+                    to,
+                });
+                return;
+            }
+        }
         match event.inner.as_ref() {
             Some(event::Inner::SessionUpdated(update)) => {
                 if update.status == "deleted" {
@@ -263,7 +288,7 @@ impl RuntimeMirror {
                     }),
                 }
                 if let Some(state) = runtime_state_for_session_status(&update.status) {
-                    self.set_existing_runtime_state(runtime_id, state);
+                    self.transition_existing_runtime_state(runtime_id, state);
                 }
             }
             Some(event::Inner::StreamDelta(delta)) if !delta.is_final => {
@@ -275,7 +300,7 @@ impl RuntimeMirror {
                 {
                     session.status = "running".into();
                 }
-                self.set_existing_runtime_state(runtime_id, RuntimeState::OnlineRunning);
+                self.transition_existing_runtime_state(runtime_id, RuntimeState::OnlineRunning);
             }
             Some(event::Inner::ApprovalRequested(approval)) => {
                 if let Some(session) = self
@@ -286,7 +311,10 @@ impl RuntimeMirror {
                 {
                     session.status = "waiting_approval".into();
                 }
-                self.set_existing_runtime_state(runtime_id, RuntimeState::OnlineWaitingApproval);
+                self.transition_existing_runtime_state(
+                    runtime_id,
+                    RuntimeState::OnlineWaitingApproval,
+                );
             }
             Some(event::Inner::ApprovalResolved(approval)) => {
                 if let Some(session) = self
@@ -297,7 +325,7 @@ impl RuntimeMirror {
                 {
                     session.status = "running".into();
                 }
-                self.set_existing_runtime_state(runtime_id, RuntimeState::OnlineRunning);
+                self.transition_existing_runtime_state(runtime_id, RuntimeState::OnlineRunning);
             }
             Some(event::Inner::RuntimeState(runtime)) if runtime.runtime_id == runtime_id => {
                 if let Ok(state) = RuntimeState::try_from(runtime.state) {
@@ -365,15 +393,143 @@ impl RuntimeMirror {
         self.snapshot.snapshot_sequence
     }
 
-    fn set_existing_runtime_state(&mut self, runtime_id: &str, state: RuntimeState) {
-        if let Some(runtime) = self
+    fn ensure_runtime(
+        &mut self,
+        runtime_id: &str,
+        agent_type: AgentType,
+        runtime_name: &str,
+    ) -> usize {
+        if let Some(position) = self
             .snapshot
             .runtimes
-            .iter_mut()
-            .find(|runtime| runtime.runtime_id == runtime_id)
+            .iter()
+            .position(|runtime| runtime.runtime_id == runtime_id)
         {
-            runtime.state = state as i32;
+            return position;
         }
+        self.snapshot.runtimes.push(RuntimeInfo {
+            runtime_id: runtime_id.to_owned(),
+            agent_type: agent_type as i32,
+            name: runtime_name.to_owned(),
+            state: RuntimeState::Unknown as i32,
+            active_credential_profile_id: String::new(),
+            project_paths: Vec::new(),
+        });
+        self.snapshot.runtimes.len() - 1
+    }
+
+    fn initialize_runtime_state(&mut self, runtime_id: &str, target: RuntimeState) {
+        use RuntimeState::*;
+        let path: &[RuntimeState] = match target {
+            Unknown => &[],
+            Discovering => &[Discovering],
+            Starting => &[Discovering, Starting],
+            Synchronizing => &[Discovering, Starting, Synchronizing],
+            OnlineIdle => &[Discovering, Starting, Synchronizing, OnlineIdle],
+            OnlineRunning => &[Discovering, Starting, Synchronizing, OnlineRunning],
+            OnlineWaitingApproval => &[
+                Discovering,
+                Starting,
+                Synchronizing,
+                OnlineWaitingApproval,
+            ],
+            Degraded => &[Discovering, Degraded],
+            Stopped => &[Discovering, Stopped],
+            Crashed => &[Discovering, Starting, Crashed],
+            CrashLoop => &[Discovering, Starting, Crashed, CrashLoop],
+            CredentialLocked => &[Discovering, Starting, CredentialLocked],
+            Unspecified => {
+                self.state_diagnostics.push(StateTransitionDiagnostic {
+                    runtime_id: runtime_id.to_owned(),
+                    from: Unknown,
+                    to: Unspecified,
+                });
+                return;
+            }
+        };
+        for state in path {
+            if !self.transition_existing_runtime_state(runtime_id, *state) {
+                break;
+            }
+        }
+    }
+
+    fn transition_runtime_to_synchronizing(&mut self, runtime_id: &str) {
+        use RuntimeState::*;
+        let mut current = self.runtime_state(runtime_id).unwrap_or(Unspecified);
+        if current == Unspecified {
+            self.state_diagnostics.push(StateTransitionDiagnostic {
+                runtime_id: runtime_id.to_owned(),
+                from: Unspecified,
+                to: Unknown,
+            });
+            if let Some(runtime) = self
+                .snapshot
+                .runtimes
+                .iter_mut()
+                .find(|runtime| runtime.runtime_id == runtime_id)
+            {
+                runtime.state = Unknown as i32;
+            }
+            current = Unknown;
+        }
+        let path: &[RuntimeState] = match current {
+            Unknown => &[Discovering, Starting, Synchronizing],
+            Discovering => &[Starting, Synchronizing],
+            Starting => &[Synchronizing],
+            Synchronizing => &[],
+            OnlineIdle | OnlineRunning | OnlineWaitingApproval | Degraded => &[Synchronizing],
+            Crashed | CrashLoop | Stopped | CredentialLocked => &[Starting, Synchronizing],
+            Unspecified => unreachable!("unspecified runtime state was normalized"),
+        };
+        for state in path {
+            if !self.transition_existing_runtime_state(runtime_id, *state) {
+                break;
+            }
+        }
+    }
+
+    fn runtime_state(&self, runtime_id: &str) -> Option<RuntimeState> {
+        self.snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.runtime_id == runtime_id)
+            .and_then(|runtime| RuntimeState::try_from(runtime.state).ok())
+    }
+
+    fn transition_existing_runtime_state(
+        &mut self,
+        runtime_id: &str,
+        state: RuntimeState,
+    ) -> bool {
+        let Some(position) = self
+            .snapshot
+            .runtimes
+            .iter()
+            .position(|runtime| runtime.runtime_id == runtime_id)
+        else {
+            return false;
+        };
+        let from = RuntimeState::try_from(self.snapshot.runtimes[position].state)
+            .unwrap_or(RuntimeState::Unspecified);
+        if from == state {
+            return true;
+        }
+        if validate_runtime_transition(from, state).is_ok() {
+            self.snapshot.runtimes[position].state = state as i32;
+            true
+        } else {
+            self.state_diagnostics.push(StateTransitionDiagnostic {
+                runtime_id: runtime_id.to_owned(),
+                from,
+                to: state,
+            });
+            false
+        }
+    }
+
+    fn take_state_diagnostics(&mut self) -> Vec<StateTransitionDiagnostic> {
+        std::mem::take(&mut self.state_diagnostics)
     }
 }
 
@@ -389,6 +545,20 @@ pub fn journal_runtime_event(
     RuntimeMirror::correlate_event(&mut event, runtime_id);
     let sequence = journal.append_event(&event)?;
     mirror.apply_event(runtime_id, &event);
+    for diagnostic in mirror.take_state_diagnostics() {
+        let diagnostic_event = Event {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            inner: Some(event::Inner::AuditLogged(AuditLoggedEvent {
+                audit_id: uuid::Uuid::new_v4().to_string(),
+                action: "state_transition_rejected".into(),
+                actor: "connector".into(),
+                target: diagnostic.runtime_id,
+                outcome: format!("from={:?};to={:?}", diagnostic.from, diagnostic.to),
+            })),
+        };
+        journal.append_event(&diagnostic_event)?;
+    }
     if save_snapshot {
         mirror.save_snapshot(journal)?;
     }
@@ -408,6 +578,7 @@ pub fn replay_events_after_snapshot(
         }
         for (sequence, event) in events {
             mirror.apply_replayed_event(&event);
+            mirror.take_state_diagnostics();
             cursor = sequence;
             replayed += 1;
         }
@@ -457,7 +628,8 @@ fn runtime_state_for_session_status(status: &str) -> Option<RuntimeState> {
 mod tests {
     use super::*;
     use muxport_protocol::{
-        ApprovalResolvedEvent, CredentialStatus, SessionUpdatedEvent, StreamDeltaEvent,
+        ApprovalResolvedEvent, CredentialStatus, RuntimeStateEvent, SessionUpdatedEvent,
+        StreamDeltaEvent,
     };
 
     fn session(id: &str, project_path: &str, title: &str, status: &str) -> SessionSummary {
@@ -723,6 +895,55 @@ mod tests {
         )
         .is_err());
         assert_eq!(mirror.snapshot_at(1).active_sessions[0].status, "idle");
+    }
+
+    #[test]
+    fn impossible_runtime_transition_is_rejected_and_journaled_redacted() {
+        let mut journal = EventJournal::open_in_memory(7).unwrap();
+        let mut mirror =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Recovering, 0);
+        mirror.reconcile_runtime(
+            "opencode-1",
+            AgentType::Opencode,
+            "OpenCode",
+            vec![],
+            vec![session("session", "/repo", "Session", "idle")],
+        );
+        let impossible = Event {
+            event_id: "runtime-impossible".into(),
+            timestamp_ms: 10,
+            inner: Some(event::Inner::RuntimeState(RuntimeStateEvent {
+                runtime_id: "opencode-1".into(),
+                agent_type: AgentType::Opencode as i32,
+                state: RuntimeState::CrashLoop as i32,
+                active_profile_id: String::new(),
+                details: "untrusted secret must not be copied".into(),
+            })),
+        };
+
+        journal_runtime_event(
+            &mut journal,
+            &mut mirror,
+            "opencode-1",
+            impossible,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mirror.runtime_state("opencode-1"),
+            Some(RuntimeState::OnlineIdle)
+        );
+        let events = journal.get_events_after(0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        let diagnostic = match events[1].1.inner.as_ref() {
+            Some(event::Inner::AuditLogged(diagnostic)) => diagnostic,
+            other => panic!("expected audit diagnostic, got {other:?}"),
+        };
+        assert_eq!(diagnostic.action, "state_transition_rejected");
+        assert_eq!(diagnostic.target, "opencode-1");
+        assert_eq!(diagnostic.outcome, "from=OnlineIdle;to=CrashLoop");
+        assert!(!format!("{diagnostic:?}").contains("untrusted secret"));
     }
 
     #[test]

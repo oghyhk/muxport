@@ -59,16 +59,36 @@ pub fn validate_runtime_transition(from: RuntimeState, to: RuntimeState) -> Resu
     use RuntimeState::*;
     let valid = match (from, to) {
         (Unknown, Discovering) => true,
-        (Discovering, Starting) | (Discovering, Degraded) => true,
-        (Starting, Synchronizing) | (Starting, Crashed) => true,
-        (Synchronizing, OnlineIdle) | (Synchronizing, OnlineRunning) => true,
-        (OnlineIdle, OnlineRunning) | (OnlineIdle, OnlineWaitingApproval) | (OnlineIdle, Stopped) => true,
-        (OnlineRunning, OnlineIdle) | (OnlineRunning, OnlineWaitingApproval) | (OnlineRunning, Crashed) => true,
-        (OnlineWaitingApproval, OnlineRunning) | (OnlineWaitingApproval, OnlineIdle) => true,
+        (Discovering, Starting) | (Discovering, Degraded) | (Discovering, Stopped) => true,
+        (Starting, Synchronizing) | (Starting, Crashed) | (Starting, CredentialLocked) => true,
+        (Synchronizing, OnlineIdle)
+        | (Synchronizing, OnlineRunning)
+        | (Synchronizing, OnlineWaitingApproval)
+        | (Synchronizing, Degraded)
+        | (Synchronizing, Crashed)
+        | (Synchronizing, CredentialLocked)
+        | (Synchronizing, Stopped) => true,
+        (OnlineIdle, OnlineRunning)
+        | (OnlineIdle, OnlineWaitingApproval)
+        | (OnlineIdle, Synchronizing)
+        | (OnlineIdle, Degraded)
+        | (OnlineIdle, Crashed)
+        | (OnlineIdle, Stopped) => true,
+        (OnlineRunning, OnlineIdle)
+        | (OnlineRunning, OnlineWaitingApproval)
+        | (OnlineRunning, Synchronizing)
+        | (OnlineRunning, Degraded)
+        | (OnlineRunning, Crashed) => true,
+        (OnlineWaitingApproval, OnlineRunning)
+        | (OnlineWaitingApproval, OnlineIdle)
+        | (OnlineWaitingApproval, Synchronizing)
+        | (OnlineWaitingApproval, Degraded)
+        | (OnlineWaitingApproval, Crashed) => true,
         (Crashed, Starting) | (Crashed, CrashLoop) => true,
         (CrashLoop, Starting) | (CrashLoop, Stopped) => true,
         (Stopped, Starting) => true,
-        (Degraded, Discovering) | (Degraded, Starting) => true,
+        (Degraded, Discovering) | (Degraded, Starting) | (Degraded, Synchronizing) => true,
+        (CredentialLocked, Starting) | (CredentialLocked, Stopped) => true,
         _ => false,
     };
 
@@ -461,6 +481,29 @@ mod tests {
         let actions = DesiredObservedReconciler::reconcile(&desired, &observed);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], "switch_profile:opencode-1:profile-b");
+    }
+
+    #[test]
+    fn runtime_state_transitions_reject_impossible_jumps() {
+        assert!(
+            validate_runtime_transition(RuntimeState::Unknown, RuntimeState::Discovering)
+                .is_ok()
+        );
+        assert!(
+            validate_runtime_transition(RuntimeState::Synchronizing, RuntimeState::OnlineIdle)
+                .is_ok()
+        );
+        assert!(
+            validate_runtime_transition(RuntimeState::OnlineIdle, RuntimeState::CrashLoop)
+                .is_err()
+        );
+        assert!(
+            validate_runtime_transition(
+                RuntimeState::CredentialLocked,
+                RuntimeState::OnlineRunning
+            )
+            .is_err()
+        );
     }
 
     #[test]
