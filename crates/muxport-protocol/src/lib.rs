@@ -21,6 +21,9 @@ mod tests {
                 sequence: 1,
                 timestamp_ms: 1700000000000,
                 idempotency_key: "cmd_123".into(),
+                capability_version: 1,
+                request_id: "cmd_123".into(),
+                expires_at_ms: 0,
             }),
             payload: Some(muxport_envelope::Payload::Snapshot(HostSnapshot {
                 host_id: "host_1".into(),
