@@ -5,10 +5,12 @@ and Codex runtimes on user-controlled desktops and servers.
 
 > **Project status:** security-focused development build. Authenticated direct
 > commands, signed/SAS-confirmed pairing, restart-safe mobile enrollment, and
-> encrypted snapshot/event replay are integrated and tested. Durable provider
-> credential activation, full session/approval UI wiring, relay deployment,
-> and release hardening remain incomplete. Do not expose this build publicly
-> or use it to manage production credentials.
+> encrypted snapshot/event replay are integrated and tested. Connector-managed
+> OpenCode profiles now isolate vendor state and provide staged activation,
+> readback, and rollback primitives. Mobile credential provisioning, full
+> session/approval UI wiring, relay deployment, and release hardening remain
+> incomplete. Do not expose this build publicly or use it to manage production
+> credentials.
 
 Muxport is an independent project. It is not built, sponsored, or endorsed by
 the OpenCode team or OpenAI.
@@ -99,6 +101,38 @@ value to the confirmation command. The command loads only the existing
 OS-protected host identity and fails closed for a wrong host ID. Once both
 sides confirm, the mobile app periodically authenticates, restores a snapshot,
 replays contiguous journal events, persists its cursor, and acknowledges it.
+
+### Development managed OpenCode profile
+
+Managed profiles keep OpenCode home, data, configuration, cache, and state in
+separate directories. The connector never copies or edits OpenCode's
+`auth.json`; local enrollment delegates to OpenCode's supported interactive
+authentication command:
+
+```sh
+export MUXPORT_PROFILES_DIR="$PWD/muxport-profiles"
+export MUXPORT_OPENCODE_PATH="/absolute/path/to/opencode"
+export MUXPORT_OPENCODE_PROJECT="/absolute/path/to/project"
+
+cargo run -p connector --bin muxport-connector -- \
+  opencode-profile-auth go-account-a opencode
+```
+
+Start the connector with the same profile settings:
+
+```sh
+export MUXPORT_OPENCODE_PROFILE_ID="go-account-a"
+export MUXPORT_OPENCODE_PORT="4096"
+cargo run -p connector --bin muxport-connector
+```
+
+The managed server binds only to `127.0.0.1` and uses a fresh in-memory server
+password unless `MUXPORT_OPENCODE_PASSWORD` is explicitly supplied. Its child
+environment is cleared before an OS bootstrap allowlist and the isolated
+profile paths are added, preventing unrelated provider variables from leaking
+into the managed runtime. This is a development path: crash adoption,
+multi-profile daemon registration, mobile enrollment, and production
+installers are not complete.
 
 ## Security
 

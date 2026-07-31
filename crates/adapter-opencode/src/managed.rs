@@ -453,4 +453,49 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    #[ignore = "requires MUXPORT_TEST_OPENCODE_PATH pointing to a real OpenCode executable"]
+    async fn live_opencode_profile_restarts_with_the_same_isolated_state() {
+        use adapter_api::AgentAdapter;
+
+        let executable = std::env::var_os("MUXPORT_TEST_OPENCODE_PATH")
+            .map(PathBuf::from)
+            .expect("MUXPORT_TEST_OPENCODE_PATH");
+        let root = temp_root("live-managed-opencode");
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let profile =
+            ManagedOpenCodeProfile::prepare(&root, "profile-a", executable, &project, port)
+                .unwrap();
+        let password = "live-fixture-server-password";
+
+        for _ in 0..2 {
+            let mut child = profile.spawn(password).unwrap();
+            let adapter = profile.adapter(password).unwrap();
+            let mut healthy = false;
+            for _ in 0..100 {
+                if adapter.probe().await.is_ok() {
+                    healthy = true;
+                    break;
+                }
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert!(healthy, "managed OpenCode did not become healthy");
+            assert!(child.try_wait().unwrap().is_none());
+            child.kill().await.unwrap();
+            let _ = child.wait().await;
+        }
+
+        assert!(profile.data_root.join("opencode").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -1,7 +1,7 @@
 # OpenCode Server Adapter Contract
 
-- **Status:** Implemented foundation; credential isolation remains blocked
-- **Reviewed:** 2026-07-30
+- **Status:** Managed-profile and transactional credential foundation implemented
+- **Reviewed:** 2026-07-31
 - **Primary sources:**
   - <https://opencode.ai/docs/server/>
   - <https://github.com/anomalyco/opencode/blob/dev/packages/sdk/js/src/gen/types.gen.ts>
@@ -20,10 +20,36 @@ The built-in adapter uses OpenCode's documented HTTP server contract:
 | Send input | `POST /session/:id/prompt_async` | Resolves the session directory before mutation |
 | Interrupt | `POST /session/:id/abort` | Requires a `true` response |
 | Reply to approval | `POST /session/:id/permissions/:permissionID` | Maps allow to `once` and deny to `reject` |
+| Discover auth methods | `GET /provider/auth` | Requires the selected provider to advertise the requested auth kind |
+| Activate managed API key | `PUT /auth/:providerID` | Available only for a connector-created isolated profile |
+| Provider readback | `GET /provider` | Requires the activated provider ID to appear in `connected` |
 
 HTTP Basic authentication uses the documented `opencode` username and the
 configured server password. Credentials are attached only as an Authorization
 header and are never included in adapter events or logs.
+
+## Managed profile boundary
+
+- Every managed profile has a separate home, XDG data, configuration, cache,
+  and state directory below the configured Muxport profiles root.
+- Profile IDs cannot contain path separators or traversal components.
+- Profile paths reject symbolic-link substitution and use mode `0700` on Unix.
+- The OpenCode child environment is cleared before a minimal OS bootstrap
+  allowlist and the isolated paths are applied. Unrelated provider variables
+  are not inherited.
+- Managed servers always launch with `--hostname 127.0.0.1`, a fixed selected
+  port, and `OPENCODE_SERVER_PASSWORD`.
+- Local enrollment runs `opencode auth login --provider ...` inside the
+  isolated environment. OpenCode, not Muxport, writes vendor auth state.
+- Externally adopted servers remain fail-closed for every credential mutation.
+
+Credential replacement is coordinated with the Muxport vault. The candidate
+remains staged while the old encrypted secret stays active. The connector
+checks the runtime-discovered auth schema, activates through the supported
+route, reads provider state back, and only then commits the vault slot. Any
+failure after mutation begins reactivates the prior secret. If rollback also
+fails, the result is explicitly `RollbackFailed` and the vault remains staged
+for recovery.
 
 ## Restart and reconciliation rules
 
@@ -46,16 +72,17 @@ header and are never included in adapter events or logs.
 
 ## Deliberately unsupported
 
-- Profile-bound session creation
-- Credential validation, activation, or rotation
+- Credential mutation on externally adopted OpenCode servers
+- Claiming an account fingerprint when OpenCode exposes only provider-connected
+  state
+- Automatic quota/rate-limit rotation and multi-host bulk switching
 - Steering with semantics distinct from a new user message
 - Usage/quota reads
 
-OpenCode exposes an auth mutation route, but using it directly would not prove
-per-account process/state isolation, session identity immutability, validation,
-or rollback. These operations must remain fail-closed until a managed-runtime
-compatibility fixture proves those properties for the installed OpenCode
-version.
+The repository has deterministic managed-launch, auth-schema, activation,
+readback, and rollback tests. A live-version compatibility fixture with real
+OpenCode and non-production provider credentials is still required before this
+path can be used for production rotation.
 
 ## Normalization boundary
 

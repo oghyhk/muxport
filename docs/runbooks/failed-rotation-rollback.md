@@ -9,10 +9,20 @@ An automatic or manual credential rotation attempt failed (e.g. invalid API key,
 
 ## Protocol
 1. Host connector stages new credential record as `CREDENTIAL_STATUS_STAGED`.
-2. Connector runs non-destructive validation probe against provider (`validate_credential`).
-3. If probe fails or returns 401/403:
-   - Staged assignment is immediately cancelled.
+2. Connector verifies the installed runtime advertises the requested
+   authentication method without changing the active secret.
+3. Connector activates only on a connector-managed isolated runtime and reads
+   provider state back before committing the vault slot.
+4. If validation, activation, or readback fails:
+   - The prior encrypted secret is reactivated when runtime mutation may have
+     occurred.
+   - The staged secret remains staged for explicit retry or discard.
    - Active profile assignment remains pointing to previous working secret handle.
-   - Reason logged in `audit.db` as `ROTATION_FAILED_ROLLED_BACK`.
-   - Notification trigger sent to phone UI.
-4. User can inspect failure details and re-enroll valid credential.
+   - If runtime rollback fails, report `RollbackFailed`, stop automatic
+     mutation, and require reconciliation.
+5. User can inspect failure details and re-enroll or discard the staged
+   credential.
+
+Audit-database persistence and phone notification are required by `PLAN.md`
+but are not implemented yet; operators must not infer those side effects from
+the current return value.

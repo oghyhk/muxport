@@ -8,8 +8,11 @@
 
 1. **Vendor Profile Isolation:**
    - Managed runtime instances operate under separate state directories:
-     - OpenCode: `~/.muxport/profiles/opencode/<profile_id>/`
-     - Codex: `~/.muxport/profiles/codex/<profile_id>/`
+     - OpenCode: `<profiles_root>/opencode/<profile_id>/`
+     - Codex: `<profiles_root>/codex/<profile_id>/`
+   - OpenCode receives isolated home and XDG roots and does not inherit
+     arbitrary provider environment variables.
+   - Externally adopted runtimes are read/control-only for credentials.
 2. **Session Identity Immutability:**
    - Every session records an immutable `session_binding` containing the `credential_profile_id` under which it was created.
    - Changing default credential assignment or switching active accounts applies ONLY to newly created sessions by default. Active turns are never silently moved to another identity.
@@ -18,4 +21,8 @@
 
 ## Consequences
 
-- Completely eliminates silent credential identity swapping or session state bleed across accounts.
+- Managed OpenCode sessions carry their bound profile ID into snapshots and
+  normalized session events.
+- The design prevents intentional cross-profile state reuse. Complete
+  cross-platform proof still requires Windows ACL enforcement, real OpenCode
+  compatibility fixtures, Codex profile isolation, and crash-adoption tests.
