@@ -1,7 +1,7 @@
 use adapter_api::{AdapterError, AgentAdapter};
 use connector_core::{
     switch_runtime_assignment, CommandLedger, CoreError, CredentialSwitchError,
-    RotationEligibility, RotationRequest, RotationTrigger,
+    RotationEligibility, RotationMode, RotationPool, RotationRequest, RotationTrigger,
 };
 use credential_vault::{CredentialEnrollment, PersistentVault};
 use muxport_crypto::{secret_provisioning_aad, SecretProvisioningKey};
@@ -652,6 +652,75 @@ impl CommandRouter {
                     "reason_code": decision.reason_code
                 }))
             }
+            Some(command::Inner::ListRotationPools(_)) => {
+                let ledger = self.ledger.lock().await;
+                let pools = ledger
+                    .rotation_pools()
+                    .into_iter()
+                    .map(rotation_pool_json)
+                    .collect::<Vec<_>>();
+                Ok(json!({"pools": pools}))
+            }
+            Some(command::Inner::UpsertRotationPool(request)) => {
+                let mode = parse_rotation_mode(&request.mode)?;
+                if request.pool_id.trim().is_empty()
+                    || request.provider_id.trim().is_empty()
+                    || request.ordered_profile_ids.len() < 2
+                    || request.cooldown_ms < 0
+                    || request.max_switches_per_hour == 0
+                {
+                    return Err(AdapterError::InvalidInput(
+                        "rotation pool fields are invalid".into(),
+                    ));
+                }
+                let vault = self.vault.as_ref().ok_or_else(|| {
+                    AdapterError::Unsupported("credential vault is unavailable or locked".into())
+                })?;
+                let vault = vault.lock().await;
+                for profile_id in &request.ordered_profile_ids {
+                    let profile = vault.get_profile(profile_id).ok_or_else(|| {
+                        AdapterError::InvalidInput("rotation pool references an unknown profile".into())
+                    })?;
+                    if profile.status != CredentialStatus::Active
+                        || profile.provider != request.provider_id
+                    {
+                        return Err(AdapterError::InvalidInput(
+                            "rotation pool profiles must be active and provider-compatible".into(),
+                        ));
+                    }
+                }
+                drop(vault);
+                let mut pool = RotationPool {
+                    pool_id: request.pool_id.trim().to_owned(),
+                    provider_id: request.provider_id.trim().to_owned(),
+                    ordered_profile_ids: request.ordered_profile_ids.clone(),
+                    mode,
+                    cooldown_ms: request.cooldown_ms,
+                    max_switches_per_hour: request.max_switches_per_hour,
+                    allowed_host_ids: request.allowed_host_ids.clone(),
+                    quota_failover_enabled: request.quota_failover_enabled,
+                    last_selection_cursor: None,
+                    last_selected_at_ms: None,
+                    recent_switches_ms: Vec::new(),
+                };
+                let mut ledger = self.ledger.lock().await;
+                if let Some(previous) = ledger.rotation_pool(&pool.pool_id) {
+                    // Editing descriptive policy must not bypass a previous
+                    // cooldown or hourly limit. Keep the cursor only when its
+                    // profile order is unchanged; otherwise begin the new
+                    // order deterministically on the next eligible profile.
+                    pool.last_selected_at_ms = previous.last_selected_at_ms;
+                    pool.recent_switches_ms = previous.recent_switches_ms.clone();
+                    if previous.ordered_profile_ids == pool.ordered_profile_ids {
+                        pool.last_selection_cursor = previous.last_selection_cursor;
+                    }
+                }
+                let json = rotation_pool_json(&pool);
+                ledger
+                    .upsert_rotation_pool(pool)
+                    .map_err(|error| AdapterError::InvalidInput(error.to_string()))?;
+                Ok(json)
+            }
             Some(command::Inner::ProvisionCredential(request)) => {
                 let context = provisioning_context.ok_or_else(|| {
                     AdapterError::Unsupported(
@@ -855,6 +924,41 @@ fn command_fingerprint(command: &Command) -> String {
     fingerprint
 }
 
+fn parse_rotation_mode(value: &str) -> Result<RotationMode, AdapterError> {
+    match value.trim() {
+        "manual" => Ok(RotationMode::Manual),
+        "round_robin" => Ok(RotationMode::RoundRobin),
+        "scheduled" => Ok(RotationMode::Scheduled),
+        "confirmed_failure" => Ok(RotationMode::ConfirmedFailure),
+        _ => Err(AdapterError::InvalidInput(
+            "rotation mode must be manual, round_robin, scheduled, or confirmed_failure".into(),
+        )),
+    }
+}
+
+fn rotation_mode_name(mode: RotationMode) -> &'static str {
+    match mode {
+        RotationMode::Manual => "manual",
+        RotationMode::RoundRobin => "round_robin",
+        RotationMode::Scheduled => "scheduled",
+        RotationMode::ConfirmedFailure => "confirmed_failure",
+    }
+}
+
+fn rotation_pool_json(pool: &RotationPool) -> Value {
+    json!({
+        "poolId": pool.pool_id.as_str(),
+        "providerId": pool.provider_id.as_str(),
+        "orderedProfileIds": pool.ordered_profile_ids.as_slice(),
+        "mode": rotation_mode_name(pool.mode),
+        "cooldownMs": pool.cooldown_ms,
+        "maxSwitchesPerHour": pool.max_switches_per_hour,
+        "allowedHostIds": pool.allowed_host_ids.as_slice(),
+        "quotaFailoverEnabled": pool.quota_failover_enabled,
+        "lastSelectedAtMs": pool.last_selected_at_ms,
+    })
+}
+
 fn command_result(
     command: &Command,
     state: RemoteOpState,
@@ -925,8 +1029,8 @@ mod tests {
     use credential_vault::{CredentialEnrollment, KeyEncryptionKey};
     use muxport_crypto::{secret_provisioning_aad, SecretProvisioningKey};
     use muxport_protocol::{
-        AgentType, ChangeAssignmentCmd, Command, QueryOperationCmd, RotateCredentialCmd,
-        StartSessionCmd, ProvisionCredentialCmd,
+        AgentType, ChangeAssignmentCmd, Command, ListRotationPoolsCmd, QueryOperationCmd,
+        RotateCredentialCmd, StartSessionCmd, ProvisionCredentialCmd, UpsertRotationPoolCmd,
     };
     use std::sync::Arc;
     use test_harness::DeterministicFakeAdapter;
@@ -977,6 +1081,31 @@ mod tests {
                 target_runtime_id: "codex-test".into(),
                 force: false,
             })),
+        }
+    }
+
+    fn upsert_rotation_pool_command(profile_ids: Vec<&str>) -> Command {
+        Command {
+            command_id: "upsert-rotation-pool-command-1".into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::UpsertRotationPool(UpsertRotationPoolCmd {
+                pool_id: "go-pool".into(),
+                provider_id: "opencode-go".into(),
+                ordered_profile_ids: profile_ids.into_iter().map(str::to_owned).collect(),
+                mode: "round_robin".into(),
+                cooldown_ms: 60_000,
+                max_switches_per_hour: 3,
+                allowed_host_ids: vec!["host-test".into()],
+                quota_failover_enabled: false,
+            })),
+        }
+    }
+
+    fn list_rotation_pools_command() -> Command {
+        Command {
+            command_id: "list-rotation-pools-command-1".into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::ListRotationPools(ListRotationPoolsCmd {})),
         }
     }
 
@@ -1336,6 +1465,82 @@ mod tests {
             .decrypt_active_secret("profile-provisioned")
             .unwrap();
         assert_eq!(secret.expose_secret(), b"provider-secret-not-in-command");
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(vault_path);
+    }
+
+    #[tokio::test]
+    async fn rotation_pool_policy_is_vault_validated_and_listed_without_secrets() {
+        let db_path = std::env::temp_dir().join(format!(
+            "muxport-router-rotation-policy-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let vault_path = db_path.with_extension("vault");
+        let mut vault = PersistentVault::open_or_create(
+            &vault_path,
+            "host-test",
+            KeyEncryptionKey::derive_from_passphrase(
+                b"test-only-vault-passphrase",
+                &[9_u8; 16],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for (profile_id, fingerprint) in [("go-a", "account-a"), ("go-b", "account-b")] {
+            vault
+                .enroll_credential(
+                    CredentialEnrollment {
+                        profile_id: profile_id.into(),
+                        display_name: profile_id.into(),
+                        provider: "opencode-go".into(),
+                        credential_type: "subscription".into(),
+                        account_fingerprint: fingerprint.into(),
+                        created_at_ms: 1,
+                        last_validated_at_ms: 1,
+                    },
+                    format!("secret-{profile_id}").as_bytes(),
+                )
+                .unwrap();
+        }
+        let router = CommandRouter::open_sqlite_with_vault(
+            &db_path,
+            HashMap::new(),
+            Arc::new(Mutex::new(vault)),
+        )
+        .unwrap()
+        .with_host_id("host-test");
+
+        let saved = router
+            .dispatch("rotation-policy-save", &upsert_rotation_pool_command(vec!["go-a", "go-b"]))
+            .await
+            .unwrap();
+        assert!(saved.success, "{}", saved.error_message);
+        assert!(!saved.result_json.contains("secret-go-a"));
+
+        let listed = router
+            .dispatch("rotation-policy-list", &list_rotation_pools_command())
+            .await
+            .unwrap();
+        assert!(listed.success, "{}", listed.error_message);
+        let listed_json: Value = serde_json::from_str(&listed.result_json).unwrap();
+        assert_eq!(listed_json["pools"][0]["poolId"], "go-pool");
+        assert_eq!(listed_json["pools"][0]["providerId"], "opencode-go");
+        assert_eq!(listed_json["pools"][0]["orderedProfileIds"], json!(["go-a", "go-b"]));
+        assert!(!listed.result_json.contains("secret-go-a"));
+
+        let rejected = router
+            .dispatch(
+                "rotation-policy-duplicate-profile",
+                &upsert_rotation_pool_command(vec!["go-a", "go-a"]),
+            )
+            .await
+            .unwrap();
+        assert!(!rejected.success);
+        assert!(rejected.error_message.contains("at least two unique"));
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../state/mobile_sync_state.dart';
 import '../state/bulk_switch_plan.dart';
+import '../state/rotation_pool.dart';
 
 class CredentialMatrixScreen extends StatelessWidget {
   const CredentialMatrixScreen({
@@ -11,6 +12,8 @@ class CredentialMatrixScreen extends StatelessWidget {
     this.onRotateCredential,
     this.onBulkAssignCredentials,
     this.onRetryBulkSwitch,
+    this.onListRotationPools,
+    this.onUpsertRotationPool,
     super.key,
   });
 
@@ -31,6 +34,10 @@ class CredentialMatrixScreen extends StatelessWidget {
   final Future<void> Function(List<BulkCredentialSwitchTarget> targets)?
   onBulkAssignCredentials;
   final Future<void> Function(BulkSwitchRetryGroup group)? onRetryBulkSwitch;
+  final Future<List<RotationPoolSummary>> Function(HostSyncState host)?
+  onListRotationPools;
+  final Future<void> Function(HostSyncState host, RotationPoolDraft draft)?
+  onUpsertRotationPool;
 
   @override
   Widget build(BuildContext context) {
@@ -153,6 +160,12 @@ class CredentialMatrixScreen extends StatelessWidget {
                                   item.host,
                                   profileId,
                                 );
+                              } else if (action == 'configurePool') {
+                                _configureRotationPool(
+                                  context,
+                                  item.host,
+                                  profile,
+                                );
                               } else {
                                 _showBulkImpactPlan(context, profile);
                               }
@@ -163,6 +176,11 @@ class CredentialMatrixScreen extends StatelessWidget {
                                 const PopupMenuItem(
                                   value: 'rotate',
                                   child: Text('Rotate an assigned runtime'),
+                                ),
+                              if (onUpsertRotationPool != null)
+                                const PopupMenuItem(
+                                  value: 'configurePool',
+                                  child: Text('Configure rotation pool'),
                                 ),
                               const PopupMenuItem(
                                 value: 'bulk',
@@ -416,46 +434,219 @@ class CredentialMatrixScreen extends StatelessWidget {
     if (!navigator.mounted) {
       return;
     }
-    final poolId = await _askForRotationPool(navigator.context);
+    final poolId = await _chooseRotationPool(navigator.context, host);
     if (poolId == null || poolId.isEmpty) {
       return;
     }
     await onRotateCredential!(host, runtimeId, poolId);
   }
 
-  Future<String?> _askForRotationPool(BuildContext context) async {
-    final controller = TextEditingController();
+  Future<String?> _chooseRotationPool(
+    BuildContext context,
+    HostSyncState host,
+  ) async {
+    if (onListRotationPools == null) return null;
+    List<RotationPoolSummary> pools;
     try {
-      return await showDialog<String>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('Rotation pool'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: const InputDecoration(
-              labelText: 'Configured pool ID',
-              helperText:
-                  'The connector validates the pool and never exposes its credentials.',
-            ),
+      pools = await onListRotationPools!(host);
+    } on Object {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not read rotation pools safely.'),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () =>
-                  Navigator.of(dialogContext).pop(controller.text.trim()),
-              child: const Text('Continue'),
-            ),
-          ],
+        );
+      }
+      return null;
+    }
+    if (!context.mounted) return null;
+    final eligible = pools
+        .where(
+          (pool) =>
+              pool.allowedHostIds.isEmpty ||
+              pool.allowedHostIds.contains(host.hostId),
+        )
+        .toList(growable: false);
+    if (eligible.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No compatible rotation pool is configured for this host.',
+          ),
         ),
       );
+      return null;
+    }
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('Choose rotation pool'),
+              subtitle: Text(
+                'Only non-secret policy metadata is shown. The connector validates profiles again before switching.',
+              ),
+            ),
+            for (final pool in eligible)
+              ListTile(
+                leading: const Icon(Icons.account_tree_outlined),
+                title: Text(pool.poolId),
+                subtitle: Text(
+                  '${pool.providerId} • ${pool.mode} • ${pool.orderedProfileIds.length} accounts',
+                ),
+                onTap: () => Navigator.of(sheetContext).pop(pool.poolId),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _configureRotationPool(
+    BuildContext context,
+    HostSyncState host,
+    Map<String, Object?> sourceProfile,
+  ) async {
+    if (onUpsertRotationPool == null) return;
+    final provider = _string(sourceProfile['provider']);
+    final candidates = <Map<String, Object?>>[];
+    for (final raw
+        in host.snapshot['credentialProfiles'] as List? ?? const []) {
+      if (raw is! Map) continue;
+      final profile = Map<String, Object?>.from(raw);
+      if (_string(profile['provider']) == provider && profile['status'] == 2) {
+        candidates.add(profile);
+      }
+    }
+    if (provider.isEmpty || candidates.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'At least two active compatible accounts are required.',
+          ),
+        ),
+      );
+      return;
+    }
+    final selected = {
+      for (final profile in candidates) _string(profile['profileId']),
+    }..remove('');
+    final poolId = TextEditingController(
+      text: '${provider.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '-')}-rotation',
+    );
+    try {
+      final draft = await showDialog<RotationPoolDraft>(
+        context: context,
+        builder: (dialogContext) {
+          var mode = 'round_robin';
+          return StatefulBuilder(
+            builder: (dialogContext, setDialogState) => AlertDialog(
+              title: const Text('Configure rotation pool'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'This saves non-secret policy only. The host validates all account references before saving.',
+                    ),
+                    TextField(
+                      controller: poolId,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: const InputDecoration(labelText: 'Pool ID'),
+                    ),
+                    DropdownButtonFormField<String>(
+                      initialValue: mode,
+                      decoration: const InputDecoration(labelText: 'Mode'),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'manual',
+                          child: Text('Manual'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'round_robin',
+                          child: Text('Round robin'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'scheduled',
+                          child: Text('Scheduled (connector policy)'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'confirmed_failure',
+                          child: Text('Confirmed failure only'),
+                        ),
+                      ],
+                      onChanged: (value) => setDialogState(() {
+                        mode = value ?? mode;
+                      }),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('Active accounts in priority order'),
+                    for (final profile in candidates)
+                      CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        value: selected.contains(_string(profile['profileId'])),
+                        title: Text(
+                          _string(
+                            profile['displayName'],
+                            fallback: _string(profile['profileId']),
+                          ),
+                        ),
+                        subtitle: Text(
+                          _maskedFingerprint(profile['accountFingerprint']),
+                        ),
+                        onChanged: (checked) => setDialogState(() {
+                          final id = _string(profile['profileId']);
+                          if (checked == true) {
+                            selected.add(id);
+                          } else {
+                            selected.remove(id);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: selected.length < 2
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(
+                          RotationPoolDraft(
+                            poolId: poolId.text.trim(),
+                            providerId: provider,
+                            orderedProfileIds: candidates
+                                .map((profile) => _string(profile['profileId']))
+                                .where(selected.contains)
+                                .toList(growable: false),
+                            mode: mode,
+                            cooldownMs: 60000,
+                            maxSwitchesPerHour: 3,
+                            allowedHostIds: [host.hostId],
+                            quotaFailoverEnabled: false,
+                          ),
+                        ),
+                  child: const Text('Save policy'),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+      if (draft != null && draft.poolId.isNotEmpty) {
+        await onUpsertRotationPool!(host, draft);
+      }
     } finally {
-      controller.dispose();
+      poolId.dispose();
     }
   }
 }

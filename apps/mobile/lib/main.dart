@@ -21,6 +21,7 @@ import 'state/host_sync_orchestrator.dart';
 import 'state/mobile_cache_store.dart';
 import 'state/mobile_lifecycle.dart';
 import 'state/mobile_sync_state.dart';
+import 'state/rotation_pool.dart';
 import 'transport/direct_transport_client.dart';
 import 'transport/direct_transport_protocol.dart';
 
@@ -299,6 +300,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onRetryBulkSwitch: _canAssignCredential
             ? _retryBulkCredentialSwitch
             : null,
+        onListRotationPools: _canAssignCredential ? _listRotationPools : null,
+        onUpsertRotationPool: _canAssignCredential ? _upsertRotationPool : null,
       ),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
@@ -703,6 +706,141 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       await _persistHost(unresolved, cacheStore);
       _showMessage(
         'Rotation outcome is unknown; verify host state before retrying: $error',
+      );
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  Future<List<RotationPoolSummary>> _listRotationPools(
+    HostSyncState host,
+  ) async {
+    final identity = widget.bootstrap.identity;
+    if (!host.canMutate ||
+        identity == null ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      throw StateError('rotation pools are not safely routable for this host');
+    }
+    final commandId =
+        'list-rotation-pools-${identity.deviceId}-${DateTime.now().microsecondsSinceEpoch}';
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.listRotationPools(
+        commandId: commandId,
+        idempotencyKey: commandId,
+      );
+      if (!result.success ||
+          result.state != wire.RemoteOpState.REMOTE_OP_STATE_SUCCEEDED) {
+        throw StateError('connector did not confirm the pool list');
+      }
+      final decoded = jsonDecode(result.resultJson);
+      if (decoded is! Map || decoded['pools'] is! List) {
+        throw const FormatException('connector returned invalid pool metadata');
+      }
+      return [
+        for (final raw in decoded['pools']! as List)
+          if (raw is Map)
+            RotationPoolSummary.fromJson(Map<String, Object?>.from(raw)),
+      ];
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  Future<void> _upsertRotationPool(
+    HostSyncState host,
+    RotationPoolDraft draft,
+  ) async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (!host.canMutate ||
+        identity == null ||
+        cacheStore == null ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      _showMessage('Rotation policy is not safely routable for this host.');
+      return;
+    }
+    final authorized = await _stepUpAuthenticator.authorize(
+      reason:
+          'Authorize saving rotation policy ${draft.poolId} on ${host.displayName}',
+    );
+    if (!authorized || !mounted) {
+      if (mounted) {
+        _showMessage('Device authentication is required. No policy was saved.');
+      }
+      return;
+    }
+    final now = DateTime.now();
+    final operationId =
+        'rotation-policy-${identity.deviceId}-${now.microsecondsSinceEpoch}';
+    final pending = PendingOperation.local(
+      idempotencyKey: operationId,
+      kind: 'rotation-policy:${draft.poolId}',
+      createdAtMs: now.millisecondsSinceEpoch,
+      deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
+    );
+    final pendingHost = host.addPendingOperation(pending);
+    await _persistHost(pendingHost, cacheStore);
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.upsertRotationPool(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        poolId: draft.poolId,
+        providerId: draft.providerId,
+        orderedProfileIds: draft.orderedProfileIds,
+        mode: draft.mode,
+        cooldownMs: draft.cooldownMs,
+        maxSwitchesPerHour: draft.maxSwitchesPerHour,
+        allowedHostIds: draft.allowedHostIds,
+        quotaFailoverEnabled: draft.quotaFailoverEnabled,
+      );
+      final state =
+          result.state.value >= 0 &&
+              result.state.value < RemoteOpState.values.length
+          ? RemoteOpState.values[result.state.value]
+          : RemoteOpState.reconciliationRequired;
+      final resolved = (_hosts[host.hostId] ?? pendingHost).resolveOperation(
+        operationId,
+        state,
+      );
+      await _persistHost(resolved, cacheStore);
+      _showMessage(
+        state == RemoteOpState.succeeded
+            ? 'Rotation policy saved. The connector will enforce its safeguards.'
+            : 'Rotation policy was not confirmed; verify before retrying.',
+      );
+    } on Object {
+      final current = _hosts[host.hostId] ?? pendingHost;
+      await _persistHost(
+        current.resolveOperation(
+          operationId,
+          RemoteOpState.reconciliationRequired,
+        ),
+        cacheStore,
+      );
+      _showMessage(
+        'Policy outcome is unknown; reconcile the host before retrying.',
       );
     } finally {
       await connection?.close();

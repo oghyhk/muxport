@@ -913,6 +913,15 @@ impl CommandLedger {
         self.rotation_pools.get(pool_id)
     }
 
+    /// Returns only non-secret pool policy metadata in a deterministic order.
+    /// The profile references are safe to show to an authenticated client;
+    /// vault material is deliberately not reachable from this API.
+    pub fn rotation_pools(&self) -> Vec<&RotationPool> {
+        let mut pools = self.rotation_pools.values().collect::<Vec<_>>();
+        pools.sort_by(|left, right| left.pool_id.cmp(&right.pool_id));
+        pools
+    }
+
     pub fn select_rotation(
         &mut self,
         pool_id: &str,

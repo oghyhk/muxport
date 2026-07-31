@@ -350,6 +350,24 @@ const Command$json = {
       '9': 0,
       '10': 'provisionCredential'
     },
+    {
+      '1': 'list_rotation_pools',
+      '3': 13,
+      '4': 1,
+      '5': 11,
+      '6': '.muxport.protocol.v1.ListRotationPoolsCmd',
+      '9': 0,
+      '10': 'listRotationPools'
+    },
+    {
+      '1': 'upsert_rotation_pool',
+      '3': 14,
+      '4': 1,
+      '5': 11,
+      '6': '.muxport.protocol.v1.UpsertRotationPoolCmd',
+      '9': 0,
+      '10': 'upsertRotationPool'
+    },
   ],
   '8': [
     {'1': 'inner'},
@@ -373,7 +391,10 @@ final $typed_data.Uint8List commandDescriptor = $convert.base64Decode(
     'ElEKD3F1ZXJ5X29wZXJhdGlvbhgLIAEoCzImLm11eHBvcnQucHJvdG9jb2wudjEuUXVlcnlPcG'
     'VyYXRpb25DbWRIAFIOcXVlcnlPcGVyYXRpb24SYAoUcHJvdmlzaW9uX2NyZWRlbnRpYWwYDCAB'
     'KAsyKy5tdXhwb3J0LnByb3RvY29sLnYxLlByb3Zpc2lvbkNyZWRlbnRpYWxDbWRIAFITcHJvdm'
-    'lzaW9uQ3JlZGVudGlhbEIHCgVpbm5lcg==');
+    'lzaW9uQ3JlZGVudGlhbBJbChNsaXN0X3JvdGF0aW9uX3Bvb2xzGA0gASgLMikubXV4cG9ydC5w'
+    'cm90b2NvbC52MS5MaXN0Um90YXRpb25Qb29sc0NtZEgAUhFsaXN0Um90YXRpb25Qb29scxJeCh'
+    'R1cHNlcnRfcm90YXRpb25fcG9vbBgOIAEoCzIqLm11eHBvcnQucHJvdG9jb2wudjEuVXBzZXJ0'
+    'Um90YXRpb25Qb29sQ21kSABSEnVwc2VydFJvdGF0aW9uUG9vbEIHCgVpbm5lcg==');
 
 @$core.Deprecated('Use startSessionCmdDescriptor instead')
 const StartSessionCmd$json = {
@@ -521,6 +542,57 @@ const QueryOperationCmd$json = {
 final $typed_data.Uint8List queryOperationCmdDescriptor = $convert.base64Decode(
     'ChFRdWVyeU9wZXJhdGlvbkNtZBInCg9pZGVtcG90ZW5jeV9rZXkYASABKAlSDmlkZW1wb3Rlbm'
     'N5S2V5');
+
+@$core.Deprecated('Use listRotationPoolsCmdDescriptor instead')
+const ListRotationPoolsCmd$json = {
+  '1': 'ListRotationPoolsCmd',
+};
+
+/// Descriptor for `ListRotationPoolsCmd`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listRotationPoolsCmdDescriptor =
+    $convert.base64Decode('ChRMaXN0Um90YXRpb25Qb29sc0NtZA==');
+
+@$core.Deprecated('Use upsertRotationPoolCmdDescriptor instead')
+const UpsertRotationPoolCmd$json = {
+  '1': 'UpsertRotationPoolCmd',
+  '2': [
+    {'1': 'pool_id', '3': 1, '4': 1, '5': 9, '10': 'poolId'},
+    {'1': 'provider_id', '3': 2, '4': 1, '5': 9, '10': 'providerId'},
+    {
+      '1': 'ordered_profile_ids',
+      '3': 3,
+      '4': 3,
+      '5': 9,
+      '10': 'orderedProfileIds'
+    },
+    {'1': 'mode', '3': 4, '4': 1, '5': 9, '10': 'mode'},
+    {'1': 'cooldown_ms', '3': 5, '4': 1, '5': 3, '10': 'cooldownMs'},
+    {
+      '1': 'max_switches_per_hour',
+      '3': 6,
+      '4': 1,
+      '5': 13,
+      '10': 'maxSwitchesPerHour'
+    },
+    {'1': 'allowed_host_ids', '3': 7, '4': 3, '5': 9, '10': 'allowedHostIds'},
+    {
+      '1': 'quota_failover_enabled',
+      '3': 8,
+      '4': 1,
+      '5': 8,
+      '10': 'quotaFailoverEnabled'
+    },
+  ],
+};
+
+/// Descriptor for `UpsertRotationPoolCmd`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List upsertRotationPoolCmdDescriptor = $convert.base64Decode(
+    'ChVVcHNlcnRSb3RhdGlvblBvb2xDbWQSFwoHcG9vbF9pZBgBIAEoCVIGcG9vbElkEh8KC3Byb3'
+    'ZpZGVyX2lkGAIgASgJUgpwcm92aWRlcklkEi4KE29yZGVyZWRfcHJvZmlsZV9pZHMYAyADKAlS'
+    'EW9yZGVyZWRQcm9maWxlSWRzEhIKBG1vZGUYBCABKAlSBG1vZGUSHwoLY29vbGRvd25fbXMYBS'
+    'ABKANSCmNvb2xkb3duTXMSMQoVbWF4X3N3aXRjaGVzX3Blcl9ob3VyGAYgASgNUhJtYXhTd2l0'
+    'Y2hlc1BlckhvdXISKAoQYWxsb3dlZF9ob3N0X2lkcxgHIAMoCVIOYWxsb3dlZEhvc3RJZHMSNA'
+    'oWcXVvdGFfZmFpbG92ZXJfZW5hYmxlZBgIIAEoCFIUcXVvdGFGYWlsb3ZlckVuYWJsZWQ=');
 
 @$core.Deprecated('Use provisionCredentialCmdDescriptor instead')
 const ProvisionCredentialCmd$json = {

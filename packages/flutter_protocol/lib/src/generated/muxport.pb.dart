@@ -386,6 +386,8 @@ enum Command_Inner {
   probeHost,
   queryOperation,
   provisionCredential,
+  listRotationPools,
+  upsertRotationPool,
   notSet
 }
 
@@ -404,6 +406,8 @@ class Command extends $pb.GeneratedMessage {
     ProbeHostCmd? probeHost,
     QueryOperationCmd? queryOperation,
     ProvisionCredentialCmd? provisionCredential,
+    ListRotationPoolsCmd? listRotationPools,
+    UpsertRotationPoolCmd? upsertRotationPool,
   }) {
     final result = create();
     if (commandId != null) result.commandId = commandId;
@@ -419,6 +423,9 @@ class Command extends $pb.GeneratedMessage {
     if (queryOperation != null) result.queryOperation = queryOperation;
     if (provisionCredential != null)
       result.provisionCredential = provisionCredential;
+    if (listRotationPools != null) result.listRotationPools = listRotationPools;
+    if (upsertRotationPool != null)
+      result.upsertRotationPool = upsertRotationPool;
     return result;
   }
 
@@ -442,6 +449,8 @@ class Command extends $pb.GeneratedMessage {
     10: Command_Inner.probeHost,
     11: Command_Inner.queryOperation,
     12: Command_Inner.provisionCredential,
+    13: Command_Inner.listRotationPools,
+    14: Command_Inner.upsertRotationPool,
     0: Command_Inner.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -449,7 +458,7 @@ class Command extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
       createEmptyInstance: create)
-    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
     ..aOS(1, _omitFieldNames ? '' : 'commandId')
     ..aInt64(2, _omitFieldNames ? '' : 'deadlineMs')
     ..aOM<StartSessionCmd>(3, _omitFieldNames ? '' : 'startSession',
@@ -473,6 +482,11 @@ class Command extends $pb.GeneratedMessage {
     ..aOM<ProvisionCredentialCmd>(
         12, _omitFieldNames ? '' : 'provisionCredential',
         subBuilder: ProvisionCredentialCmd.create)
+    ..aOM<ListRotationPoolsCmd>(13, _omitFieldNames ? '' : 'listRotationPools',
+        subBuilder: ListRotationPoolsCmd.create)
+    ..aOM<UpsertRotationPoolCmd>(
+        14, _omitFieldNames ? '' : 'upsertRotationPool',
+        subBuilder: UpsertRotationPoolCmd.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -503,6 +517,8 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(10)
   @$pb.TagNumber(11)
   @$pb.TagNumber(12)
+  @$pb.TagNumber(13)
+  @$pb.TagNumber(14)
   Command_Inner whichInner() => _Command_InnerByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -514,6 +530,8 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(10)
   @$pb.TagNumber(11)
   @$pb.TagNumber(12)
+  @$pb.TagNumber(13)
+  @$pb.TagNumber(14)
   void clearInner() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -644,6 +662,28 @@ class Command extends $pb.GeneratedMessage {
   void clearProvisionCredential() => $_clearField(12);
   @$pb.TagNumber(12)
   ProvisionCredentialCmd ensureProvisionCredential() => $_ensure(11);
+
+  @$pb.TagNumber(13)
+  ListRotationPoolsCmd get listRotationPools => $_getN(12);
+  @$pb.TagNumber(13)
+  set listRotationPools(ListRotationPoolsCmd value) => $_setField(13, value);
+  @$pb.TagNumber(13)
+  $core.bool hasListRotationPools() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearListRotationPools() => $_clearField(13);
+  @$pb.TagNumber(13)
+  ListRotationPoolsCmd ensureListRotationPools() => $_ensure(12);
+
+  @$pb.TagNumber(14)
+  UpsertRotationPoolCmd get upsertRotationPool => $_getN(13);
+  @$pb.TagNumber(14)
+  set upsertRotationPool(UpsertRotationPoolCmd value) => $_setField(14, value);
+  @$pb.TagNumber(14)
+  $core.bool hasUpsertRotationPool() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearUpsertRotationPool() => $_clearField(14);
+  @$pb.TagNumber(14)
+  UpsertRotationPoolCmd ensureUpsertRotationPool() => $_ensure(13);
 }
 
 class StartSessionCmd extends $pb.GeneratedMessage {
@@ -1329,6 +1369,179 @@ class QueryOperationCmd extends $pb.GeneratedMessage {
   $core.bool hasIdempotencyKey() => $_has(0);
   @$pb.TagNumber(1)
   void clearIdempotencyKey() => $_clearField(1);
+}
+
+/// Rotation policy contains references and bounded non-secret metadata only.
+/// Provider credential values are never represented in a pool command.
+class ListRotationPoolsCmd extends $pb.GeneratedMessage {
+  factory ListRotationPoolsCmd() => create();
+
+  ListRotationPoolsCmd._();
+
+  factory ListRotationPoolsCmd.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListRotationPoolsCmd.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListRotationPoolsCmd',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListRotationPoolsCmd clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListRotationPoolsCmd copyWith(void Function(ListRotationPoolsCmd) updates) =>
+      super.copyWith((message) => updates(message as ListRotationPoolsCmd))
+          as ListRotationPoolsCmd;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListRotationPoolsCmd create() => ListRotationPoolsCmd._();
+  @$core.override
+  ListRotationPoolsCmd createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ListRotationPoolsCmd getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListRotationPoolsCmd>(create);
+  static ListRotationPoolsCmd? _defaultInstance;
+}
+
+class UpsertRotationPoolCmd extends $pb.GeneratedMessage {
+  factory UpsertRotationPoolCmd({
+    $core.String? poolId,
+    $core.String? providerId,
+    $core.Iterable<$core.String>? orderedProfileIds,
+    $core.String? mode,
+    $fixnum.Int64? cooldownMs,
+    $core.int? maxSwitchesPerHour,
+    $core.Iterable<$core.String>? allowedHostIds,
+    $core.bool? quotaFailoverEnabled,
+  }) {
+    final result = create();
+    if (poolId != null) result.poolId = poolId;
+    if (providerId != null) result.providerId = providerId;
+    if (orderedProfileIds != null)
+      result.orderedProfileIds.addAll(orderedProfileIds);
+    if (mode != null) result.mode = mode;
+    if (cooldownMs != null) result.cooldownMs = cooldownMs;
+    if (maxSwitchesPerHour != null)
+      result.maxSwitchesPerHour = maxSwitchesPerHour;
+    if (allowedHostIds != null) result.allowedHostIds.addAll(allowedHostIds);
+    if (quotaFailoverEnabled != null)
+      result.quotaFailoverEnabled = quotaFailoverEnabled;
+    return result;
+  }
+
+  UpsertRotationPoolCmd._();
+
+  factory UpsertRotationPoolCmd.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory UpsertRotationPoolCmd.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UpsertRotationPoolCmd',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'poolId')
+    ..aOS(2, _omitFieldNames ? '' : 'providerId')
+    ..pPS(3, _omitFieldNames ? '' : 'orderedProfileIds')
+    ..aOS(4, _omitFieldNames ? '' : 'mode')
+    ..aInt64(5, _omitFieldNames ? '' : 'cooldownMs')
+    ..aI(6, _omitFieldNames ? '' : 'maxSwitchesPerHour',
+        fieldType: $pb.PbFieldType.OU3)
+    ..pPS(7, _omitFieldNames ? '' : 'allowedHostIds')
+    ..aOB(8, _omitFieldNames ? '' : 'quotaFailoverEnabled')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpsertRotationPoolCmd clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpsertRotationPoolCmd copyWith(
+          void Function(UpsertRotationPoolCmd) updates) =>
+      super.copyWith((message) => updates(message as UpsertRotationPoolCmd))
+          as UpsertRotationPoolCmd;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static UpsertRotationPoolCmd create() => UpsertRotationPoolCmd._();
+  @$core.override
+  UpsertRotationPoolCmd createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static UpsertRotationPoolCmd getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<UpsertRotationPoolCmd>(create);
+  static UpsertRotationPoolCmd? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get poolId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set poolId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPoolId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPoolId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get providerId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set providerId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasProviderId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearProviderId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get orderedProfileIds => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $core.String get mode => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set mode($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasMode() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMode() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get cooldownMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set cooldownMs($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasCooldownMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearCooldownMs() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.int get maxSwitchesPerHour => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set maxSwitchesPerHour($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasMaxSwitchesPerHour() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearMaxSwitchesPerHour() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $pb.PbList<$core.String> get allowedHostIds => $_getList(6);
+
+  @$pb.TagNumber(8)
+  $core.bool get quotaFailoverEnabled => $_getBF(7);
+  @$pb.TagNumber(8)
+  set quotaFailoverEnabled($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasQuotaFailoverEnabled() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearQuotaFailoverEnabled() => $_clearField(8);
 }
 
 /// The provider secret is never a plaintext command field. `secret_ciphertext`

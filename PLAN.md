@@ -585,7 +585,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Approval inbox.
 - [x] Credential profiles and validation status.
 - [x] Assignment matrix by host/runtime/project.
-- [ ] Rotation-pool editor.
+- [x] Rotation-pool editor.
 - [ ] Bulk-switch impact preview and progress.
 - [x] Recovery/degraded-state explanations.
 - [ ] Device/host revocation and security log.

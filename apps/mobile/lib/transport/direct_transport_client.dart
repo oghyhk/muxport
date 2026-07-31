@@ -907,6 +907,80 @@ class AuthenticatedDirectConnection {
     );
   }
 
+  /// Reads non-secret policy metadata for rotation pools on this host.
+  Future<wire.CommandResult> listRotationPools({
+    required String commandId,
+    required String idempotencyKey,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero) {
+      throw ArgumentError.value(deadline, 'deadline', 'must be positive');
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        listRotationPools: wire.ListRotationPoolsCmd(),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
+  /// Writes non-secret rotation policy after the connector validates every
+  /// profile against its local vault. This method cannot carry credential
+  /// material or force an active runtime to switch.
+  Future<wire.CommandResult> upsertRotationPool({
+    required String commandId,
+    required String idempotencyKey,
+    required String poolId,
+    required String providerId,
+    required List<String> orderedProfileIds,
+    required String mode,
+    required int cooldownMs,
+    required int maxSwitchesPerHour,
+    required List<String> allowedHostIds,
+    required bool quotaFailoverEnabled,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    const validModes = {
+      'manual',
+      'round_robin',
+      'scheduled',
+      'confirmed_failure',
+    };
+    if (deadline <= Duration.zero ||
+        poolId.trim().isEmpty ||
+        providerId.trim().isEmpty ||
+        orderedProfileIds.length < 2 ||
+        orderedProfileIds.any((id) => id.trim().isEmpty) ||
+        orderedProfileIds.toSet().length != orderedProfileIds.length ||
+        !validModes.contains(mode) ||
+        cooldownMs < 0 ||
+        maxSwitchesPerHour <= 0 ||
+        allowedHostIds.any((id) => id.trim().isEmpty)) {
+      throw const DirectTransportProtocolException(
+        'rotation pool policy is invalid',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        upsertRotationPool: wire.UpsertRotationPoolCmd(
+          poolId: poolId,
+          providerId: providerId,
+          orderedProfileIds: orderedProfileIds,
+          mode: mode,
+          cooldownMs: Int64(cooldownMs),
+          maxSwitchesPerHour: maxSwitchesPerHour,
+          allowedHostIds: allowedHostIds,
+          quotaFailoverEnabled: quotaFailoverEnabled,
+        ),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
   /// Consumes and clears [secret] after encrypting it with the dedicated
   /// provisioning key. The plaintext never enters a normal command field.
   Future<wire.CommandResult> provisionCredential({
