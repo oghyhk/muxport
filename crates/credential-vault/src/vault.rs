@@ -648,6 +648,11 @@ impl PersistentVault {
             .get(profile_id)
             .cloned()
             .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        if previous.status != CredentialStatus::Active as i32 {
+            return Err(VaultError::InvalidOperation(
+                "only an active credential can be rolled back".into(),
+            ));
+        }
         let rollback_payload = previous.previous_payload_hex.clone().ok_or_else(|| {
             VaultError::InvalidOperation("no previous credential is available".into())
         })?;
@@ -1532,6 +1537,9 @@ mod tests {
         vault
             .enroll_credential(enrollment("profile-1", "provider"), b"secret")
             .unwrap();
+        vault.stage_credential("profile-1", b"new-secret").unwrap();
+        vault.mark_staged_validated("profile-1", 2000).unwrap();
+        vault.activate_credential("profile-1").unwrap();
 
         vault.disable_credential("profile-1").unwrap();
         assert_eq!(
@@ -1542,13 +1550,17 @@ mod tests {
             vault.decrypt_active_secret("profile-1"),
             Err(VaultError::InvalidOperation(_))
         ));
+        assert!(matches!(
+            vault.rollback_credential("profile-1"),
+            Err(VaultError::InvalidOperation(_))
+        ));
         vault.enable_credential("profile-1").unwrap();
         assert_eq!(
             vault
                 .decrypt_active_secret("profile-1")
                 .unwrap()
                 .expose_secret(),
-            b"secret"
+            b"new-secret"
         );
 
         vault
