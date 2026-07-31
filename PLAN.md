@@ -172,7 +172,7 @@ Define a versioned `AgentAdapter` interface with:
 - [x] Deduplicate and execute remote commands.
 - [x] Store credentials and assignments.
 - [ ] Reconcile after every connector, runtime, host, or network restart.
-- [ ] Produce local, redacted diagnostics and audit events.
+- [x] Produce local, redacted diagnostics and audit events.
 
 ### Host installation mode
 
@@ -474,7 +474,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Read back account fingerprint/provider state.
 - [x] Commit the assignment only after readback matches.
 - [x] On failure, retain or restore the previous assignment.
-- [ ] Record a redacted audit event and per-host result.
+- [x] Record a redacted audit event and per-host result.
 
 ### Bulk switch
 

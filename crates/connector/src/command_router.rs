@@ -1,7 +1,8 @@
 use adapter_api::{AdapterError, AgentAdapter};
 use connector_core::{
-    switch_runtime_assignment, CommandLedger, CoreError, CredentialSwitchError,
-    RotationEligibility, RotationMode, RotationPool, RotationRequest, RotationTrigger,
+    switch_runtime_assignment, CommandAuditRecord, CommandLedger, CoreError,
+    CredentialSwitchError, RotationEligibility, RotationMode, RotationPool,
+    RotationRequest, RotationTrigger,
 };
 use credential_vault::{CredentialEnrollment, PersistentVault};
 use muxport_crypto::{secret_provisioning_aad, SecretProvisioningKey};
@@ -194,6 +195,11 @@ impl CommandRouter {
         provisioning_context: Option<ProvisioningContext<'_>>,
     ) -> Result<CommandResult, CommandDispatchError> {
         let fingerprint = command_fingerprint(command);
+        let audit_actor = provisioning_context
+            .as_ref()
+            .map(|context| context.actor_id)
+            .unwrap_or("connector-local")
+            .to_owned();
         let _dispatch_guard = 'reserve: loop {
             let prior = {
                 let mut ledger = self.ledger.lock().await;
@@ -252,6 +258,12 @@ impl CommandRouter {
                     String::new(),
                 );
                 self.persist_result(idempotency_key, &result).await?;
+                if let Err(error) = self
+                    .record_terminal_audit(idempotency_key, command, &audit_actor, &result)
+                    .await
+                {
+                    tracing::error!(%error, "redacted command audit could not be persisted");
+                }
                 return Ok(result);
             }
             return restore_stored_result(command, state, &stored_result);
@@ -288,7 +300,35 @@ impl CommandRouter {
             }
         };
         self.persist_result(idempotency_key, &result).await?;
+        if let Err(error) = self
+            .record_terminal_audit(idempotency_key, command, &audit_actor, &result)
+            .await
+        {
+            // Command completion is already durable. Never hide that result or
+            // retry its side effect merely because supplemental audit storage
+            // is unavailable; emit no unredacted command content here.
+            tracing::error!(%error, "redacted command audit could not be persisted");
+        }
         Ok(result)
+    }
+
+    async fn record_terminal_audit(
+        &self,
+        idempotency_key: &str,
+        command: &Command,
+        actor: &str,
+        result: &CommandResult,
+    ) -> Result<(), CoreError> {
+        let (action, target) = command_audit_action_target(command);
+        self.ledger.lock().await.record_command_audit(CommandAuditRecord {
+            idempotency_key: audit_key(idempotency_key),
+            command_id: audit_key(&command.command_id),
+            actor: actor.to_owned(),
+            action: action.into(),
+            target,
+            outcome: remote_op_state_name(result.state).into(),
+            completed_at_ms: result.completed_at_ms,
+        })
     }
 
     fn begin_in_flight(
@@ -914,7 +954,15 @@ fn restore_stored_result(
 }
 
 fn command_fingerprint(command: &Command) -> String {
-    let digest = Sha256::digest(command.encode_to_vec());
+    digest_hex(&command.encode_to_vec())
+}
+
+fn audit_key(value: &str) -> String {
+    format!("audit:{}", digest_hex(value.as_bytes()))
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     let mut fingerprint = String::with_capacity(digest.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in digest {
@@ -922,6 +970,52 @@ fn command_fingerprint(command: &Command) -> String {
         fingerprint.push(HEX[(byte & 0x0f) as usize] as char);
     }
     fingerprint
+}
+
+fn command_audit_action_target(command: &Command) -> (&'static str, String) {
+    match command.inner.as_ref() {
+        Some(command::Inner::StartSession(_)) => ("start_session", "runtime".into()),
+        Some(command::Inner::SendInput(_)) => ("send_input", "runtime_session".into()),
+        Some(command::Inner::Steer(_)) => ("steer_session", "runtime_session".into()),
+        Some(command::Inner::Interrupt(_)) => ("interrupt_session", "runtime_session".into()),
+        Some(command::Inner::ApproveAction(_)) => ("approve_action", "approval".into()),
+        Some(command::Inner::ProbeHost(_)) => ("probe_host", "host".into()),
+        Some(command::Inner::QueryOperation(_)) => ("query_operation", "operation".into()),
+        Some(command::Inner::ChangeAssignment(_)) => {
+            ("change_assignment", "assignment_target".into())
+        }
+        Some(command::Inner::RotateCredential(_)) => {
+            ("rotate_credential", "runtime".into())
+        }
+        Some(command::Inner::ListRotationPools(_)) => {
+            ("list_rotation_pools", "rotation_policies".into())
+        }
+        Some(command::Inner::UpsertRotationPool(_)) => {
+            ("upsert_rotation_pool", "rotation_policy".into())
+        }
+        Some(command::Inner::ProvisionCredential(_)) => {
+            ("provision_credential", "credential_profile".into())
+        }
+        None => ("invalid_command", "none".into()),
+    }
+}
+
+fn remote_op_state_name(value: i32) -> &'static str {
+    match RemoteOpState::try_from(value).ok() {
+        Some(RemoteOpState::Created) => "created",
+        Some(RemoteOpState::Persisted) => "persisted",
+        Some(RemoteOpState::Dispatched) => "dispatched",
+        Some(RemoteOpState::SourceAcknowledged) => "source_acknowledged",
+        Some(RemoteOpState::Reconciled) => "reconciled",
+        Some(RemoteOpState::Succeeded) => "succeeded",
+        Some(RemoteOpState::Expired) => "expired",
+        Some(RemoteOpState::Cancelled) => "cancelled",
+        Some(RemoteOpState::RejectedOffline) => "rejected_offline",
+        Some(RemoteOpState::Failed) => "failed",
+        Some(RemoteOpState::OutcomeUnknown) => "outcome_unknown",
+        Some(RemoteOpState::ReconciliationRequired) => "reconciliation_required",
+        Some(RemoteOpState::Unspecified) | None => "invalid_state",
+    }
 }
 
 fn parse_rotation_mode(value: &str) -> Result<RotationMode, AdapterError> {
@@ -1531,6 +1625,12 @@ mod tests {
         assert_eq!(listed_json["pools"][0]["providerId"], "opencode-go");
         assert_eq!(listed_json["pools"][0]["orderedProfileIds"], json!(["go-a", "go-b"]));
         assert!(!listed.result_json.contains("secret-go-a"));
+        let audit = router.ledger.lock().await.command_audit_records().to_vec();
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0].actor, "connector-local");
+        assert_eq!(audit[0].action, "upsert_rotation_pool");
+        assert_eq!(audit[1].action, "list_rotation_pools");
+        assert!(!format!("{audit:?}").contains("secret-go-a"));
 
         let rejected = router
             .dispatch(

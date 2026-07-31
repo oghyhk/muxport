@@ -61,6 +61,8 @@ pub enum CoreError {
     RotationPoolIdMismatch { row: String, policy: String },
     #[error("Rotation policy serialization failed: {0}")]
     RotationSerialization(#[from] serde_json::Error),
+    #[error("Audit record field {0} is empty or exceeds the redacted limit")]
+    InvalidAuditRecord(&'static str),
     #[error("Bulk switch operation row id {row} does not match operation id {operation}")]
     BulkSwitchOperationIdMismatch { row: String, operation: String },
     #[error(transparent)]
@@ -351,6 +353,7 @@ pub struct CommandLedger {
     session_assignments: HashMap<(String, String), String>,
     rotation_pools: HashMap<String, RotationPool>,
     bulk_switch_operations: HashMap<String, BulkSwitchOperation>,
+    command_audit: Vec<CommandAuditRecord>,
     conn: Option<rusqlite::Connection>,
 }
 
@@ -394,6 +397,19 @@ struct CommandRecord {
     fingerprint: String,
 }
 
+/// A redacted control-plane audit record. It deliberately excludes
+/// command payloads, provider secrets, filesystem paths, and source error text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandAuditRecord {
+    pub idempotency_key: String,
+    pub command_id: String,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub outcome: String,
+    pub completed_at_ms: i64,
+}
+
 impl Default for CommandLedger {
     fn default() -> Self {
         Self::new()
@@ -401,7 +417,7 @@ impl Default for CommandLedger {
 }
 
 impl CommandLedger {
-    const SCHEMA_VERSION: u32 = 6;
+    const SCHEMA_VERSION: u32 = 7;
 
     pub fn new() -> Self {
         Self {
@@ -410,6 +426,7 @@ impl CommandLedger {
             session_assignments: HashMap::new(),
             rotation_pools: HashMap::new(),
             bulk_switch_operations: HashMap::new(),
+            command_audit: Vec::new(),
             conn: None,
         }
     }
@@ -519,6 +536,24 @@ impl CommandLedger {
             )",
             [],
         )?;
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS command_audit (
+                idempotency_key TEXT PRIMARY KEY,
+                command_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                completed_at_ms INTEGER NOT NULL,
+                CHECK (length(trim(idempotency_key)) > 0),
+                CHECK (length(trim(command_id)) > 0),
+                CHECK (length(trim(actor)) > 0),
+                CHECK (length(trim(action)) > 0),
+                CHECK (length(trim(target)) > 0),
+                CHECK (length(trim(outcome)) > 0)
+            )",
+            [],
+        )?;
         transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         transaction.commit()?;
 
@@ -528,6 +563,7 @@ impl CommandLedger {
             session_assignments: HashMap::new(),
             rotation_pools: HashMap::new(),
             bulk_switch_operations: HashMap::new(),
+            command_audit: Vec::new(),
             conn: Some(conn),
         };
         ledger.load_from_db()?;
@@ -628,6 +664,26 @@ impl CommandLedger {
                     });
                 }
                 self.bulk_switch_operations.insert(operation_id, operation);
+            }
+            drop(bulk_switch_stmt);
+            let mut audit_stmt = conn.prepare(
+                "SELECT idempotency_key, command_id, actor, action, target, outcome, completed_at_ms
+                 FROM command_audit
+                 ORDER BY completed_at_ms ASC, idempotency_key ASC",
+            )?;
+            let audit_rows = audit_stmt.query_map([], |row| {
+                Ok(CommandAuditRecord {
+                    idempotency_key: row.get(0)?,
+                    command_id: row.get(1)?,
+                    actor: row.get(2)?,
+                    action: row.get(3)?,
+                    target: row.get(4)?,
+                    outcome: row.get(5)?,
+                    completed_at_ms: row.get(6)?,
+                })
+            })?;
+            for audit in audit_rows {
+                self.command_audit.push(audit?);
             }
         }
         Ok(())
@@ -920,6 +976,58 @@ impl CommandLedger {
         let mut pools = self.rotation_pools.values().collect::<Vec<_>>();
         pools.sort_by(|left, right| left.pool_id.cmp(&right.pool_id));
         pools
+    }
+
+    /// Writes one redacted terminal command audit record. Repeated delivery of
+    /// the same idempotency key is intentionally represented once.
+    pub fn record_command_audit(
+        &mut self,
+        audit: CommandAuditRecord,
+    ) -> Result<(), CoreError> {
+        for (field, value) in [
+            ("idempotency_key", audit.idempotency_key.as_str()),
+            ("command_id", audit.command_id.as_str()),
+            ("actor", audit.actor.as_str()),
+            ("action", audit.action.as_str()),
+            ("target", audit.target.as_str()),
+            ("outcome", audit.outcome.as_str()),
+        ] {
+            if value.trim().is_empty() || value.len() > 256 {
+                return Err(CoreError::InvalidAuditRecord(field));
+            }
+        }
+        if let Some(ref conn) = self.conn {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO command_audit (
+                    idempotency_key, command_id, actor, action, target, outcome, completed_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(idempotency_key) DO NOTHING",
+                rusqlite::params![
+                    &audit.idempotency_key,
+                    &audit.command_id,
+                    &audit.actor,
+                    &audit.action,
+                    &audit.target,
+                    &audit.outcome,
+                    audit.completed_at_ms,
+                ],
+            )?;
+            transaction.commit()?;
+        }
+        if !self
+            .command_audit
+            .iter()
+            .any(|existing| existing.idempotency_key == audit.idempotency_key)
+        {
+            self.command_audit.push(audit);
+        }
+        Ok(())
+    }
+
+    /// Provides only already-redacted records in deterministic completion order.
+    pub fn command_audit_records(&self) -> &[CommandAuditRecord] {
+        &self.command_audit
     }
 
     pub fn select_rotation(
@@ -1534,6 +1642,44 @@ mod tests {
             assert_eq!(restored.last_selection_cursor, Some(1));
             assert_eq!(restored.last_selected_at_ms, Some(1_000));
             assert_eq!(restored.recent_switches_ms, [1_000]);
+        }
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn redacted_command_audit_survives_restart_and_deduplicates() {
+        let db_path = std::env::temp_dir().join(format!(
+            "command-audit-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let audit = CommandAuditRecord {
+            idempotency_key: "audit-key-1".into(),
+            command_id: "command-1".into(),
+            actor: "device-public-id".into(),
+            action: "change_assignment".into(),
+            target: "runtime:codex-1".into(),
+            outcome: "succeeded".into(),
+            completed_at_ms: 123,
+        };
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            ledger.record_command_audit(audit.clone()).unwrap();
+            ledger.record_command_audit(audit.clone()).unwrap();
+            assert_eq!(ledger.command_audit_records(), &[audit.clone()]);
+            assert!(matches!(
+                ledger.record_command_audit(CommandAuditRecord {
+                    target: "secret-value-that-must-not-fit".repeat(20),
+                    ..audit.clone()
+                }),
+                Err(CoreError::InvalidAuditRecord("target"))
+            ));
+        }
+        {
+            let ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            assert_eq!(ledger.command_audit_records(), &[audit]);
         }
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
