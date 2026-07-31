@@ -5,8 +5,8 @@ use adapter_codex::CodexAdapter;
 use adapter_opencode::OpenCodeAdapter;
 use connector::{
     journal_runtime_event, replay_events_after_snapshot, CommandRouter,
-    DirectTransportService, InstanceLock, PairingCoordinator, PairingStore,
-    PairingStoreError, RuntimeMirror,
+    ConfirmingParty, DirectTransportService, InstanceLock,
+    PairingCoordinator, PairingStore, PairingStoreError, RuntimeMirror,
 };
 use credential_vault::{
     HostIdentityManager, OsHostIdentityStore, OsVaultKeyStore, PersistentVault,
@@ -61,6 +61,9 @@ enum SourceUpdate {
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
+    if run_local_subcommand()? {
+        return Ok(());
+    }
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
@@ -275,6 +278,17 @@ async fn main() -> Result<(), DynError> {
                         advertised_endpoint,
                     )?,
                 ));
+                if let Some(ttl) = pairing_offer_ttl()? {
+                    let offer = pairing
+                        .lock()
+                        .map_err(|_| "pairing coordinator lock is unavailable")?
+                        .create_offer(ttl)?;
+                    info!(
+                        pairing_offer_json = %serde_json::to_string(&offer)?,
+                        expires_at_ms = offer.expires_at_ms,
+                        "signed pairing offer created; keep this one-time code local until it is scanned"
+                    );
+                }
                 let service =
                     DirectTransportService::new_with_pairing(
                         host_id.clone(),
@@ -643,6 +657,95 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn pairing_offer_ttl() -> Result<Option<Duration>, io::Error> {
+    let Some(value) = nonempty_env("MUXPORT_PAIRING_OFFER_TTL_SECONDS")
+    else {
+        return Ok(None);
+    };
+    let seconds = value.parse::<u64>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MUXPORT_PAIRING_OFFER_TTL_SECONDS must be an integer",
+        )
+    })?;
+    if !(30..=600).contains(&seconds) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MUXPORT_PAIRING_OFFER_TTL_SECONDS must be between 30 and 600",
+        ));
+    }
+    Ok(Some(Duration::from_secs(seconds)))
+}
+
+fn run_local_subcommand() -> Result<bool, DynError> {
+    let mut arguments = std::env::args().skip(1);
+    let Some(command) = arguments.next() else {
+        return Ok(false);
+    };
+    if command != "pairing-confirm" {
+        return Err(format!("unknown connector command {command:?}").into());
+    }
+    let host_id = arguments
+        .next()
+        .ok_or("pairing-confirm requires HOST_ID PAIRING_ID SAS")?;
+    let pairing_id = arguments
+        .next()
+        .ok_or("pairing-confirm requires HOST_ID PAIRING_ID SAS")?;
+    let sas = arguments
+        .next()
+        .ok_or("pairing-confirm requires HOST_ID PAIRING_ID SAS")?;
+    if arguments.next().is_some() {
+        return Err(
+            "pairing-confirm accepts exactly HOST_ID PAIRING_ID SAS".into(),
+        );
+    }
+    let identity = HostIdentityManager::new(OsHostIdentityStore::new())
+        .load_existing(&host_id)?
+        .ok_or("no existing protected identity exists for that host id")?;
+    let pairing_db = std::env::var("MUXPORT_PAIRING_DB")
+        .unwrap_or_else(|_| "muxport-pairing.db".into());
+    let mut store = PairingStore::open_sqlite(&pairing_db)?;
+    store.bind_host_identity(
+        &host_id,
+        &identity.signing_key().verifying_key(),
+    )?;
+    match store.confirm_sas(
+        &pairing_id,
+        &sas,
+        ConfirmingParty::Host,
+    ) {
+        Ok(true) => {
+            let device = store.finalize(
+                &pairing_id,
+                &host_id,
+                identity.signing_key(),
+            )?;
+            println!(
+                "pairing finalized for device {} ({})",
+                device.device_id, device.device_name
+            );
+        }
+        Ok(false) => {
+            println!(
+                "host SAS confirmed; waiting for phone confirmation for {pairing_id}"
+            );
+        }
+        Err(PairingStoreError::InvalidPairingState) => {
+            let device = store.finalize(
+                &pairing_id,
+                &host_id,
+                identity.signing_key(),
+            )?;
+            println!(
+                "pairing was already finalized for device {} ({})",
+                device.device_id, device.device_name
+            );
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(true)
 }
 
 fn new_boot_epoch() -> u64 {

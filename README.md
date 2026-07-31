@@ -3,12 +3,12 @@
 Muxport is an open-source, mobile-first control plane for operating OpenCode
 and Codex runtimes on user-controlled desktops and servers.
 
-> **Project status:** early security-focused scaffold. The protocol, Rust
-> workspace, and Flutter shell compile and have baseline tests. An opt-in
-> authenticated direct command endpoint and Flutter wire client exist, but
-> their app integration, end-to-end pairing UI, durable credential rotation,
-> and real-time Codex and OpenCode synchronization are not complete. Do not
-> expose this build publicly or use it to manage production credentials.
+> **Project status:** security-focused development build. Authenticated direct
+> commands, signed/SAS-confirmed pairing, restart-safe mobile enrollment, and
+> encrypted snapshot/event replay are integrated and tested. Durable provider
+> credential activation, full session/approval UI wiring, relay deployment,
+> and release hardening remain incomplete. Do not expose this build publicly
+> or use it to manage production credentials.
 
 Muxport is an independent project. It is not built, sponsored, or endorsed by
 the OpenCode team or OpenAI.
@@ -61,8 +61,8 @@ flutter test
 See [the worker audit](docs/reviews/worker-audit-2026-07-30.md) for the exact
 verified state and known gaps.
 
-The connector's command-only direct listener is disabled by default. For local
-development it can be enabled on loopback:
+The connector's authenticated direct listener is disabled by default. For
+local development it can be enabled on loopback:
 
 ```sh
 MUXPORT_DIRECT_BIND=127.0.0.1:45821 cargo run -p connector
@@ -70,8 +70,35 @@ MUXPORT_DIRECT_BIND=127.0.0.1:45821 cargo run -p connector
 
 Non-loopback binding additionally requires
 `MUXPORT_ALLOW_REMOTE_DIRECT=1`. Use only on an access-controlled private
-network; the Flutter wire client is not launched by the app yet, and
-snapshot/event sync is not connected.
+network.
+
+### Development pairing flow
+
+Pairing offers are opt-in and expire after 30–600 seconds. Set the advertised
+endpoint to an address the phone can reach:
+
+```sh
+MUXPORT_DIRECT_BIND=0.0.0.0:45821 \
+MUXPORT_ALLOW_REMOTE_DIRECT=1 \
+MUXPORT_PAIRING_ENDPOINT=192.0.2.10:45821 \
+MUXPORT_PAIRING_OFFER_TTL_SECONDS=300 \
+cargo run -p connector --bin muxport-connector
+```
+
+Copy the logged `pairing_offer_json` into the mobile pairing dialog. Compare
+the six-digit SAS on both trusted displays. Complete the host half from the
+same OS user account and working directory as the daemon:
+
+```sh
+cargo run -p connector --bin muxport-connector -- \
+  pairing-confirm HOST_ID PAIRING_ID SIX_DIGIT_SAS
+```
+
+If `MUXPORT_PAIRING_DB` is customized for the daemon, pass the same environment
+value to the confirmation command. The command loads only the existing
+OS-protected host identity and fails closed for a wrong host ID. Once both
+sides confirm, the mobile app periodically authenticates, restores a snapshot,
+replays contiguous journal events, persists its cursor, and acknowledges it.
 
 ## Security
 

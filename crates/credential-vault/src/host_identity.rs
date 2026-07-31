@@ -101,6 +101,26 @@ impl<S: HostIdentitySecretStore> HostIdentityManager<S> {
             created: true,
         })
     }
+
+    /// Loads an existing protected identity without creating a replacement.
+    /// Recovery and administrative commands use this so a typo in a host id
+    /// cannot mint an unrelated long-term identity.
+    pub fn load_existing(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<LoadedHostIdentity>, HostIdentityError> {
+        validate_host_id(host_id)?;
+        let entry_name = identity_entry_name(host_id);
+        let Some(mut record) = self.store.get_secret(&entry_name)? else {
+            return Ok(None);
+        };
+        let signing_key = decode_identity(&record);
+        record.zeroize();
+        Ok(Some(LoadedHostIdentity {
+            signing_key: signing_key?,
+            created: false,
+        }))
+    }
 }
 
 #[derive(Default)]
@@ -267,6 +287,20 @@ mod tests {
             .load_or_create("host-2")
             .unwrap();
         assert_ne!(first.public_key_hex(), second.public_key_hex());
+    }
+
+    #[test]
+    fn load_existing_never_creates_a_missing_identity() {
+        let store = MemorySecretStore::default();
+        let manager = HostIdentityManager::new(store.clone());
+
+        assert!(manager.load_existing("host-missing").unwrap().is_none());
+        assert!(store.values.lock().unwrap().is_empty());
+
+        manager.load_or_create("host-1").unwrap();
+        let loaded = manager.load_existing("host-1").unwrap().unwrap();
+        assert!(!loaded.was_created());
+        assert_eq!(store.values.lock().unwrap().len(), 1);
     }
 
     #[test]
