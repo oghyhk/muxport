@@ -12,20 +12,20 @@ The plan is organized as an implementation checklist. A checkbox is complete onl
 
 ## 2. Fixed architectural decisions
 
-- [ ] Use **Flutter** for the iOS and Android application.
-- [ ] Use **Rust** for the host connector, relay, protocol core, credential vault, runtime supervision, and shared security-sensitive code.
-- [ ] Keep OpenCode and Codex running on user-controlled hosts; the mobile app is a control and synchronization client.
-- [ ] Integrate OpenCode through its supported HTTP/OpenAPI and SSE interfaces.
-- [ ] Integrate Codex through a locally supervised `codex app-server` using its supported stdio JSON-RPC transport.
-- [ ] Do not depend on Codex's experimental WebSocket listener for production.
-- [ ] Treat OpenCode and Codex integrations as adapters behind one versioned internal interface.
-- [ ] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
-- [ ] Keep the relay optional and unable to decrypt application payloads.
-- [ ] Support a direct path over LAN or a user-managed private network such as Tailscale.
+- [x] Use **Flutter** for the iOS and Android application.
+- [x] Use **Rust** for the host connector, relay, protocol core, credential vault, runtime supervision, and shared security-sensitive code.
+- [x] Keep OpenCode and Codex running on user-controlled hosts; the mobile app is a control and synchronization client.
+- [x] Integrate OpenCode through its supported HTTP/OpenAPI and SSE interfaces.
+- [x] Integrate Codex through a locally supervised `codex app-server` using its supported stdio JSON-RPC transport.
+- [x] Do not depend on Codex's experimental WebSocket listener for production.
+- [x] Treat OpenCode and Codex integrations as adapters behind one versioned internal interface.
+- [x] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
+- [x] Keep the relay optional and unable to decrypt application payloads.
+- [x] Support a direct path over LAN or a user-managed private network such as Tailscale.
 - [ ] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
-- [ ] Treat runtime session state on the host as the source of truth.
-- [ ] Treat mobile caches and the connector event journal as reconstructible state.
-- [ ] Apply account changes to new sessions by default; never silently move an active turn to another identity.
+- [x] Treat runtime session state on the host as the source of truth.
+- [x] Treat mobile caches and the connector event journal as reconstructible state.
+- [x] Apply account changes to new sessions only; never silently move an active turn to another identity.
 - [ ] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
 
 ## 3. System architecture
@@ -165,7 +165,7 @@ Define a versioned `AgentAdapter` interface with:
 
 - [x] Pair and authenticate mobile devices.
 - [ ] Maintain direct and relay transports.
-- [ ] Own desired configuration and observed runtime state.
+- [x] Own desired configuration and observed runtime state.
 - [x] Supervise managed OpenCode and Codex processes.
 - [ ] Adopt compatible externally launched runtimes when a stable endpoint is supplied.
 - [x] Normalize and journal source events.
@@ -205,10 +205,10 @@ observed:
 ```
 
 - [ ] Reconcile on connector start, runtime event, configuration change, and periodic health tick.
-- [ ] Never infer success solely from a previously sent command.
-- [ ] Read back account and runtime state after every credential activation.
+- [x] Never infer success solely from a previously sent command.
+- [x] Read back account and runtime state after every credential activation.
 - [ ] Surface desired/observed drift to the phone.
-- [ ] Require user action before killing an unmanaged external process.
+- [x] Require user action before killing an unmanaged external process.
 
 ## 7. Local storage separation
 
@@ -232,7 +232,7 @@ state/
 - [ ] Treat SQLite WAL/SHM files as live data, never disposable cache during recovery.
 - [ ] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
 - [ ] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
-- [ ] Keep `vault.sealed` independent of metadata and event-journal migrations.
+- [x] Keep `vault.sealed` independent of metadata and event-journal migrations.
 - [x] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
 - [x] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
 
@@ -389,7 +389,7 @@ created -> persisted -> dispatched -> source_acknowledged -> reconciled -> succe
 
 - [x] Implement these as explicit enums with allowed transitions.
 - [ ] Persist every mutating transition transactionally.
-- [ ] Reject impossible transitions and emit a redacted diagnostic event.
+- [x] Reject impossible transitions and emit a redacted diagnostic event.
 - [x] Give the Flutter UI a consistent status and explanation for every state.
 
 ### Recovery invariant
@@ -435,7 +435,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Unlock vault or enter `vault_locked`.
 - [x] Generate a new connector boot epoch.
 - [ ] Discover existing managed child processes using verifiable PID, executable path, start time, and profile markers; do not trust PID alone.
-- [ ] Probe every source API and obtain authoritative snapshots.
+- [x] Probe every source API and obtain authoritative snapshots.
 - [x] Reconcile pending operations without automatically replaying unknown mutations.
 - [x] Start event subscriptions only after snapshot baseline identifiers are recorded.
 - [ ] Reconnect relay/direct clients and publish a new snapshot boundary.
@@ -467,7 +467,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Confirm target profile is compatible with runtime/provider.
 - [x] Resolve the secret handle locally on the target host.
 - [x] Stage the credential without changing the active assignment.
-- [ ] Validate through a non-destructive supported provider operation.
+- [x] Validate through a non-destructive supported provider operation.
 - [x] Inspect active turns.
 - [ ] If work is active, default to “apply to new sessions”; require explicit drain/restart confirmation for immediate mode.
 - [x] Activate the credential through the supported adapter method.
@@ -502,7 +502,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Credential replacement
 
 - [x] Add new secret as `staged`.
-- [ ] Validate it without overwriting the current secret.
+- [x] Validate it without overwriting the current secret.
 - [x] Atomically point the profile to the new secret version.
 - [x] Retain the old encrypted version for a short rollback window unless the user requests immediate removal.
 - [ ] Confirm dependent runtimes can authenticate.
