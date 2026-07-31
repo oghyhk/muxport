@@ -1,5 +1,7 @@
 use adapter_api::{AdapterError, AgentAdapter};
-use connector_core::{activate_staged_credential, CommandLedger, CoreError, CredentialSwitchError};
+use connector_core::{
+    switch_runtime_assignment, CommandLedger, CoreError, CredentialSwitchError,
+};
 use credential_vault::PersistentVault;
 use muxport_protocol::{
     command, Command, CommandResult, RemoteOpState,
@@ -296,6 +298,26 @@ impl CommandRouter {
                     ));
                 }
                 let adapter = self.adapter(&request.target_id)?;
+                let runtime_profile_id = adapter
+                    .managed_runtime_profile_id()
+                    .ok_or_else(|| {
+                        AdapterError::Unsupported(
+                            "credential assignment requires a connector-managed isolated runtime"
+                                .into(),
+                        )
+                    })?
+                    .to_owned();
+                if adapter
+                    .list_sessions()
+                    .await?
+                    .iter()
+                    .any(|session| session_status_is_active(&session.status))
+                {
+                    return Err(AdapterError::InvalidInput(
+                        "runtime has active work; drain or stop it before immediate credential reassignment"
+                            .into(),
+                    ));
+                }
                 let profile_id = request.new_credential_profile_id.trim();
                 if profile_id.is_empty() {
                     return Err(AdapterError::InvalidInput(
@@ -305,7 +327,14 @@ impl CommandRouter {
                 let vault = self.vault.as_ref().ok_or_else(|| {
                     AdapterError::Unsupported("credential vault is unavailable or locked".into())
                 })?;
-                let mut vault = vault.lock().await;
+                let prior_profile_id = self
+                    .ledger
+                    .lock()
+                    .await
+                    .runtime_assignment(&request.target_id)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| runtime_profile_id.clone());
+                let vault = vault.lock().await;
                 let provider = vault
                     .get_profile(profile_id)
                     .map(|profile| profile.provider)
@@ -314,9 +343,11 @@ impl CommandRouter {
                             "credential profile {profile_id:?} does not exist"
                         ))
                     })?;
-                let result = activate_staged_credential(
+                let result = switch_runtime_assignment(
                     adapter.as_ref(),
-                    &mut vault,
+                    &vault,
+                    &runtime_profile_id,
+                    &prior_profile_id,
                     profile_id,
                     &provider,
                 )
@@ -474,6 +505,13 @@ fn outcome_requires_reconciliation(error: &AdapterError) -> bool {
     )
 }
 
+fn session_status_is_active(status: &str) -> bool {
+    matches!(
+        status,
+        "busy" | "running" | "active" | "inProgress" | "waiting_approval"
+    )
+}
+
 fn map_credential_switch_error(error: CredentialSwitchError) -> AdapterError {
     let detail = error.to_string();
     match error {
@@ -551,6 +589,22 @@ mod tests {
                 String::new(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn credential_switch_active_work_guard_is_fail_closed() {
+        for status in [
+            "busy",
+            "running",
+            "active",
+            "inProgress",
+            "waiting_approval",
+        ] {
+            assert!(session_status_is_active(status), "{status}");
+        }
+        for status in ["idle", "completed", "failed", "interrupted", "archived"] {
+            assert!(!session_status_is_active(status), "{status}");
+        }
     }
 
     #[tokio::test]
@@ -752,7 +806,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_assignment_activates_staged_vault_secret_transactionally() {
+    async fn runtime_assignment_switches_distinct_credential_profiles_transactionally() {
         let db_path = std::env::temp_dir().join(format!(
             "muxport-router-assignment-{}-{}.db",
             std::process::id(),
@@ -784,8 +838,25 @@ mod tests {
             )
             .unwrap();
         vault
-            .stage_credential("profile-a", b"new-secret-key")
+            .enroll_credential(
+                CredentialEnrollment {
+                    profile_id: "profile-b".into(),
+                    display_name: "Profile B".into(),
+                    provider: "openai".into(),
+                    credential_type: "api_key".into(),
+                    account_fingerprint: "account-b".into(),
+                    created_at_ms: 2,
+                    last_validated_at_ms: 2,
+                },
+                b"new-secret-key",
+            )
             .unwrap();
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            ledger
+                .set_runtime_assignment("codex-test", "profile-a")
+                .unwrap();
+        }
         let vault = Arc::new(Mutex::new(vault));
         let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
         let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
@@ -797,7 +868,7 @@ mod tests {
         let result = router
             .dispatch(
                 "assignment-idempotency-key",
-                &assignment_command("profile-a"),
+                &assignment_command("profile-b"),
             )
             .await
             .unwrap();
@@ -806,7 +877,7 @@ mod tests {
             vault
                 .lock()
                 .await
-                .decrypt_active_secret("profile-a")
+                .decrypt_active_secret("profile-b")
                 .unwrap()
                 .expose_secret(),
             b"new-secret-key"
@@ -817,7 +888,7 @@ mod tests {
                 .lock()
                 .await
                 .runtime_assignment("codex-test"),
-            Some("profile-a")
+            Some("profile-b")
         );
 
         let _ = std::fs::remove_file(&db_path);

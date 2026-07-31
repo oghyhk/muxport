@@ -24,6 +24,8 @@ pub enum CredentialSwitchError {
     },
     #[error("credential profile is not staged")]
     NotStaged,
+    #[error("the current runtime credential assignment is unavailable")]
+    PriorAssignmentMissing,
     #[error("credential validation did not accept the staged secret")]
     ValidationRejected,
     #[error("credential runtime operation failed: {0}")]
@@ -201,6 +203,104 @@ pub async fn activate_staged_credential<R: CredentialRuntime + ?Sized>(
     })
 }
 
+/// Switches one isolated runtime from its current credential profile to a
+/// different active profile without changing either vault record.
+///
+/// The runtime-profile identifier controls filesystem/process isolation. The
+/// credential-profile identifiers select encrypted secrets and are never
+/// required to match it.
+pub async fn switch_runtime_assignment<R: CredentialRuntime + ?Sized>(
+    runtime: &R,
+    vault: &PersistentVault,
+    runtime_profile_id: &str,
+    prior_credential_profile_id: &str,
+    target_credential_profile_id: &str,
+    runtime_provider_id: &str,
+) -> Result<CredentialSwitchResult, CredentialSwitchError> {
+    if prior_credential_profile_id.trim().is_empty() {
+        return Err(CredentialSwitchError::PriorAssignmentMissing);
+    }
+    let prior_summary = vault
+        .get_profile(prior_credential_profile_id)
+        .ok_or_else(|| {
+            CredentialSwitchError::ProfileNotFound(prior_credential_profile_id.to_owned())
+        })?;
+    let target_summary = vault
+        .get_profile(target_credential_profile_id)
+        .ok_or_else(|| {
+            CredentialSwitchError::ProfileNotFound(target_credential_profile_id.to_owned())
+        })?;
+    for provider in [&prior_summary.provider, &target_summary.provider] {
+        if provider != runtime_provider_id {
+            return Err(CredentialSwitchError::IncompatibleProvider {
+                profile_provider: provider.clone(),
+                runtime_provider: runtime_provider_id.to_owned(),
+            });
+        }
+    }
+
+    let prior_secret = vault.decrypt_active_secret(prior_credential_profile_id)?;
+    let target_secret = vault.decrypt_active_secret(target_credential_profile_id)?;
+    let prior =
+        CredentialMaterial::api_key(runtime_provider_id, prior_secret.expose_secret())?;
+    let target =
+        CredentialMaterial::api_key(runtime_provider_id, target_secret.expose_secret())?;
+
+    runtime.prepare(runtime_profile_id, &target).await?;
+    let validation = runtime.validate(&target).await?;
+    if validation.provider_id != runtime_provider_id
+        || !matches!(
+            validation.status,
+            CredentialStatus::Staged | CredentialStatus::Active
+        )
+    {
+        return Err(CredentialSwitchError::ValidationRejected);
+    }
+    if let Err(activation) = runtime.activate(runtime_profile_id, &target).await {
+        return Err(rollback_after_failure(
+            runtime,
+            runtime_profile_id,
+            &prior,
+            activation.to_string(),
+        )
+        .await);
+    }
+    let account = match runtime.read_account(runtime_provider_id).await {
+        Ok(account)
+            if account.connected && account.provider_id == runtime_provider_id =>
+        {
+            account
+        }
+        Ok(_) => {
+            return Err(rollback_after_failure(
+                runtime,
+                runtime_profile_id,
+                &prior,
+                "provider readback did not confirm the activated credential".into(),
+            )
+            .await);
+        }
+        Err(error) => {
+            return Err(rollback_after_failure(
+                runtime,
+                runtime_profile_id,
+                &prior,
+                error.to_string(),
+            )
+            .await);
+        }
+    };
+
+    Ok(CredentialSwitchResult {
+        profile_id: target_credential_profile_id.to_owned(),
+        provider_id: runtime_provider_id.to_owned(),
+        account_fingerprint: account
+            .account_fingerprint
+            .or(validation.account_fingerprint),
+        activated_at_ms: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
 async fn rollback_after_failure<R: CredentialRuntime + ?Sized>(
     runtime: &R,
     profile_id: &str,
@@ -226,6 +326,7 @@ mod tests {
 
     struct FakeCredentialRuntime {
         activations: Mutex<Vec<String>>,
+        activation_profiles: Mutex<Vec<String>>,
         fail_prepare: AtomicBool,
         fail_candidate: AtomicBool,
         fail_rollback: AtomicBool,
@@ -237,6 +338,7 @@ mod tests {
         fn healthy() -> Self {
             Self {
                 activations: Mutex::new(Vec::new()),
+                activation_profiles: Mutex::new(Vec::new()),
                 fail_prepare: AtomicBool::new(false),
                 fail_candidate: AtomicBool::new(false),
                 fail_rollback: AtomicBool::new(false),
@@ -274,12 +376,16 @@ mod tests {
 
         async fn activate(
             &self,
-            _profile_id: &str,
+            profile_id: &str,
             credential: &CredentialMaterial,
         ) -> Result<(), AdapterError> {
             let index = self.activation_count.fetch_add(1, Ordering::SeqCst);
             let secret = credential.secret_utf8()?.to_owned();
             self.activations.lock().unwrap().push(secret);
+            self.activation_profiles
+                .lock()
+                .unwrap()
+                .push(profile_id.to_owned());
             if index == 0 && self.fail_candidate.load(Ordering::SeqCst) {
                 return Err(AdapterError::CredentialInvalid("candidate rejected".into()));
             }
@@ -351,6 +457,56 @@ mod tests {
         assert_eq!(
             runtime.activations.lock().unwrap().as_slice(),
             ["new-key"]
+        );
+        drop(vault);
+        fs_cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn switches_between_credential_profiles_inside_one_runtime_profile() {
+        let (mut vault, path) = test_vault("assignment-switch");
+        vault
+            .enroll_credential(
+                CredentialEnrollment {
+                    profile_id: "profile-b".into(),
+                    display_name: "Go B".into(),
+                    provider: "opencode".into(),
+                    credential_type: "api_key".into(),
+                    account_fingerprint: "account-b".into(),
+                    created_at_ms: 2,
+                    last_validated_at_ms: 2,
+                },
+                b"second-account-key",
+            )
+            .unwrap();
+        let runtime = FakeCredentialRuntime::healthy();
+
+        let result = switch_runtime_assignment(
+            &runtime,
+            &vault,
+            "runtime-isolation-a",
+            "profile-a",
+            "profile-b",
+            "opencode",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.profile_id, "profile-b");
+        assert_eq!(
+            runtime.activations.lock().unwrap().as_slice(),
+            ["second-account-key"]
+        );
+        assert_eq!(
+            runtime.activation_profiles.lock().unwrap().as_slice(),
+            ["runtime-isolation-a"]
+        );
+        assert_eq!(
+            vault
+                .decrypt_active_secret("profile-a")
+                .unwrap()
+                .expose_secret(),
+            b"old-key"
         );
         drop(vault);
         fs_cleanup(&path);

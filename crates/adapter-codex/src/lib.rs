@@ -578,6 +578,10 @@ impl AgentAdapter for CodexAdapter {
         AgentType::Codex
     }
 
+    fn managed_runtime_profile_id(&self) -> Option<&str> {
+        (!self.profile_id.is_empty()).then_some(self.profile_id.as_str())
+    }
+
     async fn probe(&self) -> Result<AdapterProbe, AdapterError> {
         self.record_version().await?;
         self.ensure_client().await?;

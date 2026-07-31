@@ -723,6 +723,10 @@ impl AgentAdapter for OpenCodeAdapter {
         AgentType::Opencode
     }
 
+    fn managed_runtime_profile_id(&self) -> Option<&str> {
+        self.managed_profile_id.as_deref()
+    }
+
     async fn probe(&self) -> Result<AdapterProbe, AdapterError> {
         let health: HealthResponse = self
             .get_json(&["global", "health"], "health probe")

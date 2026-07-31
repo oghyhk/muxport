@@ -468,7 +468,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Resolve the secret handle locally on the target host.
 - [x] Stage the credential without changing the active assignment.
 - [ ] Validate through a non-destructive supported provider operation.
-- [ ] Inspect active turns.
+- [x] Inspect active turns.
 - [ ] If work is active, default to “apply to new sessions”; require explicit drain/restart confirmation for immediate mode.
 - [x] Activate the credential through the supported adapter method.
 - [x] Read back account fingerprint/provider state.

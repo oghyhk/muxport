@@ -43,7 +43,7 @@ pub struct CapabilitySet {
     pub can_read_usage: bool,
 }
 
-pub const ADAPTER_CAPABILITY_VERSION: u32 = 2;
+pub const ADAPTER_CAPABILITY_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -224,6 +224,13 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, AdapterError>> + 
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn agent_type(&self) -> AgentType;
+    /// Identifier of the connector-owned isolated runtime profile.
+    ///
+    /// This is deliberately distinct from a credential profile. One isolated
+    /// runtime may be reassigned among multiple compatible credentials.
+    fn managed_runtime_profile_id(&self) -> Option<&str> {
+        None
+    }
     async fn probe(&self) -> Result<AdapterProbe, AdapterError>;
     async fn discover_projects(&self) -> Result<Vec<ProjectInfo>, AdapterError>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError>;

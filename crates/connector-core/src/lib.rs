@@ -1,8 +1,8 @@
 mod credential_switch;
 
 pub use credential_switch::{
-    activate_staged_credential, CredentialRuntime, CredentialSwitchError,
-    CredentialSwitchResult,
+    activate_staged_credential, switch_runtime_assignment, CredentialRuntime,
+    CredentialSwitchError, CredentialSwitchResult,
 };
 
 use muxport_protocol::{ConnectorState, RemoteOpState, RuntimeState};

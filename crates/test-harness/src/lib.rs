@@ -55,6 +55,10 @@ impl AgentAdapter for DeterministicFakeAdapter {
         self.agent_type
     }
 
+    fn managed_runtime_profile_id(&self) -> Option<&str> {
+        Some("fake-runtime-profile")
+    }
+
     async fn probe(&self) -> Result<AdapterProbe, AdapterError> {
         if self.should_fail.load(Ordering::SeqCst) {
             return Err(AdapterError::InitFailed("Injected fake probe failure".into()));
