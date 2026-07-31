@@ -5,14 +5,14 @@ pub use managed::{ManagedOpenCodeError, ManagedOpenCodeProfile};
 use adapter_api::{
     AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
     CompatibilityDiagnostic, CredentialKind, CredentialMaterial, CredentialPreparation,
-    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageSnapshot,
-    ADAPTER_CAPABILITY_VERSION,
+    CredentialValidation, EventStream, ProjectInfo, ProviderFailureClass, SessionSummary,
+    UsageSnapshot, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
 use muxport_protocol::{
-    event, AgentType, ApprovalRequestedEvent, ApprovalResolvedEvent, CredentialStatus, Event,
-    SessionUpdatedEvent, StreamDeltaEvent,
+    event, AgentType, ApprovalRequestedEvent, ApprovalResolvedEvent, AuditLoggedEvent,
+    CredentialStatus, Event, SessionUpdatedEvent, StreamDeltaEvent,
 };
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE},
@@ -590,6 +590,27 @@ impl OpenCodeAdapter {
                     }),
                 )))
             }
+            "session.error" => {
+                let session_id = properties
+                    .get("sessionID")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("runtime");
+                let failure = classify_structured_provider_error(
+                    properties.get("error").unwrap_or(&Value::Null),
+                );
+                let timestamp = now_ms();
+                Ok(Some(new_event(
+                    timestamp,
+                    event::Inner::AuditLogged(AuditLoggedEvent {
+                        audit_id: uuid::Uuid::new_v4().to_string(),
+                        action: "provider_failure_observed".into(),
+                        actor: "source:opencode".into(),
+                        target: session_id.to_owned(),
+                        outcome: provider_failure_code(failure).into(),
+                    }),
+                )))
+            }
             "message.part.updated" => {
                 let delta = match properties.get("delta").and_then(Value::as_str) {
                     Some(delta) => delta,
@@ -726,6 +747,37 @@ impl OpenCodeAdapter {
                 Ok(None)
             }
         }
+    }
+}
+
+fn classify_structured_provider_error(error: &Value) -> ProviderFailureClass {
+    match error.get("name").and_then(Value::as_str) {
+        Some("ProviderAuthError") => ProviderFailureClass::Authentication,
+        Some("APIError") => match error
+            .get("data")
+            .and_then(|data| data.get("statusCode"))
+            .and_then(Value::as_u64)
+        {
+            Some(401) => ProviderFailureClass::Authentication,
+            Some(403) => ProviderFailureClass::Permission,
+            Some(429) => ProviderFailureClass::RateLimit,
+            _ => ProviderFailureClass::Unknown,
+        },
+        _ => ProviderFailureClass::Unknown,
+    }
+}
+
+fn provider_failure_code(failure: ProviderFailureClass) -> &'static str {
+    match failure {
+        ProviderFailureClass::Authentication => "authentication",
+        ProviderFailureClass::Permission => "permission",
+        ProviderFailureClass::RateLimit => "rate_limit",
+        ProviderFailureClass::Quota => "quota",
+        ProviderFailureClass::Network => "network",
+        ProviderFailureClass::RuntimeCrash => "runtime_crash",
+        ProviderFailureClass::MalformedResponse => "malformed_response",
+        ProviderFailureClass::ConnectorRestart => "connector_restart",
+        ProviderFailureClass::Unknown => "unknown",
     }
 }
 
@@ -1477,6 +1529,51 @@ mod tests {
                 .directory,
             "/srv/app"
         );
+    }
+
+    #[test]
+    fn classifies_only_structured_provider_failures_and_redacts_source_details() {
+        let adapter = OpenCodeAdapter::new("http://127.0.0.1:9", None);
+        for (name, status, expected) in [
+            ("ProviderAuthError", None, "authentication"),
+            ("APIError", Some(403), "permission"),
+            ("APIError", Some(429), "rate_limit"),
+            ("UnknownError", None, "unknown"),
+        ] {
+            let source = json!({
+                "directory": "/secret/project",
+                "payload": {
+                    "type": "session.error",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "error": {
+                            "name": name,
+                            "data": {
+                                "statusCode": status,
+                                "message": "Bearer secret-must-not-leak",
+                                "responseBody": "private upstream body"
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string();
+            let normalized = adapter
+                .normalize_global_event(&source)
+                .unwrap()
+                .unwrap();
+            let event::Inner::AuditLogged(audit) = normalized.inner.unwrap()
+            else {
+                panic!("expected redacted audit event")
+            };
+            assert_eq!(audit.action, "provider_failure_observed");
+            assert_eq!(audit.target, "session-1");
+            assert_eq!(audit.outcome, expected);
+            let encoded = format!("{audit:?}");
+            assert!(!encoded.contains("secret-must-not-leak"));
+            assert!(!encoded.contains("private upstream body"));
+            assert!(!encoded.contains("/secret/project"));
+        }
     }
 
     #[test]

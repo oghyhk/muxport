@@ -1,3 +1,4 @@
+pub use adapter_api::ProviderFailureClass;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
@@ -11,20 +12,6 @@ pub enum RotationMode {
     RoundRobin,
     Scheduled,
     ConfirmedFailure,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderFailureClass {
-    Authentication,
-    Permission,
-    RateLimit,
-    Quota,
-    Network,
-    RuntimeCrash,
-    MalformedResponse,
-    ConnectorRestart,
-    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

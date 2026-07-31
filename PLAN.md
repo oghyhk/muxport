@@ -492,7 +492,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Define ordered pools of compatible credential profiles.
 - [x] Store pool policy, eligibility, cooldown, host restrictions, and last-selection cursor as non-secret metadata.
 - [ ] Support manual, scheduled, round-robin, and confirmed-failure failover modes.
-- [ ] Classify provider errors into authentication, permission, rate limit, quota, network, runtime crash, and unknown.
+- [x] Classify provider errors into authentication, permission, rate limit, quota, network, runtime crash, malformed response, connector restart, and unknown using typed adapter/source signals.
 - [ ] Trigger automatic failover only from adapter-tested signals, never from matching arbitrary error text alone.
 - [x] Do not rotate on network failure, connector restart, malformed response, or agent crash.
 - [x] Apply cooldown and maximum-switch-per-hour limits to prevent rotation storms.

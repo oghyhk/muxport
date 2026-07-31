@@ -7,6 +7,20 @@ use std::pin::Pin;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFailureClass {
+    Authentication,
+    Permission,
+    RateLimit,
+    Quota,
+    Network,
+    RuntimeCrash,
+    MalformedResponse,
+    ConnectorRestart,
+    Unknown,
+}
+
 #[derive(Error, Debug)]
 pub enum AdapterError {
     #[error("Adapter initialization error: {0}")]
@@ -31,6 +45,25 @@ pub enum AdapterError {
     Unsupported(String),
     #[error("Internal adapter error: {0}")]
     Internal(String),
+}
+
+impl AdapterError {
+    pub fn provider_failure_class(&self) -> ProviderFailureClass {
+        match self {
+            Self::CredentialInvalid(_) => ProviderFailureClass::Authentication,
+            Self::ConnectionLost | Self::ConnectionLostWithDetail(_) => {
+                ProviderFailureClass::Network
+            }
+            Self::InitFailed(_) => ProviderFailureClass::RuntimeCrash,
+            Self::Protocol(_) => ProviderFailureClass::MalformedResponse,
+            Self::ApprovalNotFound(_)
+            | Self::SessionNotFound(_)
+            | Self::InvalidInput(_)
+            | Self::OutcomeUnknown(_)
+            | Self::Unsupported(_)
+            | Self::Internal(_) => ProviderFailureClass::Unknown,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -286,5 +319,28 @@ mod tests {
             CompatibilityDiagnostic::unknown_event("new-kind\nsecret=bearer-value", 11);
         assert_eq!(unsafe_value.source_event_type, "<invalid-event-type>");
         assert!(!format!("{unsafe_value:?}").contains("bearer-value"));
+    }
+
+    #[test]
+    fn adapter_failures_have_typed_fail_closed_rotation_classes() {
+        assert_eq!(
+            AdapterError::CredentialInvalid("redacted".into())
+                .provider_failure_class(),
+            ProviderFailureClass::Authentication
+        );
+        assert_eq!(
+            AdapterError::ConnectionLost.provider_failure_class(),
+            ProviderFailureClass::Network
+        );
+        assert_eq!(
+            AdapterError::Protocol("bad shape".into())
+                .provider_failure_class(),
+            ProviderFailureClass::MalformedResponse
+        );
+        assert_eq!(
+            AdapterError::OutcomeUnknown("uncertain".into())
+                .provider_failure_class(),
+            ProviderFailureClass::Unknown
+        );
     }
 }
