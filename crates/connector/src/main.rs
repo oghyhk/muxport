@@ -17,13 +17,13 @@ use futures::StreamExt;
 use muxport_protocol::{
     event, AgentType, ConnectorState, Event, RuntimeState, RuntimeStateEvent,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn, Level};
@@ -34,6 +34,8 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const DELTAS_PER_SNAPSHOT: usize = 100;
 const SOURCE_UPDATE_CAPACITY: usize = 512;
+const MANAGED_RESTART_WINDOW: Duration = Duration::from_secs(60);
+const MAX_MANAGED_RESTARTS_PER_WINDOW: usize = 5;
 
 type DynError = Box<dyn Error + Send + Sync>;
 
@@ -50,6 +52,8 @@ struct ManagedOpenCodeChild {
     profile: ManagedOpenCodeProfile,
     server_password: String,
     child: Option<tokio::process::Child>,
+    restart_attempts: VecDeque<Instant>,
+    crash_loop_tripped: bool,
 }
 
 impl ManagedOpenCodeChild {
@@ -62,10 +66,17 @@ impl ManagedOpenCodeChild {
             profile,
             server_password,
             child: Some(child),
+            restart_attempts: VecDeque::new(),
+            crash_loop_tripped: false,
         })
     }
 
     fn ensure_running(&mut self) -> Result<bool, AdapterError> {
+        if self.crash_loop_tripped {
+            return Err(AdapterError::InitFailed(
+                "managed OpenCode crash loop is latched; operator restart is required".into(),
+            ));
+        }
         let restart = match self.child.as_mut() {
             Some(child) => child.try_wait().map_err(|error| {
                 AdapterError::InitFailed(format!(
@@ -77,6 +88,24 @@ impl ManagedOpenCodeChild {
         if !restart {
             return Ok(false);
         }
+        let now = Instant::now();
+        while self
+            .restart_attempts
+            .front()
+            .is_some_and(|attempt| now.duration_since(*attempt) >= MANAGED_RESTART_WINDOW)
+        {
+            self.restart_attempts.pop_front();
+        }
+        if self.restart_attempts.len() >= MAX_MANAGED_RESTARTS_PER_WINDOW {
+            self.child = None;
+            self.crash_loop_tripped = true;
+            return Err(AdapterError::InitFailed(format!(
+                "managed OpenCode crash loop: {} restarts within {} seconds; automatic restart stopped",
+                MAX_MANAGED_RESTARTS_PER_WINDOW,
+                MANAGED_RESTART_WINDOW.as_secs()
+            )));
+        }
+        self.restart_attempts.push_back(now);
         self.child = Some(self.profile.spawn(&self.server_password).map_err(|error| {
             AdapterError::InitFailed(format!(
                 "managed OpenCode process restart failed: {error}"
@@ -1110,6 +1139,22 @@ mod tests {
                 .lines()
                 .count(),
             2
+        );
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(managed.ensure_running().unwrap());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(
+            managed.ensure_running(),
+            Err(AdapterError::InitFailed(detail)) if detail.contains("crash loop")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(project.join("launches.txt"))
+                .unwrap()
+                .lines()
+                .count(),
+            6
         );
         managed.stop().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
