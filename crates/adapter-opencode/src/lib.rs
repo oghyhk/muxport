@@ -1,5 +1,10 @@
+mod managed;
+
+pub use managed::{ManagedOpenCodeError, ManagedOpenCodeProfile};
+
 use adapter_api::{
-    AdapterError, AgentAdapter, CapabilitySet, EventStream, ProjectInfo, SessionSummary,
+    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialKind,
+    CredentialMaterial, CredentialValidation, EventStream, ProjectInfo, SessionSummary,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -32,6 +37,7 @@ const SSE_CHANNEL_CAPACITY: usize = 128;
 pub struct OpenCodeAdapter {
     base_url: String,
     server_password: Option<String>,
+    managed_profile_id: Option<String>,
     client: Client,
     observed_version: Arc<RwLock<Option<String>>>,
     sessions: Arc<RwLock<HashMap<String, SessionContext>>>,
@@ -101,16 +107,53 @@ struct ApprovalBody {
     response: &'static str,
 }
 
+#[derive(Deserialize)]
+struct OpenCodeAuthMethod {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeProviderState {
+    #[serde(default)]
+    connected: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ApiCredentialBody<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    key: &'a str,
+}
+
 impl OpenCodeAdapter {
     pub fn new(base_url: impl Into<String>, server_password: Option<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             server_password,
+            managed_profile_id: None,
             client: Client::new(),
             observed_version: Arc::new(RwLock::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Creates an adapter for a connector-owned isolated OpenCode runtime.
+    ///
+    /// Only managed adapters may mutate provider authentication. Adapters
+    /// created with [`OpenCodeAdapter::new`] observe external runtimes and
+    /// remain fail-closed for credential changes.
+    pub fn new_managed(
+        base_url: impl Into<String>,
+        server_password: Option<String>,
+        profile_id: impl Into<String>,
+    ) -> Result<Self, AdapterError> {
+        let profile_id = profile_id.into();
+        Self::validate_nonempty(&profile_id, "managed profile id")?;
+        let mut adapter = Self::new(base_url, server_password);
+        adapter.managed_profile_id = Some(profile_id);
+        Ok(adapter)
     }
 
     /// Returns the version from the most recent successful health probe.
@@ -260,6 +303,17 @@ impl OpenCodeAdapter {
         Ok(directories)
     }
 
+    async fn auth_methods(
+        &self,
+    ) -> Result<HashMap<String, Vec<OpenCodeAuthMethod>>, AdapterError> {
+        self.get_json(&["provider", "auth"], "provider auth discovery")
+            .await
+    }
+
+    async fn provider_state(&self) -> Result<OpenCodeProviderState, AdapterError> {
+        self.get_json(&["provider"], "provider state readback").await
+    }
+
     fn validate_nonempty(value: &str, field: &str) -> Result<(), AdapterError> {
         if value.trim().is_empty() {
             Err(AdapterError::InvalidInput(format!(
@@ -274,6 +328,10 @@ impl OpenCodeAdapter {
         AdapterError::Unsupported(format!(
             "OpenCode {operation} is not implemented by this connector build"
         ))
+    }
+
+    fn bound_profile_id(&self) -> String {
+        self.managed_profile_id.clone().unwrap_or_default()
     }
 
     fn remember_session(
@@ -454,7 +512,7 @@ impl OpenCodeAdapter {
                         runtime_id: String::new(),
                         title: title.to_owned(),
                         status: status.to_owned(),
-                        credential_profile_id: String::new(),
+                        credential_profile_id: self.bound_profile_id(),
                         updated_at_ms,
                         project_path: session_directory.to_owned(),
                     }),
@@ -486,7 +544,7 @@ impl OpenCodeAdapter {
                         runtime_id: String::new(),
                         title: context.title,
                         status: status.to_owned(),
-                        credential_profile_id: String::new(),
+                        credential_profile_id: self.bound_profile_id(),
                         updated_at_ms: timestamp,
                         project_path: context.directory,
                     }),
@@ -509,7 +567,7 @@ impl OpenCodeAdapter {
                         runtime_id: String::new(),
                         title: context.title,
                         status: "idle".into(),
-                        credential_profile_id: String::new(),
+                        credential_profile_id: self.bound_profile_id(),
                         updated_at_ms: timestamp,
                         project_path: context.directory,
                     }),
@@ -669,7 +727,7 @@ impl AgentAdapter for OpenCodeAdapter {
             can_approve_commands: true,
             can_approve_edits: true,
             can_interrupt: true,
-            can_switch_credentials_live: false,
+            can_switch_credentials_live: self.managed_profile_id.is_some(),
             can_read_usage: false,
         })
     }
@@ -735,7 +793,7 @@ impl AgentAdapter for OpenCodeAdapter {
                     session_id: session.id,
                     project_path: actual_directory,
                     title,
-                    credential_profile_id: String::new(),
+                    credential_profile_id: self.bound_profile_id(),
                     created_at_ms: session
                         .time
                         .and_then(|time| time.created.or(time.updated))
@@ -850,11 +908,19 @@ impl AgentAdapter for OpenCodeAdapter {
     ) -> Result<String, AdapterError> {
         Self::validate_nonempty(project_path, "project path")?;
         Self::validate_nonempty(prompt, "prompt")?;
-        if !profile_id.trim().is_empty() {
-            return Err(AdapterError::Unsupported(
-                "OpenCode profile-bound session creation requires a managed isolated runtime"
-                    .into(),
-            ));
+        match self.managed_profile_id.as_deref() {
+            Some(bound_profile) if profile_id != bound_profile => {
+                return Err(AdapterError::InvalidInput(format!(
+                    "managed OpenCode runtime is bound to profile {bound_profile}"
+                )));
+            }
+            None if !profile_id.trim().is_empty() => {
+                return Err(AdapterError::Unsupported(
+                    "OpenCode profile-bound session creation requires a managed isolated runtime"
+                        .into(),
+                ));
+            }
+            _ => {}
         }
 
         let request = self
@@ -1001,17 +1067,99 @@ impl AgentAdapter for OpenCodeAdapter {
 
     async fn validate_credential(
         &self,
-        _secret_payload: &str,
-    ) -> Result<CredentialStatus, AdapterError> {
-        Err(Self::unsupported("credential validation"))
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialValidation, AdapterError> {
+        if self.managed_profile_id.is_none() {
+            return Err(Self::unsupported(
+                "credential validation for an externally managed runtime",
+            ));
+        }
+        let methods = self.auth_methods().await?;
+        let provider_methods = methods.get(credential.provider_id()).ok_or_else(|| {
+            AdapterError::CredentialInvalid(format!(
+                "OpenCode provider {} is not exposed by the installed runtime",
+                credential.provider_id()
+            ))
+        })?;
+        let expected_kind = match credential.kind() {
+            CredentialKind::ApiKey => "api",
+        };
+        if !provider_methods
+            .iter()
+            .any(|method| method.kind == expected_kind)
+        {
+            return Err(AdapterError::CredentialInvalid(format!(
+                "OpenCode provider {} does not advertise {expected_kind} authentication",
+                credential.provider_id()
+            )));
+        }
+        credential.secret_utf8()?;
+        Ok(CredentialValidation {
+            status: CredentialStatus::Staged,
+            provider_id: credential.provider_id().to_owned(),
+            account_fingerprint: None,
+        })
     }
 
     async fn activate_credential(
         &self,
-        _profile_id: &str,
-        _secret_payload: &str,
+        profile_id: &str,
+        credential: &CredentialMaterial,
     ) -> Result<(), AdapterError> {
-        Err(Self::unsupported("credential activation"))
+        let bound_profile = self.managed_profile_id.as_deref().ok_or_else(|| {
+            Self::unsupported("credential activation for an externally managed runtime")
+        })?;
+        if profile_id != bound_profile {
+            return Err(AdapterError::InvalidInput(format!(
+                "managed OpenCode runtime is bound to profile {bound_profile}"
+            )));
+        }
+        self.validate_credential(credential).await?;
+        let secret = credential.secret_utf8()?;
+        let request = self
+            .client
+            .put(self.endpoint(&["auth", credential.provider_id()])?)
+            .timeout(MUTATION_TIMEOUT)
+            .json(&ApiCredentialBody {
+                kind: "api",
+                key: secret,
+            });
+        let accepted: bool = self
+            .send_mutation(request, "credential activation")
+            .await?
+            .json()
+            .await
+            .map_err(|error| {
+                AdapterError::OutcomeUnknown(format!(
+                    "OpenCode credential activation returned invalid JSON; readback and rollback are required: {error}"
+                ))
+            })?;
+        if !accepted {
+            return Err(AdapterError::CredentialInvalid(
+                "OpenCode rejected the credential payload".into(),
+            ));
+        }
+        let account = self.read_account_state(credential.provider_id()).await?;
+        if !account.connected {
+            return Err(AdapterError::OutcomeUnknown(format!(
+                "OpenCode accepted provider {} authentication but readback did not show it connected",
+                credential.provider_id()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn read_account_state(&self, provider_id: &str) -> Result<AccountState, AdapterError> {
+        Self::validate_nonempty(provider_id, "provider id")?;
+        let state = self.provider_state().await?;
+        Ok(AccountState {
+            provider_id: provider_id.to_owned(),
+            connected: state
+                .connected
+                .iter()
+                .any(|connected| connected == provider_id),
+            account_fingerprint: None,
+        })
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
@@ -1281,6 +1429,73 @@ mod tests {
             adapter
                 .start_session("/srv/app", "build it", "account-a")
                 .await,
+            Err(AdapterError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn managed_profile_discovers_auth_schema_activates_and_reads_back() {
+        let (base_url, requests, server) = test_server(vec![
+            json_response(r#"{"opencode":[{"type":"api","label":"API key"}]}"#),
+            json_response("true"),
+            json_response(r#"{"all":[],"default":{},"connected":["opencode"]}"#),
+        ])
+        .await;
+        let adapter =
+            OpenCodeAdapter::new_managed(base_url, Some("server-secret".into()), "go-a")
+                .unwrap();
+        let credential =
+            CredentialMaterial::api_key("opencode", b"test-opencode-go-key").unwrap();
+
+        adapter
+            .activate_credential("go-a", &credential)
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].starts_with("GET /provider/auth "));
+        assert!(requests[1].starts_with("PUT /auth/opencode "));
+        assert!(requests[1].contains(
+            r#"{"type":"api","key":"test-opencode-go-key"}"#
+        ));
+        assert!(requests[2].starts_with("GET /provider "));
+        assert!(requests.iter().all(|request| request
+            .contains("authorization: Basic b3BlbmNvZGU6c2VydmVyLXNlY3JldA==")));
+    }
+
+    #[tokio::test]
+    async fn managed_profile_rejects_wrong_profile_and_unsupported_auth_method() {
+        let adapter =
+            OpenCodeAdapter::new_managed("http://127.0.0.1:9", None, "go-a").unwrap();
+        let credential = CredentialMaterial::api_key("opencode", b"test-key").unwrap();
+        assert!(matches!(
+            adapter.activate_credential("go-b", &credential).await,
+            Err(AdapterError::InvalidInput(_))
+        ));
+
+        let (base_url, _requests, server) = test_server(vec![json_response(
+            r#"{"opencode":[{"type":"oauth","label":"Browser"}]}"#,
+        )])
+        .await;
+        let adapter = OpenCodeAdapter::new_managed(base_url, None, "go-a").unwrap();
+        assert!(matches!(
+            adapter.validate_credential(&credential).await,
+            Err(AdapterError::CredentialInvalid(_))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_runtime_credential_mutation_stays_fail_closed() {
+        let adapter = OpenCodeAdapter::new("http://127.0.0.1:9", None);
+        let credential = CredentialMaterial::api_key("opencode", b"test-key").unwrap();
+        assert!(matches!(
+            adapter.activate_credential("", &credential).await,
+            Err(AdapterError::Unsupported(_))
+        ));
+        assert!(matches!(
+            adapter.validate_credential(&credential).await,
             Err(AdapterError::Unsupported(_))
         ));
     }

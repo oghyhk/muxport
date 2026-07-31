@@ -2,8 +2,10 @@ use async_trait::async_trait;
 use futures::Stream;
 use muxport_protocol::{AgentType, CredentialStatus, Event};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::pin::Pin;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 #[derive(Error, Debug)]
 pub enum AdapterError {
@@ -55,6 +57,85 @@ pub struct SessionSummary {
     pub created_at_ms: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialKind {
+    ApiKey,
+}
+
+/// Secret material passed to a built-in adapter for one scoped operation.
+///
+/// The secret is zeroized on drop, cannot be serialized, and its `Debug`
+/// implementation is deliberately redacted.
+pub struct CredentialMaterial {
+    provider_id: String,
+    kind: CredentialKind,
+    secret: Zeroizing<Vec<u8>>,
+}
+
+impl CredentialMaterial {
+    pub fn api_key(
+        provider_id: impl Into<String>,
+        secret: impl AsRef<[u8]>,
+    ) -> Result<Self, AdapterError> {
+        let provider_id = provider_id.into();
+        if provider_id.trim().is_empty() {
+            return Err(AdapterError::InvalidInput(
+                "credential provider id must not be empty".into(),
+            ));
+        }
+        let secret = secret.as_ref();
+        if secret.is_empty() {
+            return Err(AdapterError::InvalidInput(
+                "credential secret must not be empty".into(),
+            ));
+        }
+        Ok(Self {
+            provider_id,
+            kind: CredentialKind::ApiKey,
+            secret: Zeroizing::new(secret.to_vec()),
+        })
+    }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    pub fn kind(&self) -> CredentialKind {
+        self.kind
+    }
+
+    pub fn secret_utf8(&self) -> Result<&str, AdapterError> {
+        std::str::from_utf8(self.secret.as_slice()).map_err(|_| {
+            AdapterError::InvalidInput("credential secret must be valid UTF-8".into())
+        })
+    }
+}
+
+impl fmt::Debug for CredentialMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialMaterial")
+            .field("provider_id", &self.provider_id)
+            .field("kind", &self.kind)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialValidation {
+    pub status: CredentialStatus,
+    pub provider_id: String,
+    pub account_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountState {
+    pub provider_id: String,
+    pub connected: bool,
+    pub account_fingerprint: Option<String>,
+}
+
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, AdapterError>> + Send>>;
 
 #[async_trait]
@@ -75,7 +156,15 @@ pub trait AgentAdapter: Send + Sync {
         approved: bool,
         reason: &str,
     ) -> Result<(), AdapterError>;
-    async fn validate_credential(&self, secret_payload: &str) -> Result<CredentialStatus, AdapterError>;
-    async fn activate_credential(&self, profile_id: &str, secret_payload: &str) -> Result<(), AdapterError>;
+    async fn validate_credential(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialValidation, AdapterError>;
+    async fn activate_credential(
+        &self,
+        profile_id: &str,
+        credential: &CredentialMaterial,
+    ) -> Result<(), AdapterError>;
+    async fn read_account_state(&self, provider_id: &str) -> Result<AccountState, AdapterError>;
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError>;
 }

@@ -1,3 +1,10 @@
+mod credential_switch;
+
+pub use credential_switch::{
+    activate_staged_credential, CredentialRuntime, CredentialSwitchError,
+    CredentialSwitchResult,
+};
+
 use muxport_protocol::{ConnectorState, RemoteOpState, RuntimeState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

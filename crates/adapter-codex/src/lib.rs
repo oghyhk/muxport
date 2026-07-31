@@ -1,13 +1,14 @@
 mod jsonrpc;
 
 use adapter_api::{
-    AdapterError, AgentAdapter, CapabilitySet, EventStream, ProjectInfo, SessionSummary,
+    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialMaterial,
+    CredentialValidation, EventStream, ProjectInfo, SessionSummary,
 };
 use async_trait::async_trait;
 use jsonrpc::{Incoming, JsonRpcPeer};
 use muxport_protocol::{
-    event, AgentType, ApprovalRequestedEvent, ApprovalResolvedEvent, CredentialStatus, Event,
-    SessionUpdatedEvent, StreamDeltaEvent,
+    event, AgentType, ApprovalRequestedEvent, ApprovalResolvedEvent, Event, SessionUpdatedEvent,
+    StreamDeltaEvent,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -507,17 +508,21 @@ impl AgentAdapter for CodexAdapter {
 
     async fn validate_credential(
         &self,
-        _secret_payload: &str,
-    ) -> Result<CredentialStatus, AdapterError> {
+        _credential: &CredentialMaterial,
+    ) -> Result<CredentialValidation, AdapterError> {
         Err(Self::unsupported("credential validation"))
     }
 
     async fn activate_credential(
         &self,
         _profile_id: &str,
-        _secret_payload: &str,
+        _credential: &CredentialMaterial,
     ) -> Result<(), AdapterError> {
         Err(Self::unsupported("credential activation"))
+    }
+
+    async fn read_account_state(&self, _provider_id: &str) -> Result<AccountState, AdapterError> {
+        Err(Self::unsupported("account state"))
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
@@ -1222,8 +1227,9 @@ mod tests {
     #[tokio::test]
     async fn credential_mutation_remains_fail_closed() {
         let adapter = CodexAdapter::new("codex");
+        let credential = CredentialMaterial::api_key("openai", b"test-key").unwrap();
         assert!(matches!(
-            adapter.activate_credential("profile", "secret").await,
+            adapter.activate_credential("profile", &credential).await,
             Err(AdapterError::Unsupported(_))
         ));
     }

@@ -1,4 +1,7 @@
-use adapter_api::{AdapterError, AgentAdapter, CapabilitySet, EventStream, ProjectInfo, SessionSummary};
+use adapter_api::{
+    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialMaterial,
+    CredentialValidation, EventStream, ProjectInfo, SessionSummary,
+};
 use async_trait::async_trait;
 use futures::stream;
 use muxport_protocol::{AgentType, CredentialStatus};
@@ -122,16 +125,36 @@ impl AgentAdapter for DeterministicFakeAdapter {
         Ok(())
     }
 
-    async fn validate_credential(&self, secret_payload: &str) -> Result<CredentialStatus, AdapterError> {
-        if secret_payload == "invalid" {
-            Ok(CredentialStatus::Invalid)
+    async fn validate_credential(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<CredentialValidation, AdapterError> {
+        let status = if credential.secret_utf8()? == "invalid" {
+            CredentialStatus::Invalid
         } else {
-            Ok(CredentialStatus::Active)
-        }
+            CredentialStatus::Active
+        };
+        Ok(CredentialValidation {
+            status,
+            provider_id: credential.provider_id().to_owned(),
+            account_fingerprint: None,
+        })
     }
 
-    async fn activate_credential(&self, _profile_id: &str, _secret_payload: &str) -> Result<(), AdapterError> {
+    async fn activate_credential(
+        &self,
+        _profile_id: &str,
+        _credential: &CredentialMaterial,
+    ) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    async fn read_account_state(&self, provider_id: &str) -> Result<AccountState, AdapterError> {
+        Ok(AccountState {
+            provider_id: provider_id.to_owned(),
+            connected: true,
+            account_fingerprint: None,
+        })
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {

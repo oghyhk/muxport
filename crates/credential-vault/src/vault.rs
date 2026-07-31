@@ -737,6 +737,36 @@ impl PersistentVault {
         )
     }
 
+    /// Decrypts a staged credential for a single validation/activation
+    /// transaction. The returned buffer zeroizes itself on drop.
+    pub fn decrypt_staged_secret(&self, profile_id: &str) -> Result<SecretBuffer, VaultError> {
+        let record = self
+            .records
+            .get(profile_id)
+            .ok_or_else(|| VaultError::NotFound(profile_id.into()))?;
+        let status = CredentialStatus::try_from(record.status).map_err(|_| {
+            VaultError::InvalidOperation("credential has invalid status".into())
+        })?;
+        if status != CredentialStatus::Staged {
+            return Err(VaultError::InvalidOperation(
+                "credential has no staged secret available for validation".into(),
+            ));
+        }
+        let ciphertext = record.staged_payload_hex.as_deref().ok_or_else(|| {
+            VaultError::InvalidOperation("staged credential payload is missing".into())
+        })?;
+        let nonce = record.staged_nonce_hex.as_deref().ok_or_else(|| {
+            VaultError::InvalidOperation("staged credential nonce is missing".into())
+        })?;
+        let aad = record_aad(
+            &self.host_id,
+            &record.profile_id,
+            &record.provider,
+            &record.credential_type,
+        );
+        decrypt(&self.dek.key, ciphertext, nonce, &aad)
+    }
+
     pub fn export_encrypted_backup(&self) -> Result<Vec<u8>, VaultError> {
         self.sealed_bytes()
     }
@@ -1122,6 +1152,13 @@ mod tests {
                 )
                 .unwrap();
             vault.stage_credential("profile-1", b"secret-v2").unwrap();
+            assert_eq!(
+                vault
+                    .decrypt_staged_secret("profile-1")
+                    .unwrap()
+                    .expose_secret(),
+                b"secret-v2"
+            );
             assert!(matches!(
                 vault.activate_credential("profile-1"),
                 Err(VaultError::InvalidOperation(_))
@@ -1135,6 +1172,10 @@ mod tests {
             );
             vault.mark_staged_validated("profile-1", 2000).unwrap();
             vault.activate_credential("profile-1").unwrap();
+            assert!(matches!(
+                vault.decrypt_staged_secret("profile-1"),
+                Err(VaultError::InvalidOperation(_))
+            ));
             assert_eq!(
                 vault
                     .decrypt_active_secret("profile-1")
