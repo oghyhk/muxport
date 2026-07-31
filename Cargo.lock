@@ -13,6 +13,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
