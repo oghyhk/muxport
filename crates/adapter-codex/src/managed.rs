@@ -241,4 +241,32 @@ mod tests {
         ));
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    #[ignore = "requires MUXPORT_TEST_CODEX_PATH pointing to a real Codex executable"]
+    async fn live_codex_app_server_restarts_in_the_same_isolated_profile() {
+        use adapter_api::AgentAdapter;
+
+        let executable = std::env::var_os("MUXPORT_TEST_CODEX_PATH")
+            .map(PathBuf::from)
+            .expect("MUXPORT_TEST_CODEX_PATH");
+        let root = temp_root("live-managed-codex");
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let profile =
+            ManagedCodexProfile::prepare(&root, "profile-a", executable, &project).unwrap();
+
+        for _ in 0..2 {
+            let adapter = profile.adapter();
+            let capabilities = adapter.probe().await.unwrap();
+            assert!(capabilities.can_switch_credentials_live);
+            let account = adapter.read_account(false).await.unwrap();
+            assert!(account.account.is_none());
+            adapter.shutdown_gracefully().await.unwrap();
+        }
+
+        assert!(profile.codex_home.is_dir());
+        assert!(profile.sqlite_home.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
