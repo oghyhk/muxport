@@ -135,6 +135,12 @@ struct RuntimeManifestEntry {
     port: Option<u16>,
     #[serde(default)]
     display_name: Option<String>,
+    #[serde(default = "default_restart_on_failure")]
+    restart_on_failure: bool,
+}
+
+const fn default_restart_on_failure() -> bool {
+    true
 }
 
 struct ManagedOpenCodeChild {
@@ -143,6 +149,7 @@ struct ManagedOpenCodeChild {
     child: Option<tokio::process::Child>,
     restart_attempts: VecDeque<Instant>,
     crash_loop_tripped: bool,
+    restart_on_failure: bool,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     last_exit_diagnostic: Option<String>,
 }
@@ -151,6 +158,7 @@ impl ManagedOpenCodeChild {
     fn start(
         profile: ManagedOpenCodeProfile,
         server_password: String,
+        restart_on_failure: bool,
     ) -> Result<Self, adapter_opencode::ManagedOpenCodeError> {
         let (child, stderr_tail) = capture_managed_stderr(profile.spawn(&server_password)?);
         Ok(Self {
@@ -159,6 +167,7 @@ impl ManagedOpenCodeChild {
             child: Some(child),
             restart_attempts: VecDeque::new(),
             crash_loop_tripped: false,
+            restart_on_failure,
             stderr_tail,
             last_exit_diagnostic: None,
         })
@@ -185,6 +194,13 @@ impl ManagedOpenCodeChild {
             let diagnostic = managed_exit_diagnostic(&self.profile, &status, &self.stderr_tail);
             warn!(detail = %diagnostic, "managed OpenCode exited; only redacted crash metadata was retained");
             self.last_exit_diagnostic = Some(diagnostic);
+        }
+        if !self.restart_on_failure {
+            self.child = None;
+            return Err(AdapterError::InitFailed(format!(
+                "connector-managed OpenCode runtime exited and restart_on_failure is disabled ({})",
+                self.last_exit_diagnostic.as_deref().unwrap_or("no exit metadata available")
+            )));
         }
         let now = Instant::now();
         while self
@@ -1238,7 +1254,11 @@ async fn build_manifest_runtimes(
                     )?;
                     let password = uuid::Uuid::new_v4().simple().to_string();
                     let adapter = profile.adapter(password.clone())?;
-                    let managed = ManagedOpenCodeChild::start(profile.clone(), password)?;
+                    let managed = ManagedOpenCodeChild::start(
+                        profile.clone(),
+                        password,
+                        entry.restart_on_failure,
+                    )?;
                     info!(
                         runtime_id = %entry.runtime_id,
                         profile_id = %entry.profile_id,
@@ -1336,7 +1356,7 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
         let password = nonempty_env("MUXPORT_OPENCODE_PASSWORD")
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         let adapter = profile.adapter(password.clone())?;
-        let managed = ManagedOpenCodeChild::start(profile.clone(), password)?;
+        let managed = ManagedOpenCodeChild::start(profile.clone(), password, true)?;
         info!(
             profile_id,
             profile_root = %profile.profile_root().display(),
@@ -2708,7 +2728,7 @@ mod tests {
             ManagedOpenCodeProfile::prepare(&root, "profile-a", executable, &project, 43119)
                 .unwrap();
         let mut managed =
-            ManagedOpenCodeChild::start(profile, "test-server-password".into()).unwrap();
+            ManagedOpenCodeChild::start(profile, "test-server-password".into(), true).unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(managed.ensure_running().unwrap());
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2736,6 +2756,43 @@ mod tests {
             5
         );
         managed.stop().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_opencode_restart_policy_can_leave_an_exited_runtime_stopped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "muxport-managed-no-restart-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let executable = root.join("fake-opencode");
+        std::fs::write(&executable, "#!/bin/sh\nprintf 'launch\\n' >> launches.txt\nexit 7\n")
+            .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let profile =
+            ManagedOpenCodeProfile::prepare(&root, "profile-a", executable, &project, 43120)
+                .unwrap();
+        let mut managed =
+            ManagedOpenCodeChild::start(profile, "test-server-password".into(), false).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(matches!(
+            managed.ensure_running(),
+            Err(AdapterError::InitFailed(detail)) if detail.contains("restart_on_failure is disabled")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(project.join("launches.txt"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -14,6 +14,7 @@ JSON manifest:
       "agent_type": "opencode",
       "profile_id": "work",
       "display_name": "Work OpenCode",
+      "restart_on_failure": true,
       "executable": "/home/alice/.local/bin/opencode",
       "project_directory": "/home/alice/code/work",
       "port": 4096
@@ -35,6 +36,12 @@ Every runtime and profile ID must contain only ASCII letters, digits, `-`, or
 assigned to only one runtime of its agent type, and every managed OpenCode
 runtime needs a unique nonzero loopback port. Codex entries must omit `port`.
 The manifest supports at most 64 runtimes.
+
+`restart_on_failure` applies only to connector-managed OpenCode processes and
+defaults to `true`. Set it to `false` for a runtime that must remain stopped
+after an unexpected exit; the connector reports it as degraded instead of
+silently starting it again. User-managed and externally adopted runtimes are
+never restarted by this policy.
 
 The manifest path, `profiles_root`, executables, and project directories must
 be absolute. The manifest must be a regular file, not a symbolic link, and is
