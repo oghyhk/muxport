@@ -990,8 +990,18 @@ impl AgentAdapter for OpenCodeAdapter {
                 }
                 Err(error) => {
                     let _ = sender.send(Err(error)).await;
+                    return;
                 }
             }
+            // A finite SSE response is not an idle subscription.  Surface it
+            // as a resynchronization boundary so the connector can mark the
+            // runtime stale and re-fetch authoritative session state rather
+            // than silently continuing with an incomplete projection.
+            let _ = sender
+                .send(Err(AdapterError::ConnectionLostWithDetail(
+                    "OpenCode global event stream closed; resynchronize".into(),
+                )))
+                .await;
         });
 
         Ok(Box::pin(futures::stream::unfold(
@@ -1798,6 +1808,19 @@ mod tests {
                 delta_text,
                 ..
             })) if delta_text == "hello"
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_closed_global_event_stream_for_reconciliation() {
+        let (base_url, _requests, server) = test_server(vec![sse_response("")]).await;
+        let adapter = OpenCodeAdapter::new(base_url, None);
+        let mut events = adapter.subscribe_events().await.unwrap();
+        assert!(matches!(
+            events.next().await,
+            Some(Err(AdapterError::ConnectionLostWithDetail(detail)))
+                if detail == "OpenCode global event stream closed; resynchronize"
         ));
         server.await.unwrap();
     }
