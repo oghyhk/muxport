@@ -5,6 +5,7 @@ pub use managed::{ManagedOpenCodeError, ManagedOpenCodeProfile};
 use adapter_api::{
     AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialKind,
     CredentialMaterial, CredentialValidation, EventStream, ProjectInfo, SessionSummary,
+    UsageSnapshot,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -1169,6 +1170,12 @@ impl AgentAdapter for OpenCodeAdapter {
                 .any(|connected| connected == provider_id),
             account_fingerprint: None,
         })
+    }
+
+    async fn read_usage(&self) -> Result<UsageSnapshot, AdapterError> {
+        Err(Self::unsupported(
+            "usage reads for the installed OpenCode runtime",
+        ))
     }
 
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {

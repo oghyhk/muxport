@@ -4,7 +4,8 @@ mod jsonrpc;
 pub use managed::{ManagedCodexError, ManagedCodexProfile};
 use adapter_api::{
     AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialKind, CredentialMaterial,
-    CredentialValidation, EventStream, ProjectInfo, SessionSummary,
+    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot,
+    UsageWindow,
 };
 use async_trait::async_trait;
 use jsonrpc::{Incoming, JsonRpcPeer, ProcessConfig};
@@ -499,6 +500,74 @@ impl CodexAdapter {
     }
 }
 
+const MAX_USAGE_BUCKETS: usize = 32;
+const MAX_USAGE_BUCKET_ID_CHARS: usize = 128;
+
+fn normalized_usage_window(value: Option<&Value>) -> Option<UsageWindow> {
+    let value = value?.as_object()?;
+    let used_percent = value.get("usedPercent")?.as_i64()?;
+    Some(UsageWindow {
+        used_percent: used_percent.clamp(0, 100) as i32,
+        resets_at_unix_seconds: value
+            .get("resetsAt")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0),
+        duration_minutes: value
+            .get("windowDurationMins")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0),
+    })
+}
+
+fn bounded_usage_bucket_id(value: &str) -> Option<String> {
+    let bounded = value
+        .trim()
+        .chars()
+        .take(MAX_USAGE_BUCKET_ID_CHARS)
+        .collect::<String>();
+    (!bounded.is_empty()).then_some(bounded)
+}
+
+fn normalized_usage_bucket(value: &Value, fallback_id: Option<&str>) -> Option<UsageBucket> {
+    let value = value.as_object()?;
+    let primary = normalized_usage_window(value.get("primary"));
+    let secondary = normalized_usage_window(value.get("secondary"));
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+    let bucket_id = value
+        .get("limitId")
+        .and_then(Value::as_str)
+        .or(fallback_id)
+        .and_then(bounded_usage_bucket_id);
+    Some(UsageBucket {
+        bucket_id,
+        primary,
+        secondary,
+    })
+}
+
+fn normalized_usage_buckets(response: &Value) -> Vec<UsageBucket> {
+    if let Some(by_id) = response
+        .get("rateLimitsByLimitId")
+        .and_then(Value::as_object)
+        .filter(|buckets| !buckets.is_empty())
+    {
+        let mut entries = by_id.iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        return entries
+            .into_iter()
+            .take(MAX_USAGE_BUCKETS)
+            .filter_map(|(id, value)| normalized_usage_bucket(value, Some(id)))
+            .collect();
+    }
+    response
+        .get("rateLimits")
+        .and_then(|value| normalized_usage_bucket(value, None))
+        .into_iter()
+        .collect()
+}
+
 #[async_trait]
 impl AgentAdapter for CodexAdapter {
     fn agent_type(&self) -> AgentType {
@@ -822,6 +891,15 @@ impl AgentAdapter for CodexAdapter {
                 Some(CodexAccount::Chatgpt { email, .. }) => email.clone(),
                 _ => None,
             },
+        })
+    }
+
+    async fn read_usage(&self) -> Result<UsageSnapshot, AdapterError> {
+        let response = self.read_rate_limits().await?;
+        Ok(UsageSnapshot {
+            provider_id: "openai".into(),
+            observed_at_ms: now_ms(),
+            buckets: normalized_usage_buckets(&response),
         })
     }
 
@@ -1735,6 +1813,60 @@ mod tests {
             adapter.state.rate_limits.read().unwrap().as_ref(),
             Some(&json!({"rateLimits": {"limitId": "codex"}}))
         );
+    }
+
+    #[test]
+    fn normalizes_usage_without_forwarding_untrusted_provider_fields() {
+        let response = json!({
+            "accessToken": "must-not-leak",
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "primary": {
+                        "usedPercent": 137,
+                        "resetsAt": 1_700_000_000,
+                        "windowDurationMins": 300,
+                        "secret": "must-not-leak"
+                    },
+                    "secondary": {"usedPercent": -4, "resetsAt": -1}
+                }
+            }
+        });
+        let usage = normalized_usage_buckets(&response);
+        assert_eq!(
+            usage,
+            vec![UsageBucket {
+                bucket_id: Some("codex".into()),
+                primary: Some(UsageWindow {
+                    used_percent: 100,
+                    resets_at_unix_seconds: Some(1_700_000_000),
+                    duration_minutes: Some(300),
+                }),
+                secondary: Some(UsageWindow {
+                    used_percent: 0,
+                    resets_at_unix_seconds: None,
+                    duration_minutes: None,
+                }),
+            }]
+        );
+        let encoded = serde_json::to_string(&usage).unwrap();
+        assert!(!encoded.contains("accessToken"));
+        assert!(!encoded.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn caps_and_sorts_usage_buckets() {
+        let mut buckets = serde_json::Map::new();
+        for index in (0..40).rev() {
+            buckets.insert(
+                format!("bucket-{index:02}"),
+                json!({"primary": {"usedPercent": index}}),
+            );
+        }
+        let usage = normalized_usage_buckets(&json!({"rateLimitsByLimitId": buckets}));
+        assert_eq!(usage.len(), MAX_USAGE_BUCKETS);
+        assert_eq!(usage[0].bucket_id.as_deref(), Some("bucket-00"));
+        assert_eq!(usage[31].bucket_id.as_deref(), Some("bucket-31"));
     }
 
     #[test]

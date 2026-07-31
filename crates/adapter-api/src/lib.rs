@@ -138,6 +138,31 @@ pub struct AccountState {
     pub account_fingerprint: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageWindow {
+    pub used_percent: i32,
+    pub resets_at_unix_seconds: Option<i64>,
+    pub duration_minutes: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageBucket {
+    pub bucket_id: Option<String>,
+    pub primary: Option<UsageWindow>,
+    pub secondary: Option<UsageWindow>,
+}
+
+/// Provider-independent usage data safe to project to an untrusted client.
+///
+/// Adapters must discard unknown provider fields rather than forwarding raw
+/// payloads, and must bound the number and size of returned buckets.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageSnapshot {
+    pub provider_id: String,
+    pub observed_at_ms: i64,
+    pub buckets: Vec<UsageBucket>,
+}
+
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, AdapterError>> + Send>>;
 
 #[async_trait]
@@ -169,5 +194,6 @@ pub trait AgentAdapter: Send + Sync {
         credential: &CredentialMaterial,
     ) -> Result<(), AdapterError>;
     async fn read_account_state(&self, provider_id: &str) -> Result<AccountState, AdapterError>;
+    async fn read_usage(&self) -> Result<UsageSnapshot, AdapterError>;
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError>;
 }

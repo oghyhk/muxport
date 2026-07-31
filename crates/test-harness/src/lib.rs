@@ -1,6 +1,7 @@
 use adapter_api::{
     AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialMaterial,
-    CredentialValidation, EventStream, ProjectInfo, SessionSummary,
+    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot,
+    UsageWindow,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -165,6 +166,22 @@ impl AgentAdapter for DeterministicFakeAdapter {
         })
     }
 
+    async fn read_usage(&self) -> Result<UsageSnapshot, AdapterError> {
+        Ok(UsageSnapshot {
+            provider_id: "fake".into(),
+            observed_at_ms: 1700000000000,
+            buckets: vec![UsageBucket {
+                bucket_id: Some("fake".into()),
+                primary: Some(UsageWindow {
+                    used_percent: 50,
+                    resets_at_unix_seconds: None,
+                    duration_minutes: None,
+                }),
+                secondary: None,
+            }],
+        })
+    }
+
     async fn shutdown_gracefully(&self) -> Result<(), AdapterError> {
         Ok(())
     }
@@ -189,6 +206,9 @@ mod tests {
         let adapter = DeterministicFakeAdapter::new(AgentType::Codex);
         let session = adapter.read_session("fake-sess-1").await.unwrap();
         assert_eq!(session.project_path, "/fake/repo");
+        let usage = adapter.read_usage().await.unwrap();
+        assert_eq!(usage.provider_id, "fake");
+        assert_eq!(usage.buckets[0].primary.as_ref().unwrap().used_percent, 50);
         assert!(matches!(
             adapter.read_session("missing").await,
             Err(AdapterError::SessionNotFound(id)) if id == "missing"
