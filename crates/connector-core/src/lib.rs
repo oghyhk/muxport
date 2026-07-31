@@ -39,6 +39,15 @@ pub enum CoreError {
     EmptyAssignmentField(&'static str),
     #[error("Conflicting credential assignments exist at precedence {0}")]
     AmbiguousAssignment(u8),
+    #[error(
+        "Session {session_id} in runtime {runtime_id} is already assigned to {existing}, not {requested}"
+    )]
+    SessionAssignmentConflict {
+        runtime_id: String,
+        session_id: String,
+        existing: String,
+        requested: String,
+    },
     #[error("Rotation pool does not exist: {0}")]
     RotationPoolNotFound(String),
     #[error("Rotation pool row id {row} does not match policy id {policy}")]
@@ -327,6 +336,7 @@ impl SwitchImpactPlan {
 pub struct CommandLedger {
     executed_commands: HashMap<String, CommandRecord>,
     runtime_assignments: HashMap<String, String>,
+    session_assignments: HashMap<(String, String), String>,
     rotation_pools: HashMap<String, RotationPool>,
     conn: Option<rusqlite::Connection>,
 }
@@ -378,12 +388,13 @@ impl Default for CommandLedger {
 }
 
 impl CommandLedger {
-    const SCHEMA_VERSION: u32 = 4;
+    const SCHEMA_VERSION: u32 = 5;
 
     pub fn new() -> Self {
         Self {
             executed_commands: HashMap::new(),
             runtime_assignments: HashMap::new(),
+            session_assignments: HashMap::new(),
             rotation_pools: HashMap::new(),
             conn: None,
         }
@@ -472,12 +483,26 @@ impl CommandLedger {
             )",
             [],
         )?;
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS session_assignments (
+                runtime_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                profile_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (runtime_id, session_id),
+                CHECK (length(trim(runtime_id)) > 0),
+                CHECK (length(trim(session_id)) > 0),
+                CHECK (length(trim(profile_id)) > 0)
+            )",
+            [],
+        )?;
         transaction.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         transaction.commit()?;
 
         let mut ledger = Self {
             executed_commands: HashMap::new(),
             runtime_assignments: HashMap::new(),
+            session_assignments: HashMap::new(),
             rotation_pools: HashMap::new(),
             conn: Some(conn),
         };
@@ -524,6 +549,23 @@ impl CommandLedger {
                 self.runtime_assignments.insert(runtime_id, profile_id);
             }
             drop(assignment_stmt);
+            let mut session_assignment_stmt = conn.prepare(
+                "SELECT runtime_id, session_id, profile_id
+                 FROM session_assignments",
+            )?;
+            let session_assignments = session_assignment_stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for assignment in session_assignments {
+                let (runtime_id, session_id, profile_id) = assignment?;
+                self.session_assignments
+                    .insert((runtime_id, session_id), profile_id);
+            }
+            drop(session_assignment_stmt);
             let mut pool_stmt = conn.prepare(
                 "SELECT pool_id, policy_json
                  FROM rotation_pools",
@@ -719,6 +761,88 @@ impl CommandLedger {
         self.runtime_assignments
             .get(runtime_id)
             .map(String::as_str)
+    }
+
+    pub fn set_session_assignment(
+        &mut self,
+        runtime_id: &str,
+        session_id: &str,
+        profile_id: &str,
+    ) -> Result<(), CoreError> {
+        let runtime_id = runtime_id.trim();
+        let session_id = session_id.trim();
+        let profile_id = profile_id.trim();
+        if runtime_id.is_empty() {
+            return Err(CoreError::EmptyAssignmentField("runtime_id"));
+        }
+        if session_id.is_empty() {
+            return Err(CoreError::EmptyAssignmentField("session_id"));
+        }
+        if profile_id.is_empty() {
+            return Err(CoreError::EmptyAssignmentField("profile_id"));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(ref conn) = self.conn {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO session_assignments
+                    (runtime_id, session_id, profile_id, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(runtime_id, session_id) DO NOTHING",
+                rusqlite::params![runtime_id, session_id, profile_id, now],
+            )?;
+            let stored: String = transaction.query_row(
+                "SELECT profile_id FROM session_assignments
+                 WHERE runtime_id = ?1 AND session_id = ?2",
+                rusqlite::params![runtime_id, session_id],
+                |row| row.get(0),
+            )?;
+            if stored != profile_id {
+                return Err(CoreError::SessionAssignmentConflict {
+                    runtime_id: runtime_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    existing: stored,
+                    requested: profile_id.to_owned(),
+                });
+            }
+            transaction.commit()?;
+        } else if let Some(existing) = self
+            .session_assignments
+            .get(&(runtime_id.to_owned(), session_id.to_owned()))
+        {
+            if existing != profile_id {
+                return Err(CoreError::SessionAssignmentConflict {
+                    runtime_id: runtime_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    existing: existing.clone(),
+                    requested: profile_id.to_owned(),
+                });
+            }
+        }
+        self.session_assignments.insert(
+            (runtime_id.to_owned(), session_id.to_owned()),
+            profile_id.to_owned(),
+        );
+        Ok(())
+    }
+
+    pub fn session_assignment(&self, runtime_id: &str, session_id: &str) -> Option<&str> {
+        self.session_assignments
+            .get(&(runtime_id.to_owned(), session_id.to_owned()))
+            .map(String::as_str)
+    }
+
+    pub fn session_assignments_for_runtime(
+        &self,
+        runtime_id: &str,
+    ) -> Vec<(String, String)> {
+        self.session_assignments
+            .iter()
+            .filter_map(|((assigned_runtime_id, session_id), profile_id)| {
+                (assigned_runtime_id == runtime_id)
+                    .then(|| (session_id.clone(), profile_id.clone()))
+            })
+            .collect()
     }
 
     pub fn upsert_rotation_pool(&mut self, pool: RotationPool) -> Result<(), CoreError> {
@@ -1188,6 +1312,39 @@ mod tests {
             assert_eq!(restored.last_selection_cursor, Some(1));
             assert_eq!(restored.last_selected_at_ms, Some(1_000));
             assert_eq!(restored.recent_switches_ms, [1_000]);
+        }
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn session_credential_identity_survives_restart_and_cannot_be_relabelled() {
+        let db_path = std::env::temp_dir().join(format!(
+            "session-assignment-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        {
+            let mut ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            ledger
+                .set_session_assignment("runtime-a", "session-1", "profile-a")
+                .unwrap();
+            assert!(matches!(
+                ledger.set_session_assignment("runtime-a", "session-1", "profile-b"),
+                Err(CoreError::SessionAssignmentConflict { .. })
+            ));
+        }
+        {
+            let ledger = CommandLedger::open_sqlite(&db_path).unwrap();
+            assert_eq!(
+                ledger.session_assignment("runtime-a", "session-1"),
+                Some("profile-a")
+            );
+            assert_eq!(
+                ledger.session_assignments_for_runtime("runtime-a"),
+                vec![("session-1".into(), "profile-a".into())]
+            );
         }
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

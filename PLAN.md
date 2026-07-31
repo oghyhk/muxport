@@ -842,7 +842,7 @@ Every incident runbook must preserve facts, hypotheses, unknowns, logs, file has
 - [ ] No mutating command is duplicated across retry/reconnect tests.
 - [ ] Unknown outcomes are displayed as unknown, never guessed successful.
 - [ ] Snapshot reconciliation repairs all tested event gaps.
-- [ ] Active sessions never change credential identity silently.
+- [x] Active sessions never change credential identity silently.
 
 ### Restart resilience
 

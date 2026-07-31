@@ -53,6 +53,7 @@ struct RuntimeConfig {
     agent_type: AgentType,
     runtime_name: String,
     credential_profile_id: Arc<RwLock<String>>,
+    session_assignments: Arc<RwLock<HashMap<String, String>>>,
     managed_opencode: Option<Arc<tokio::sync::Mutex<ManagedOpenCodeChild>>>,
 }
 
@@ -62,6 +63,29 @@ impl RuntimeConfig {
             .read()
             .map(|profile| profile.clone())
             .unwrap_or_default()
+    }
+
+    fn apply_session_assignments(&self, sessions: &mut [SessionSummary]) {
+        let Ok(assignments) = self.session_assignments.read() else {
+            return;
+        };
+        for session in sessions {
+            if let Some(profile_id) = assignments.get(&session.session_id) {
+                session.credential_profile_id = profile_id.clone();
+            }
+        }
+    }
+
+    fn apply_event_session_assignment(&self, event: &mut Event) {
+        let Some(event::Inner::SessionUpdated(session)) = event.inner.as_mut() else {
+            return;
+        };
+        let Ok(assignments) = self.session_assignments.read() else {
+            return;
+        };
+        if let Some(profile_id) = assignments.get(&session.session_id) {
+            session.credential_profile_id = profile_id.clone();
+        }
     }
 }
 
@@ -411,6 +435,15 @@ async fn main() -> Result<(), DynError> {
             )
         })
         .collect::<Vec<_>>();
+    let session_assignment_targets = runtimes
+        .iter()
+        .map(|(config, _)| {
+            (
+                config.runtime_id.clone(),
+                Arc::clone(&config.session_assignments),
+            )
+        })
+        .collect();
     let command_router = match credential_vault.as_ref() {
         Some(vault) => CommandRouter::open_sqlite_with_vault(
             &command_db,
@@ -420,7 +453,8 @@ async fn main() -> Result<(), DynError> {
         None => CommandRouter::open_sqlite(&command_db, adapter_registry)?,
     }
     .with_host_id(host_id.clone())
-    .with_assignment_targets(assignment_targets);
+    .with_assignment_targets(assignment_targets)
+    .with_session_assignment_targets(session_assignment_targets);
     command_router
         .initialize_runtime_assignments(&assignment_defaults)
         .await?;
@@ -615,10 +649,11 @@ fn apply_source_update(
         SourceUpdate::Snapshot {
             config,
             projects,
-            sessions,
+            mut sessions,
             persisted,
         } => {
             let result: Result<(), event_journal::JournalError> = (|| {
+                config.apply_session_assignments(&mut sessions);
                 mirror.reconcile_runtime(
                     &config.runtime_id,
                     config.agent_type,
@@ -645,7 +680,8 @@ fn apply_source_update(
             let _ = persisted.send(acknowledgement);
             result?;
         }
-        SourceUpdate::Event { config, event } => {
+        SourceUpdate::Event { config, mut event } => {
+            config.apply_event_session_assignment(&mut event);
             let is_delta = matches!(
                 event.inner.as_ref(),
                 Some(event::Inner::StreamDelta(_))
@@ -1132,6 +1168,7 @@ async fn build_manifest_runtimes(
                             agent_type: entry.agent_type.protocol_type(),
                             runtime_name,
                             credential_profile_id: Arc::new(RwLock::new(entry.profile_id)),
+                            session_assignments: Arc::new(RwLock::new(HashMap::new())),
                             managed_opencode: Some(Arc::new(tokio::sync::Mutex::new(managed))),
                         },
                         Arc::new(adapter) as Arc<dyn AgentAdapter>,
@@ -1156,6 +1193,7 @@ async fn build_manifest_runtimes(
                             agent_type: entry.agent_type.protocol_type(),
                             runtime_name,
                             credential_profile_id: Arc::new(RwLock::new(entry.profile_id)),
+                            session_assignments: Arc::new(RwLock::new(HashMap::new())),
                             managed_opencode: None,
                         },
                         Arc::new(profile.adapter()) as Arc<dyn AgentAdapter>,
@@ -1244,6 +1282,7 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
         credential_profile_id: Arc::new(RwLock::new(
             managed_opencode_profile_id.unwrap_or_default(),
         )),
+        session_assignments: Arc::new(RwLock::new(HashMap::new())),
         managed_opencode,
     };
 
@@ -1270,6 +1309,7 @@ fn load_legacy_runtimes() -> Result<Vec<(RuntimeConfig, Arc<dyn AgentAdapter>)>,
         credential_profile_id: Arc::new(RwLock::new(
             managed_codex_profile_id.unwrap_or_default(),
         )),
+        session_assignments: Arc::new(RwLock::new(HashMap::new())),
         managed_opencode: None,
     };
     Ok(vec![(opencode_config, opencode), (codex_config, codex)])
@@ -1819,6 +1859,47 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn durable_session_identity_overrides_adapter_guesses_without_relabelling_unknown_sessions() {
+        let config = RuntimeConfig {
+            runtime_id: "codex-test".into(),
+            agent_type: AgentType::Codex,
+            runtime_name: "Codex".into(),
+            credential_profile_id: Arc::new(RwLock::new("current-profile".into())),
+            session_assignments: Arc::new(RwLock::new(HashMap::from([(
+                "known-session".into(),
+                "historical-profile".into(),
+            )]))),
+            managed_opencode: None,
+        };
+        let mut sessions = vec![
+            SessionSummary {
+                session_id: "known-session".into(),
+                project_path: "/repo".into(),
+                title: "Known".into(),
+                status: "idle".into(),
+                credential_profile_id: "incorrect-current-profile".into(),
+                created_at_ms: 1,
+            },
+            SessionSummary {
+                session_id: "unknown-session".into(),
+                project_path: "/repo".into(),
+                title: "Unknown".into(),
+                status: "idle".into(),
+                credential_profile_id: String::new(),
+                created_at_ms: 2,
+            },
+        ];
+
+        config.apply_session_assignments(&mut sessions);
+
+        assert_eq!(
+            sessions[0].credential_profile_id,
+            "historical-profile"
+        );
+        assert!(sessions[1].credential_profile_id.is_empty());
+    }
+
     #[tokio::test]
     async fn synchronization_brackets_subscription_with_snapshots() {
         let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
@@ -1827,6 +1908,7 @@ mod tests {
             agent_type: AgentType::Codex,
             runtime_name: "Codex".into(),
             credential_profile_id: Arc::new(RwLock::new(String::new())),
+            session_assignments: Arc::new(RwLock::new(HashMap::new())),
             managed_opencode: None,
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(4);

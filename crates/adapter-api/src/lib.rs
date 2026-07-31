@@ -43,7 +43,7 @@ pub struct CapabilitySet {
     pub can_read_usage: bool,
 }
 
-pub const ADAPTER_CAPABILITY_VERSION: u32 = 3;
+pub const ADAPTER_CAPABILITY_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -236,7 +236,13 @@ pub trait AgentAdapter: Send + Sync {
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError>;
     async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError>;
     async fn subscribe_events(&self) -> Result<EventStream, AdapterError>;
-    async fn start_session(&self, project_path: &str, prompt: &str, profile_id: &str) -> Result<String, AdapterError>;
+    async fn start_session(
+        &self,
+        project_path: &str,
+        prompt: &str,
+        runtime_profile_id: &str,
+        credential_profile_id: &str,
+    ) -> Result<String, AdapterError>;
     async fn send_input(&self, session_id: &str, text: &str) -> Result<(), AdapterError>;
     async fn steer(&self, session_id: &str, instruction: &str) -> Result<(), AdapterError>;
     async fn interrupt(&self, session_id: &str, reason: &str) -> Result<(), AdapterError>;

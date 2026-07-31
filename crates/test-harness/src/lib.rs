@@ -109,7 +109,13 @@ impl AgentAdapter for DeterministicFakeAdapter {
         Ok(Box::pin(stream::empty()))
     }
 
-    async fn start_session(&self, _project_path: &str, _prompt: &str, _profile_id: &str) -> Result<String, AdapterError> {
+    async fn start_session(
+        &self,
+        _project_path: &str,
+        _prompt: &str,
+        _runtime_profile_id: &str,
+        _credential_profile_id: &str,
+    ) -> Result<String, AdapterError> {
         self.start_session_count.fetch_add(1, Ordering::SeqCst);
         let delay_ms = self.start_session_delay_ms.load(Ordering::SeqCst);
         if delay_ms > 0 {

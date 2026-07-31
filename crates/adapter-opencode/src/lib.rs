@@ -52,6 +52,7 @@ pub struct OpenCodeAdapter {
 struct SessionContext {
     directory: String,
     title: String,
+    credential_profile_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -335,10 +336,6 @@ impl OpenCodeAdapter {
         ))
     }
 
-    fn bound_profile_id(&self) -> String {
-        self.managed_profile_id.clone().unwrap_or_default()
-    }
-
     fn remember_session(
         &self,
         session_id: &str,
@@ -357,6 +354,10 @@ impl OpenCodeAdapter {
             .get(session_id)
             .map(|session| session.directory.clone())
             .unwrap_or_default();
+        let prior_credential_profile_id = sessions
+            .get(session_id)
+            .map(|session| session.credential_profile_id.clone())
+            .unwrap_or_default();
         sessions.insert(
             session_id.to_owned(),
             SessionContext {
@@ -366,6 +367,7 @@ impl OpenCodeAdapter {
                     directory.to_owned()
                 },
                 title: title.unwrap_or(&prior_title).to_owned(),
+                credential_profile_id: prior_credential_profile_id,
             },
         );
         Ok(())
@@ -376,6 +378,13 @@ impl OpenCodeAdapter {
             .read()
             .map(|sessions| sessions.get(session_id).cloned())
             .map_err(|_| AdapterError::Internal("OpenCode session state lock was poisoned".into()))
+    }
+
+    fn session_credential_profile_id(&self, session_id: &str) -> Result<String, AdapterError> {
+        Ok(self
+            .session_context(session_id)?
+            .map(|context| context.credential_profile_id)
+            .unwrap_or_default())
     }
 
     async fn resolve_session_context(
@@ -517,7 +526,8 @@ impl OpenCodeAdapter {
                         runtime_id: String::new(),
                         title: title.to_owned(),
                         status: status.to_owned(),
-                        credential_profile_id: self.bound_profile_id(),
+                        credential_profile_id: self
+                            .session_credential_profile_id(session_id)?,
                         updated_at_ms,
                         project_path: session_directory.to_owned(),
                     }),
@@ -540,6 +550,7 @@ impl OpenCodeAdapter {
                     .unwrap_or(SessionContext {
                         directory: directory.to_owned(),
                         title: String::new(),
+                        credential_profile_id: String::new(),
                     });
                 let timestamp = now_ms();
                 Ok(Some(new_event(
@@ -549,7 +560,7 @@ impl OpenCodeAdapter {
                         runtime_id: String::new(),
                         title: context.title,
                         status: status.to_owned(),
-                        credential_profile_id: self.bound_profile_id(),
+                        credential_profile_id: context.credential_profile_id,
                         updated_at_ms: timestamp,
                         project_path: context.directory,
                     }),
@@ -563,6 +574,7 @@ impl OpenCodeAdapter {
                     .unwrap_or(SessionContext {
                         directory: directory.to_owned(),
                         title: String::new(),
+                        credential_profile_id: String::new(),
                     });
                 let timestamp = now_ms();
                 Ok(Some(new_event(
@@ -572,7 +584,7 @@ impl OpenCodeAdapter {
                         runtime_id: String::new(),
                         title: context.title,
                         status: "idle".into(),
-                        credential_profile_id: self.bound_profile_id(),
+                        credential_profile_id: context.credential_profile_id,
                         updated_at_ms: timestamp,
                         project_path: context.directory,
                     }),
@@ -815,6 +827,8 @@ impl AgentAdapter for OpenCodeAdapter {
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| directory.clone());
                 self.remember_session(&session.id, &actual_directory, Some(&title))?;
+                let credential_profile_id =
+                    self.session_credential_profile_id(&session.id)?;
                 summaries.push(SessionSummary {
                     status: statuses
                         .get(&session.id)
@@ -823,7 +837,7 @@ impl AgentAdapter for OpenCodeAdapter {
                     session_id: session.id,
                     project_path: actual_directory,
                     title,
-                    credential_profile_id: self.bound_profile_id(),
+                    credential_profile_id,
                     created_at_ms: session
                         .time
                         .and_then(|time| time.created.or(time.updated))
@@ -943,17 +957,18 @@ impl AgentAdapter for OpenCodeAdapter {
         &self,
         project_path: &str,
         prompt: &str,
-        profile_id: &str,
+        runtime_profile_id: &str,
+        credential_profile_id: &str,
     ) -> Result<String, AdapterError> {
         Self::validate_nonempty(project_path, "project path")?;
         Self::validate_nonempty(prompt, "prompt")?;
         match self.managed_profile_id.as_deref() {
-            Some(bound_profile) if profile_id != bound_profile => {
+            Some(bound_profile) if runtime_profile_id != bound_profile => {
                 return Err(AdapterError::InvalidInput(format!(
                     "managed OpenCode runtime is bound to profile {bound_profile}"
                 )));
             }
-            None if !profile_id.trim().is_empty() => {
+            None if !runtime_profile_id.trim().is_empty() => {
                 return Err(AdapterError::Unsupported(
                     "OpenCode profile-bound session creation requires a managed isolated runtime"
                         .into(),
@@ -985,6 +1000,14 @@ impl AgentAdapter for OpenCodeAdapter {
             .unwrap_or_else(|| project_path.to_owned());
         let title = session.title.unwrap_or_default();
         self.remember_session(&session.id, &directory, Some(&title))?;
+        if let Some(context) = self
+            .sessions
+            .write()
+            .map_err(|_| AdapterError::Internal("OpenCode session state lock was poisoned".into()))?
+            .get_mut(&session.id)
+        {
+            context.credential_profile_id = credential_profile_id.to_owned();
+        }
 
         if let Err(error) = self
             .send_prompt(&session.id, prompt, Some(&directory))
@@ -1069,6 +1092,8 @@ impl AgentAdapter for OpenCodeAdapter {
             Some(pending) if !pending.directory.is_empty() => SessionContext {
                 directory: pending.directory,
                 title: String::new(),
+                credential_profile_id: self
+                    .session_credential_profile_id(session_id)?,
             },
             _ => self.resolve_session_context(session_id).await?,
         };
@@ -1505,7 +1530,7 @@ mod tests {
         .await;
         let adapter = OpenCodeAdapter::new(base_url, None);
         let session_id = adapter
-            .start_session("/srv/app", "build it", "")
+            .start_session("/srv/app", "build it", "", "")
             .await
             .unwrap();
         assert_eq!(session_id, "s1");
@@ -1522,7 +1547,7 @@ mod tests {
         let adapter = OpenCodeAdapter::new("http://127.0.0.1:9", None);
         assert!(matches!(
             adapter
-                .start_session("/srv/app", "build it", "account-a")
+                .start_session("/srv/app", "build it", "account-a", "account-a")
                 .await,
             Err(AdapterError::Unsupported(_))
         ));

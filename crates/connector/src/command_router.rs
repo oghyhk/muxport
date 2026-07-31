@@ -38,6 +38,8 @@ pub struct CommandRouter {
     ledger: Mutex<CommandLedger>,
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
     assignment_targets: HashMap<String, Arc<StdRwLock<String>>>,
+    session_assignment_targets:
+        HashMap<String, Arc<StdRwLock<HashMap<String, String>>>>,
     vault: Option<Arc<Mutex<PersistentVault>>>,
     in_flight: StdMutex<HashMap<String, Arc<Notify>>>,
 }
@@ -52,6 +54,7 @@ impl CommandRouter {
             ledger: Mutex::new(ledger),
             adapters,
             assignment_targets: HashMap::new(),
+            session_assignment_targets: HashMap::new(),
             vault: None,
             in_flight: StdMutex::new(HashMap::new()),
         }
@@ -70,24 +73,48 @@ impl CommandRouter {
         self
     }
 
+    pub fn with_session_assignment_targets(
+        mut self,
+        targets: HashMap<String, Arc<StdRwLock<HashMap<String, String>>>>,
+    ) -> Self {
+        self.session_assignment_targets = targets;
+        self
+    }
+
     pub async fn initialize_runtime_assignments(
         &self,
         defaults: &[(String, String)],
     ) -> Result<(), CommandDispatchError> {
-        let resolved = {
+        let (resolved, session_assignments) = {
             let mut ledger = self.ledger.lock().await;
             let mut resolved = Vec::with_capacity(defaults.len());
+            let mut session_assignments = Vec::with_capacity(defaults.len());
             for (runtime_id, profile_id) in defaults {
-                resolved.push((
+                if !profile_id.trim().is_empty() {
+                    resolved.push((
+                        runtime_id.clone(),
+                        ledger.ensure_runtime_assignment(runtime_id, profile_id)?,
+                    ));
+                }
+                session_assignments.push((
                     runtime_id.clone(),
-                    ledger.ensure_runtime_assignment(runtime_id, profile_id)?,
+                    ledger.session_assignments_for_runtime(runtime_id),
                 ));
             }
-            resolved
+            (resolved, session_assignments)
         };
         for (runtime_id, profile_id) in resolved {
             self.update_assignment_target(&runtime_id, &profile_id)
                 .map_err(|_| CommandDispatchError::StateLockPoisoned)?;
+        }
+        for (runtime_id, assignments) in session_assignments {
+            if let Some(target) = self.session_assignment_targets.get(&runtime_id) {
+                let mut target = target
+                    .write()
+                    .map_err(|_| CommandDispatchError::StateLockPoisoned)?;
+                target.clear();
+                target.extend(assignments);
+            }
         }
         Ok(())
     }
@@ -109,6 +136,7 @@ impl CommandRouter {
             ledger: Mutex::new(CommandLedger::open_sqlite(path)?),
             adapters,
             assignment_targets: HashMap::new(),
+            session_assignment_targets: HashMap::new(),
             vault: Some(vault),
             in_flight: StdMutex::new(HashMap::new()),
         })
@@ -256,13 +284,71 @@ impl CommandRouter {
         match command.inner.as_ref() {
             Some(command::Inner::StartSession(request)) => {
                 let adapter = self.adapter(&request.runtime_id)?;
+                let runtime_profile_id = adapter
+                    .managed_runtime_profile_id()
+                    .unwrap_or_default()
+                    .to_owned();
+                let assigned_profile_id = self
+                    .ledger
+                    .lock()
+                    .await
+                    .runtime_assignment(&request.runtime_id)
+                    .map(str::to_owned);
+                let requested_profile_id = request.credential_profile_id.trim();
+                let credential_profile_id = match assigned_profile_id {
+                    Some(assigned) if requested_profile_id.is_empty() => assigned,
+                    Some(assigned) if requested_profile_id == assigned => assigned,
+                    Some(_) => {
+                        return Err(AdapterError::InvalidInput(format!(
+                            "requested credential profile {requested_profile_id:?} is not the runtime's current durable assignment"
+                        )));
+                    }
+                    None if runtime_profile_id.is_empty()
+                        && requested_profile_id.is_empty() =>
+                    {
+                        String::new()
+                    }
+                    None => {
+                        return Err(AdapterError::InvalidInput(
+                            "managed runtime has no durable credential assignment".into(),
+                        ));
+                    }
+                };
                 let session_id = adapter
                     .start_session(
                         &request.project_path,
                         &request.prompt,
-                        &request.credential_profile_id,
+                        &runtime_profile_id,
+                        &credential_profile_id,
                     )
                     .await?;
+                if !credential_profile_id.is_empty() {
+                    self.ledger
+                        .lock()
+                        .await
+                        .set_session_assignment(
+                            &request.runtime_id,
+                            &session_id,
+                            &credential_profile_id,
+                        )
+                        .map_err(|error| {
+                            AdapterError::OutcomeUnknown(format!(
+                                "session {session_id} was created but its credential identity could not be recorded durably; reconcile before retrying: {error}"
+                            ))
+                        })?;
+                    if let Some(target) =
+                        self.session_assignment_targets.get(&request.runtime_id)
+                    {
+                        target
+                            .write()
+                            .map_err(|_| {
+                                AdapterError::Internal(
+                                    "session assignment projection lock was poisoned".into(),
+                                )
+                            })?
+                            .insert(session_id.clone(), credential_profile_id);
+                    }
+                }
                 Ok(json!({"session_id": session_id}))
             }
             Some(command::Inner::SendInput(request)) => {
@@ -733,8 +819,11 @@ mod tests {
 
     fn router(
         adapter: Arc<DeterministicFakeAdapter>,
-        ledger: CommandLedger,
+        mut ledger: CommandLedger,
     ) -> CommandRouter {
+        ledger
+            .ensure_runtime_assignment("codex-test", "fake-profile-1")
+            .unwrap();
         let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
         adapters.insert("codex-test".into(), adapter);
         CommandRouter::new(ledger, adapters)
@@ -808,6 +897,32 @@ mod tests {
         assert!(first.success);
         assert_eq!(first.result_json, second.result_json);
         assert_eq!(adapter.start_session_count(), 1);
+        assert_eq!(
+            router
+                .ledger
+                .lock()
+                .await
+                .session_assignment("codex-test", "fake-sess-1"),
+            Some("fake-profile-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_rejects_a_stale_or_unassigned_credential() {
+        let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
+        let router = router(Arc::clone(&adapter), CommandLedger::new());
+        let mut command = start_command("build it");
+        let Some(command::Inner::StartSession(request)) = command.inner.as_mut()
+        else {
+            unreachable!()
+        };
+        request.credential_profile_id = "stale-profile".into();
+
+        let result = router.dispatch("stale-start", &command).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.error_message.contains("current durable assignment"));
+        assert_eq!(adapter.start_session_count(), 0);
     }
 
     #[tokio::test]
@@ -936,6 +1051,13 @@ mod tests {
             let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
             adapters.insert("codex-test".into(), adapter.clone());
             let router = CommandRouter::open_sqlite(&db_path, adapters).unwrap();
+            router
+                .initialize_runtime_assignments(&[(
+                    "codex-test".into(),
+                    "fake-profile-1".into(),
+                )])
+                .await
+                .unwrap();
             assert!(
                 router
                     .dispatch("persistent-key", &command)
@@ -948,6 +1070,13 @@ mod tests {
             let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
             adapters.insert("codex-test".into(), adapter.clone());
             let router = CommandRouter::open_sqlite(&db_path, adapters).unwrap();
+            router
+                .initialize_runtime_assignments(&[(
+                    "codex-test".into(),
+                    "stale-manifest-default".into(),
+                )])
+                .await
+                .unwrap();
             assert!(
                 router
                     .dispatch("persistent-key", &command)

@@ -140,6 +140,7 @@ struct SessionContext {
     project_path: String,
     title: String,
     status: String,
+    credential_profile_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -623,11 +624,16 @@ impl AgentAdapter for CodexAdapter {
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError> {
         let client = self.ensure_client().await?;
-        self.list_all_threads(&client)
-            .await?
-            .into_iter()
-            .map(|thread| thread_to_summary(thread, &self.profile_id))
-            .collect()
+        let mut summaries = Vec::new();
+        for thread in self.list_all_threads(&client).await? {
+            self.state.remember_thread(&thread)?;
+            let credential_profile_id = self
+                .state
+                .session_context(&thread.id)?
+                .credential_profile_id;
+            summaries.push(thread_to_summary(thread, &credential_profile_id)?);
+        }
+        Ok(summaries)
     }
 
     async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError> {
@@ -666,7 +672,8 @@ impl AgentAdapter for CodexAdapter {
         &self,
         project_path: &str,
         prompt: &str,
-        profile_id: &str,
+        runtime_profile_id: &str,
+        credential_profile_id: &str,
     ) -> Result<String, AdapterError> {
         Self::validate_nonempty(project_path, "project path")?;
         Self::validate_nonempty(prompt, "prompt")?;
@@ -675,9 +682,9 @@ impl AgentAdapter for CodexAdapter {
                 "project path must be absolute".into(),
             ));
         }
-        if profile_id != self.profile_id {
+        if runtime_profile_id != self.profile_id {
             return Err(AdapterError::InvalidInput(format!(
-                "Codex session profile {profile_id:?} does not match adapter profile {:?}",
+                "Codex runtime profile {runtime_profile_id:?} does not match adapter profile {:?}",
                 self.profile_id
             )));
         }
@@ -702,6 +709,7 @@ impl AgentAdapter for CodexAdapter {
         })?;
         let session_id = required_string(thread, "id", "thread/start")?.to_owned();
         self.state.remember_thread_value(thread)?;
+        self.state.set_session_credential(&session_id, credential_profile_id)?;
 
         if let Err(error) = self.start_turn(&client, &session_id, prompt).await {
             return Err(AdapterError::OutcomeUnknown(format!(
@@ -1014,8 +1022,25 @@ impl CodexState {
                 } else {
                     status.to_owned()
                 },
+                credential_profile_id: prior.credential_profile_id,
             },
         );
+        Ok(())
+    }
+
+    fn set_session_credential(
+        &self,
+        session_id: &str,
+        credential_profile_id: &str,
+    ) -> Result<(), AdapterError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| AdapterError::Internal("Codex session state lock was poisoned".into()))?;
+        sessions
+            .entry(session_id.to_owned())
+            .or_default()
+            .credential_profile_id = credential_profile_id.to_owned();
         Ok(())
     }
 
@@ -1117,7 +1142,7 @@ impl CodexState {
                     &thread_title(&parsed),
                     thread_status(&parsed.status)?,
                     &parsed.cwd,
-                    &self.profile_id,
+                    "",
                     now_ms(),
                 )])
             }
@@ -1133,7 +1158,7 @@ impl CodexState {
                     &context.title,
                     status,
                     &context.project_path,
-                    &self.profile_id,
+                    &context.credential_profile_id,
                     now_ms(),
                 )])
             }
@@ -1150,7 +1175,7 @@ impl CodexState {
                     &context.title,
                     &context.status,
                     &context.project_path,
-                    &self.profile_id,
+                    &context.credential_profile_id,
                     now_ms(),
                 )])
             }
@@ -1164,7 +1189,7 @@ impl CodexState {
                     &context.title,
                     status,
                     &context.project_path,
-                    &self.profile_id,
+                    &context.credential_profile_id,
                     now_ms(),
                 )])
             }
@@ -1188,7 +1213,7 @@ impl CodexState {
                     &context.title,
                     "inProgress",
                     &context.project_path,
-                    &self.profile_id,
+                    &context.credential_profile_id,
                     timestamp_seconds_to_ms(
                         turn.get("startedAt").and_then(Value::as_i64),
                     ),
@@ -1222,7 +1247,7 @@ impl CodexState {
                         &context.title,
                         status,
                         &context.project_path,
-                        &self.profile_id,
+                        &context.credential_profile_id,
                         timestamp,
                     ),
                 ])
@@ -1736,7 +1761,7 @@ mod tests {
         let adapter = CodexAdapter::new("definitely-not-a-command");
         assert!(matches!(
             adapter
-                .start_session("/srv/app", "build it", "account-a")
+                .start_session("/srv/app", "build it", "account-a", "account-a")
                 .await,
             Err(AdapterError::InvalidInput(_))
         ));
