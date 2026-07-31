@@ -8,12 +8,14 @@ class BulkCredentialSwitchPlan {
     required this.ready,
     required this.alreadyAssigned,
     required this.offline,
+    required this.busy,
     required this.missingProfile,
   });
 
   final List<BulkCredentialSwitchTarget> ready;
   final List<BulkCredentialSwitchTarget> alreadyAssigned;
   final List<BulkCredentialSwitchTarget> offline;
+  final List<BulkCredentialSwitchTarget> busy;
   final List<BulkCredentialSwitchTarget> missingProfile;
 
   List<BulkCredentialSwitchTarget> get dispatchable => ready;
@@ -26,6 +28,7 @@ class BulkCredentialSwitchPlan {
     final ready = <BulkCredentialSwitchTarget>[];
     final alreadyAssigned = <BulkCredentialSwitchTarget>[];
     final offline = <BulkCredentialSwitchTarget>[];
+    final busy = <BulkCredentialSwitchTarget>[];
     final missingProfile = <BulkCredentialSwitchTarget>[];
     for (final host in hosts) {
       Map<String, Object?>? profile;
@@ -60,6 +63,8 @@ class BulkCredentialSwitchPlan {
           offline.add(target);
         } else if (runtime['activeCredentialProfileId'] == profileId) {
           alreadyAssigned.add(target);
+        } else if (_hasActiveWork(host, runtimeId)) {
+          busy.add(target);
         } else {
           ready.add(target);
         }
@@ -69,9 +74,19 @@ class BulkCredentialSwitchPlan {
       ready: List.unmodifiable(ready),
       alreadyAssigned: List.unmodifiable(alreadyAssigned),
       offline: List.unmodifiable(offline),
+      busy: List.unmodifiable(busy),
       missingProfile: List.unmodifiable(missingProfile),
     );
   }
+}
+
+bool _hasActiveWork(HostSyncState host, String runtimeId) {
+  for (final raw in host.snapshot['activeSessions'] as List? ?? const []) {
+    if (raw is Map && raw['runtimeId'] == runtimeId) {
+      return true;
+    }
+  }
+  return false;
 }
 
 class BulkCredentialSwitchTarget {

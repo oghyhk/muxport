@@ -38,6 +38,29 @@ void main() {
           host('ready', HostSyncPhase.synchronized, profile, 'old'),
           host('same', HostSyncPhase.synchronized, profile, 'profile-a'),
           host('offline', HostSyncPhase.offline, profile, 'old'),
+          HostSyncState(
+            hostId: 'busy',
+            pinnedHostKey: 'key-busy',
+            displayName: 'busy',
+            protocolVersion: mobileProtocolVersion,
+            phase: HostSyncPhase.synchronized,
+            snapshot: const {
+              'credentialProfiles': [profile],
+              'runtimes': [
+                {
+                  'runtimeId': 'runtime-busy',
+                  'activeCredentialProfileId': 'old',
+                },
+              ],
+              'activeSessions': [
+                {'runtimeId': 'runtime-busy', 'sessionId': 'session-busy'},
+              ],
+            },
+            cursor: null,
+            sourceVersions: const {},
+            recentEventIds: const [],
+            pendingOperations: const {},
+          ),
           host('missing', HostSyncPhase.synchronized, null, 'old'),
         ],
         provider: 'opencode-go',
@@ -46,6 +69,7 @@ void main() {
       expect(plan.ready, hasLength(1));
       expect(plan.alreadyAssigned, hasLength(1));
       expect(plan.offline, hasLength(1));
+      expect(plan.busy, hasLength(1));
       expect(plan.missingProfile, hasLength(1));
     },
   );

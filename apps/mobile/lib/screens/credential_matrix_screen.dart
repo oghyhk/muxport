@@ -222,6 +222,7 @@ class CredentialMatrixScreen extends StatelessWidget {
                     ),
                   Text('Already assigned: ${plan.alreadyAssigned.length}'),
                   Text('Offline or stale: ${plan.offline.length}'),
+                  Text('Busy with active work: ${plan.busy.length}'),
                   Text('Missing this account: ${plan.missingProfile.length}'),
                   const SizedBox(height: 12),
                   const Text(
