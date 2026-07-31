@@ -394,7 +394,8 @@ async fn main() -> Result<(), DynError> {
     };
     info!(path = %command_db, "persistent command ledger initialized");
     if let Some(vault) = credential_vault.as_ref() {
-        mirror.replace_credential_profiles(vault_profile_projection(&vault.lock().await));
+        let vault = vault.lock().await;
+        mirror.replace_credential_profiles(vault_profile_projection(&vault));
         mirror.save_snapshot(&journal)?;
     }
 
@@ -507,8 +508,9 @@ async fn main() -> Result<(), DynError> {
                     break;
                 };
                 if let Some(vault) = credential_vault.as_ref() {
+                    let vault = vault.lock().await;
                     mirror.replace_credential_profiles(
-                        vault_profile_projection(&vault.lock().await),
+                        vault_profile_projection(&vault),
                     );
                 }
                 apply_source_update(
