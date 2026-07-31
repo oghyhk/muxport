@@ -331,4 +331,50 @@ mod tests {
         ));
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_runtime_is_loopback_authenticated_and_environment_isolated() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("managed-opencode-spawn");
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let executable = root.join("fake-opencode");
+        fs::write(
+            &executable,
+            concat!(
+                "#!/bin/sh\n",
+                "{\n",
+                "  printf 'args=%s\\n' \"$*\"\n",
+                "  printf 'home=%s\\n' \"$HOME\"\n",
+                "  printf 'data=%s\\n' \"$XDG_DATA_HOME\"\n",
+                "  printf 'config=%s\\n' \"$OPENCODE_CONFIG_DIR\"\n",
+                "  printf 'password=%s\\n' \"${OPENCODE_SERVER_PASSWORD:+set}\"\n",
+                "  printf 'inherited=%s\\n' \"${ANTHROPIC_API_KEY-unset}\"\n",
+                "} > managed-launch.txt\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let profile =
+            ManagedOpenCodeProfile::prepare(&root, "profile-a", &executable, &project, 43113)
+                .unwrap();
+
+        let mut child = profile.spawn("test-server-password").unwrap();
+        assert!(child.wait().await.unwrap().success());
+        let evidence = fs::read_to_string(project.join("managed-launch.txt")).unwrap();
+        assert!(evidence.contains("args=serve --hostname 127.0.0.1 --port 43113"));
+        assert!(evidence.contains("password=set"));
+        assert!(evidence.contains("inherited=unset"));
+        assert!(evidence.contains(&format!("home={}", profile.home_root.display())));
+        assert!(evidence.contains(&format!("data={}", profile.data_root.display())));
+        assert!(evidence.contains(&format!(
+            "config={}",
+            profile.config_root.join("opencode").display()
+        )));
+        assert!(!evidence.contains("test-server-password"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
