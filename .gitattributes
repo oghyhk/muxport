@@ -1,0 +1,20 @@
+* text=auto
+
+*.dart text eol=lf
+*.dockerignore text eol=lf
+Dockerfile* text eol=lf
+*.gradle text eol=lf
+*.kts text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.plist text eol=lf
+*.proto text eol=lf
+*.rs text eol=lf
+*.service text eol=lf
+*.sh text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+*.jpg binary
+*.png binary

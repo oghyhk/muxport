@@ -12,21 +12,21 @@ The plan is organized as an implementation checklist. A checkbox is complete onl
 
 ## 2. Fixed architectural decisions
 
-- [ ] Use **Flutter** for the iOS and Android application.
-- [ ] Use **Rust** for the host connector, relay, protocol core, credential vault, runtime supervision, and shared security-sensitive code.
-- [ ] Keep OpenCode and Codex running on user-controlled hosts; the mobile app is a control and synchronization client.
-- [ ] Integrate OpenCode through its supported HTTP/OpenAPI and SSE interfaces.
-- [ ] Integrate Codex through a locally supervised `codex app-server` using its supported stdio JSON-RPC transport.
-- [ ] Do not depend on Codex's experimental WebSocket listener for production.
-- [ ] Treat OpenCode and Codex integrations as adapters behind one versioned internal interface.
-- [ ] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
-- [ ] Keep the relay optional and unable to decrypt application payloads.
-- [ ] Support a direct path over LAN or a user-managed private network such as Tailscale.
-- [ ] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
-- [ ] Treat runtime session state on the host as the source of truth.
-- [ ] Treat mobile caches and the connector event journal as reconstructible state.
-- [ ] Apply account changes to new sessions by default; never silently move an active turn to another identity.
-- [ ] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
+- [x] Use **Flutter** for the iOS and Android application.
+- [x] Use **Rust** for the host connector, relay, protocol core, credential vault, runtime supervision, and shared security-sensitive code.
+- [x] Keep OpenCode and Codex running on user-controlled hosts; the mobile app is a control and synchronization client.
+- [x] Integrate OpenCode through its supported HTTP/OpenAPI and SSE interfaces.
+- [x] Integrate Codex through a locally supervised `codex app-server` using its supported stdio JSON-RPC transport.
+- [x] Do not depend on Codex's experimental WebSocket listener for production.
+- [x] Treat OpenCode and Codex integrations as adapters behind one versioned internal interface.
+- [x] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
+- [x] Keep the relay optional and unable to decrypt application payloads.
+- [x] Support a direct path over LAN or a user-managed private network such as Tailscale.
+- [x] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
+- [x] Treat runtime session state on the host as the source of truth.
+- [x] Treat mobile caches and the connector event journal as reconstructible state.
+- [x] Apply account changes to new sessions only; never silently move an active turn to another identity.
+- [x] Model bulk switching as a tracked multi-host operation with per-host results, not as an impossible all-or-nothing distributed transaction.
 
 ## 3. System architecture
 
@@ -130,25 +130,25 @@ muxport/
 
 Define a versioned `AgentAdapter` interface with:
 
-- [ ] `probe()` — executable version, API version, capabilities, and health.
-- [ ] `discover_projects()` — repositories/workspaces visible to the runtime.
-- [ ] `list_sessions()` and `read_session()` — authoritative snapshot.
-- [ ] `subscribe()` — normalized live-event stream.
-- [ ] `start_session()`, `send_input()`, `steer()`, and `interrupt()`.
-- [ ] `respond_to_approval()` with source correlation identifiers.
-- [ ] `read_account_state()` and `read_usage()` when supported.
-- [ ] `prepare_credential()`, `validate_credential()`, and `activate_credential()`.
-- [ ] `shutdown_gracefully()` for connector-managed runtime instances.
-- [ ] A declared capability set so unsupported controls are hidden rather than failing late.
+- [x] `probe()` — executable version, API version, capabilities, and health.
+- [x] `discover_projects()` — repositories/workspaces visible to the runtime.
+- [x] `list_sessions()` and `read_session()` — authoritative snapshot.
+- [x] `subscribe()` — normalized live-event stream.
+- [x] `start_session()`, `send_input()`, `steer()`, and `interrupt()`.
+- [x] `respond_to_approval()` with source correlation identifiers.
+- [x] `read_account_state()` and `read_usage()` when supported.
+- [x] `prepare_credential()`, `validate_credential()`, and `activate_credential()`.
+- [x] `shutdown_gracefully()` for connector-managed runtime instances.
+- [x] A declared capability set so unsupported controls are hidden rather than failing late.
 
 ### Built-in adapter strategy
 
-- [ ] Compile OpenCode and Codex adapters into the signed connector for MVP.
-- [ ] Make each adapter use only documented public interfaces.
+- [x] Compile OpenCode and Codex adapters into the signed connector for MVP.
+- [x] Make each adapter use only documented public interfaces.
 - [ ] Generate OpenCode client types from the running server's OpenAPI document during compatibility testing, not dynamically in production.
 - [ ] Generate Codex JSON-RPC types from the installed Codex App Server schema for compatibility tests.
 - [ ] Preserve unknown fields and retain raw source event type/version for diagnostics.
-- [ ] Add per-version contract fixtures so vendor updates cannot silently change behavior.
+- [x] Add per-version contract fixtures so vendor updates cannot silently change behavior.
 
 ### Future plugin host
 
@@ -163,16 +163,16 @@ Define a versioned `AgentAdapter` interface with:
 
 ### Connector responsibilities
 
-- [ ] Pair and authenticate mobile devices.
+- [x] Pair and authenticate mobile devices.
 - [ ] Maintain direct and relay transports.
-- [ ] Own desired configuration and observed runtime state.
-- [ ] Supervise managed OpenCode and Codex processes.
+- [x] Own desired configuration and observed runtime state.
+- [x] Supervise managed OpenCode and Codex processes.
 - [ ] Adopt compatible externally launched runtimes when a stable endpoint is supplied.
-- [ ] Normalize and journal source events.
-- [ ] Deduplicate and execute remote commands.
-- [ ] Store credentials and assignments.
+- [x] Normalize and journal source events.
+- [x] Deduplicate and execute remote commands.
+- [x] Store credentials and assignments.
 - [ ] Reconcile after every connector, runtime, host, or network restart.
-- [ ] Produce local, redacted diagnostics and audit events.
+- [x] Produce local, redacted diagnostics and audit events.
 
 ### Host installation mode
 
@@ -180,7 +180,7 @@ Define a versioned `AgentAdapter` interface with:
 - [ ] Windows desktop: per-user background process installed through signed packaging; avoid a system service until user-vault behavior is proven.
 - [ ] Linux desktop: `systemd --user`.
 - [ ] Linux server: dedicated unprivileged service account with a systemd service and explicitly configured vault-unlock method.
-- [ ] Container: rootless image where possible, with project directories and encrypted vault storage mounted separately.
+- [x] Container: rootless image where possible, with project directories and encrypted vault storage mounted separately.
 - [ ] Never run the connector or agent runtimes as administrator/root unless a documented deployment explicitly requires it.
 
 ### Desired-state reconciler
@@ -205,10 +205,10 @@ observed:
 ```
 
 - [ ] Reconcile on connector start, runtime event, configuration change, and periodic health tick.
-- [ ] Never infer success solely from a previously sent command.
-- [ ] Read back account and runtime state after every credential activation.
+- [x] Never infer success solely from a previously sent command.
+- [x] Read back account and runtime state after every credential activation.
 - [ ] Surface desired/observed drift to the phone.
-- [ ] Require user action before killing an unmanaged external process.
+- [x] Require user action before killing an unmanaged external process.
 
 ## 7. Local storage separation
 
@@ -228,29 +228,29 @@ state/
 └─ diagnostics/            # redacted rotating logs
 ```
 
-- [ ] Use SQLite transactions, foreign keys, integrity checks, and explicit schema migrations.
-- [ ] Treat SQLite WAL/SHM files as live data, never disposable cache during recovery.
-- [ ] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
-- [ ] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
-- [ ] Keep `vault.sealed` independent of metadata and event-journal migrations.
-- [ ] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
-- [ ] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
+- [x] Use SQLite transactions, foreign keys, integrity checks, and explicit schema migrations.
+- [x] Treat SQLite WAL/SHM files as live data, never disposable cache during recovery.
+- [x] Back up a consistent SQLite snapshot, not a copied main file without its WAL.
+- [x] Mark `events.db` as reconstructible and safe to rebuild only after preserving evidence.
+- [x] Keep `vault.sealed` independent of metadata and event-journal migrations.
+- [x] Store no secret plaintext, auth headers, full environment dumps, or raw approval payloads in logs.
+- [x] Add a redacted diagnostic export that requires user confirmation and enumerates included files.
 
 ## 8. Credential security architecture
 
 ### Host vault
 
-- [ ] Generate a random data-encryption key for the vault.
+- [x] Generate a random data-encryption key for the vault.
 - [ ] Wrap that key using an OS-protected key-encryption key:
-  - [ ] macOS Keychain, hardware-backed when available.
-  - [ ] Windows DPAPI/Credential Manager under the connector user.
-  - [ ] Linux Secret Service when available.
-  - [ ] Headless Linux fallback: Argon2id-derived wrapping key from an operator passphrase, TPM/systemd credential integration, or an explicitly configured external secret manager.
-- [ ] Use a reviewed authenticated-encryption construction and a versioned envelope format.
-- [ ] Bind ciphertext to profile ID, host ID, credential type, and schema version as authenticated data.
-- [ ] Zeroize plaintext buffers and prevent them from entering panic reports.
-- [ ] Keep the vault locked after reboot until its configured unlock condition succeeds.
-- [ ] Never use a compiled-in master key or relay-held decryption key.
+  - [x] macOS Keychain, hardware-backed when available.
+  - [x] Windows DPAPI/Credential Manager under the connector user.
+  - [x] Linux Secret Service when available.
+  - [x] Headless Linux fallback: Argon2id-derived wrapping key from an operator passphrase, TPM/systemd credential integration, or an explicitly configured external secret manager.
+- [x] Use a reviewed authenticated-encryption construction and a versioned envelope format.
+- [x] Bind ciphertext to profile ID, host ID, credential type, and schema version as authenticated data.
+- [x] Zeroize plaintext buffers and prevent them from entering panic reports.
+- [x] Keep the vault locked after reboot until its configured unlock condition succeeds.
+- [x] Never use a compiled-in master key or relay-held decryption key.
 
 ### Credential records
 
@@ -271,82 +271,82 @@ rotation_pool_id?
 secret_handle          # opaque reference into vault
 ```
 
-- [ ] Display only labels, last validation time, account fingerprint, and status.
-- [ ] Never reveal a stored API key after enrollment.
-- [ ] Detect accidental duplicate enrollment using a non-reversible keyed fingerprint.
+- [x] Display only non-secret metadata: labels, provider, assignments, last validation time, account fingerprint, and status.
+- [x] Never reveal a stored API key after enrollment.
+- [x] Detect accidental duplicate enrollment using a non-reversible keyed fingerprint.
 - [ ] Provide disable and revoke separately; local disable must not falsely claim the provider key was revoked upstream.
 
 ### Mobile secret handling
 
-- [ ] Store the mobile device identity in Keychain/Android Keystore.
-- [ ] Keep provider secrets off the phone by default.
-- [ ] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
-- [ ] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
-- [ ] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
+- [x] Store the mobile device identity in Keychain/Android Keystore.
+- [x] Keep provider secrets off the phone by default.
+- [x] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
+- [x] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
+- [x] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
 - [ ] Require biometric/device authentication before provisioning, bulk assignment, export, or rotation.
-- [ ] Exclude provider credentials and E2EE private keys from ordinary cloud backup.
+- [x] Exclude provider credentials and E2EE private keys from ordinary cloud backup.
 
 ### Codex and OpenCode vendor state
 
-- [ ] Use supported login/auth APIs; never copy or edit vendor token databases.
-- [ ] Protect each managed account with a separate runtime-state directory once supported isolation is validated.
-- [ ] Enforce owner-only filesystem permissions on profile directories.
+- [x] Use supported login/auth APIs; never copy or edit vendor token databases.
+- [x] Protect each managed account with a separate runtime-state directory once supported isolation is validated.
+- [x] Enforce owner-only filesystem permissions on profile directories.
 - [ ] Record only an account fingerprint and plan label in Muxport metadata.
-- [ ] Do not include vendor-managed auth state in support bundles.
+- [x] Do not include vendor-managed auth state in support bundles.
 
 ## 9. Pairing and end-to-end encryption
 
 - [ ] Perform a cryptographic design review before choosing final primitives.
 - [ ] Use established libraries and protocols; do not create custom cryptography.
-- [ ] Give every phone and connector a long-term device identity key.
+- [x] Give every phone and connector a long-term device identity key.
 - [ ] Pair with a short-lived, one-use QR payload containing host identity, rendezvous data, expiry, and an authenticated key agreement challenge.
-- [ ] Display and verify a human-readable safety code on both devices for first pairing.
+- [x] Display and verify a human-readable safety code on both devices for first pairing.
 - [ ] Derive separate keys for commands, events, secret provisioning, and attachment transfer.
-- [ ] Rotate session keys and bind every frame to host ID, device ID, protocol version, sequence, and direction.
-- [ ] Reject replayed, expired, out-of-order-without-window, or wrong-host frames.
-- [ ] Support device revocation and host key rotation without rotating provider credentials.
-- [ ] Require re-pairing after host identity loss; never silently trust a replacement key.
+- [x] Rotate session keys and bind every frame to host ID, device ID, protocol version, sequence, and direction.
+- [x] Reject replayed, expired, out-of-order-without-window, or wrong-host frames.
+- [x] Support device revocation and host key rotation without rotating provider credentials.
+- [x] Require re-pairing after host identity loss; never silently trust a replacement key.
 - [ ] Commission an external cryptographic review before public beta.
 
 ## 10. Protocol and synchronization
 
 ### Wire protocol
 
-- [ ] Define canonical schemas and generate Rust and Dart types.
-- [ ] Include protocol version, capability version, request ID, idempotency key, host epoch, sequence, timestamp, and expiry where applicable.
-- [ ] Separate command, command-result, event, snapshot, acknowledgement, and error envelopes.
+- [x] Define canonical schemas and generate Rust and Dart types.
+- [x] Include protocol version, capability version, request ID, idempotency key, host epoch, sequence, timestamp, and expiry where applicable.
+- [x] Separate command, command-result, event, snapshot, acknowledgement, and error envelopes.
 - [ ] Limit frame size and chunk large diffs/attachments with hashes.
 - [ ] Use explicit redaction types so a secret cannot be serialized into an ordinary event by mistake.
-- [ ] Maintain golden cross-language fixtures in CI.
+- [x] Maintain golden cross-language fixtures in CI.
 
 ### Command semantics
 
-- [ ] Treat network delivery as at-least-once.
-- [ ] Persist a mutating command and its idempotency key before execution.
-- [ ] Return the previous result when a command is retried with the same key.
-- [ ] Give commands a deadline; reject stale approvals, rotations, and interrupts.
-- [ ] Never automatically replay a command whose outcome is unknown unless the source operation is independently idempotent.
+- [x] Treat network delivery as at-least-once.
+- [x] Persist a mutating command and its idempotency key before execution.
+- [x] Return the previous result when a command is retried with the same key.
+- [x] Give commands a deadline; reject stale approvals, rotations, and interrupts.
+- [x] Never automatically replay a command whose outcome is unknown unless the source operation is independently idempotent.
 - [ ] Make offline writes opt-in and limited to safe operations such as “start this new session when host reconnects”; never queue approvals or immediate credential rotation while offline.
 
 ### Event journal
 
-- [ ] Assign a connector-monotonic sequence to every normalized event.
-- [ ] Include connector boot epoch so sequence resets are unambiguous.
+- [x] Assign a connector-monotonic sequence to every normalized event.
+- [x] Include connector boot epoch so sequence resets are unambiguous.
 - [ ] Persist event and cursor before acknowledging it to the source adapter when possible.
-- [ ] Retain a bounded journal by age and size.
-- [ ] Compact only events older than every connected client's acknowledged cursor or an explicit retention threshold.
-- [ ] Store periodic authoritative snapshots.
-- [ ] Detect cursor gaps and force snapshot reconciliation.
+- [x] Retain a bounded journal by age and size.
+- [x] Compact only events older than every connected client's acknowledged cursor or an explicit retention threshold.
+- [x] Store periodic authoritative snapshots.
+- [x] Detect cursor gaps and force snapshot reconciliation.
 - [ ] Coalesce high-frequency output deltas without changing final content.
 
 ### Mobile sync state
 
-- [ ] Flutter starts from its local cache and visibly marks it stale until host confirmation.
-- [ ] Request replay from the last acknowledged host epoch and sequence.
-- [ ] Replace cache with a snapshot after a gap, incompatible version, or journal reset.
-- [ ] Deduplicate by event ID and source object version.
-- [ ] Keep optimistic UI limited to commands with reversible presentation; show “pending” until connector acknowledgement.
-- [ ] Never show an approval as accepted until the source runtime confirms the response.
+- [x] Flutter starts from its local cache and visibly marks it stale until host confirmation.
+- [x] Request replay from the last acknowledged host epoch and sequence.
+- [x] Replace cache with a snapshot after a gap, incompatible version, or journal reset.
+- [x] Deduplicate by event ID and source object version.
+- [x] Keep optimistic UI limited to commands with reversible presentation; show “pending” until connector acknowledgement.
+- [x] Never show an approval as accepted until the source runtime confirms the response.
 
 ## 11. Lifecycle and restart recovery
 
@@ -387,10 +387,10 @@ created -> persisted -> dispatched -> source_acknowledged -> reconciled -> succe
                          └─ rejected_offline
 ```
 
-- [ ] Implement these as explicit enums with allowed transitions.
+- [x] Implement these as explicit enums with allowed transitions.
 - [ ] Persist every mutating transition transactionally.
-- [ ] Reject impossible transitions and emit a redacted diagnostic event.
-- [ ] Give the Flutter UI a consistent status and explanation for every state.
+- [x] Reject impossible transitions and emit a redacted diagnostic event.
+- [x] Give the Flutter UI a consistent status and explanation for every state.
 
 ### Recovery invariant
 
@@ -419,35 +419,35 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Mobile restart checklist
 
-- [ ] Persist host list, non-secret labels, last snapshot, cursors, pending local operation IDs, and device identity through atomic storage.
-- [ ] On launch, render cached state with a clear “reconnecting” marker.
-- [ ] Re-establish transport and verify host identity before accepting events.
-- [ ] Query status of every locally pending operation by idempotency key.
-- [ ] Resolve each operation to succeeded, failed, expired, or reconciliation required.
-- [ ] Clear local plaintext inputs and temporary attachment files left by an OS kill.
+- [x] Persist host list, non-secret labels, last snapshot, cursors, pending local operation IDs, and device identity through atomic storage.
+- [x] On launch, render cached state with a clear “reconnecting” marker.
+- [x] Re-establish transport and verify host identity before accepting events.
+- [x] Query status of every locally pending operation by idempotency key.
+- [x] Resolve each operation to succeeded, failed, expired, or reconciliation required.
+- [x] Clear local plaintext inputs and temporary attachment files left by an OS kill.
 - [ ] Re-register push token only after E2EE identity is restored.
 
 ### Connector restart checklist
 
-- [ ] Acquire a single-instance lock without deleting another process's lock blindly.
-- [ ] Open stores read-only first, verify schema and integrity, then migrate one subsystem at a time.
-- [ ] Load desired runtime configuration and operation ledger.
-- [ ] Unlock vault or enter `vault_locked`.
-- [ ] Generate a new connector boot epoch.
+- [x] Acquire a single-instance lock without deleting another process's lock blindly.
+- [x] Open stores read-only first, verify schema and integrity, then migrate one subsystem at a time.
+- [x] Load desired runtime configuration and operation ledger.
+- [x] Unlock vault or enter `vault_locked`.
+- [x] Generate a new connector boot epoch.
 - [ ] Discover existing managed child processes using verifiable PID, executable path, start time, and profile markers; do not trust PID alone.
-- [ ] Probe every source API and obtain authoritative snapshots.
-- [ ] Reconcile pending operations without automatically replaying unknown mutations.
-- [ ] Start event subscriptions only after snapshot baseline identifiers are recorded.
+- [x] Probe every source API and obtain authoritative snapshots.
+- [x] Reconcile pending operations without automatically replaying unknown mutations.
+- [x] Start event subscriptions only after snapshot baseline identifiers are recorded.
 - [ ] Reconnect relay/direct clients and publish a new snapshot boundary.
 
 ### Runtime restart policy
 
 - [ ] Distinguish connector-managed, user-managed, and externally adopted runtimes.
 - [ ] Automatically restart only connector-managed runtimes with restart policy enabled.
-- [ ] Use exponential backoff with jitter and a configurable cap.
-- [ ] Enter `crash_loop` after five failures within ten minutes by default.
+- [x] Use exponential backoff with jitter and a configurable cap.
+- [x] Enter `crash_loop` after five failures within ten minutes by default.
 - [ ] Preserve exit code, signal, stderr tail, source version, and profile ID in redacted diagnostics.
-- [ ] Never include environment values or tokens in captured crash output.
+- [x] Never include environment values or tokens in captured crash output.
 - [ ] Require a fresh health check, account readback, session snapshot, and event subscription before declaring recovery complete.
 
 ### Host reboot and vault unlock
@@ -462,104 +462,104 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Single-runtime switch transaction
 
-- [ ] Create an operation with a unique idempotency key.
-- [ ] Check actor authorization and require biometric step-up on mobile.
-- [ ] Confirm target profile is compatible with runtime/provider.
-- [ ] Resolve the secret handle locally on the target host.
-- [ ] Stage the credential without changing the active assignment.
-- [ ] Validate through a non-destructive supported provider operation.
-- [ ] Inspect active turns.
+- [x] Create an operation with a unique idempotency key.
+- [x] Check actor authorization and require biometric step-up on mobile.
+- [x] Confirm target profile is compatible with runtime/provider.
+- [x] Resolve the secret handle locally on the target host.
+- [x] Stage the credential without changing the active assignment.
+- [x] Validate through a non-destructive supported provider operation.
+- [x] Inspect active turns.
 - [ ] If work is active, default to “apply to new sessions”; require explicit drain/restart confirmation for immediate mode.
-- [ ] Activate the credential through the supported adapter method.
-- [ ] Read back account fingerprint/provider state.
-- [ ] Commit the assignment only after readback matches.
-- [ ] On failure, retain or restore the previous assignment.
-- [ ] Record a redacted audit event and per-host result.
+- [x] Activate the credential through the supported adapter method.
+- [x] Read back account fingerprint/provider state.
+- [x] Commit the assignment only after readback matches.
+- [x] On failure, retain or restore the previous assignment.
+- [x] Record a redacted audit event and per-host result.
 
 ### Bulk switch
 
-- [ ] Build and display an impact plan before dispatch.
-- [ ] List compatible, incompatible, offline, locked, busy, and unmanaged runtimes separately.
-- [ ] Let the user exclude individual targets.
-- [ ] Dispatch one independently idempotent child operation per host/runtime.
-- [ ] Show partial progress and partial failure honestly.
-- [ ] Do not claim global success until every selected target has reconciled.
-- [ ] Offer retry for failed targets with the original operation group ID.
+- [x] Build and display an impact plan before dispatch.
+- [x] List compatible, incompatible, offline, locked, busy, and unmanaged runtimes separately.
+- [x] Let the user exclude individual targets.
+- [x] Dispatch one independently idempotent child operation per host/runtime.
+- [x] Show partial progress and partial failure honestly.
+- [x] Do not claim global success until every selected target has reconciled.
+- [x] Offer retry for failed targets with the original operation group ID.
 - [ ] Never attempt distributed rollback of already successful hosts unless the user explicitly chooses “revert successful targets.”
 
 ### Rotation pools
 
-- [ ] Define ordered pools of compatible credential profiles.
-- [ ] Store pool policy, eligibility, cooldown, host restrictions, and last-selection cursor as non-secret metadata.
+- [x] Define ordered pools of compatible credential profiles.
+- [x] Store pool policy, eligibility, cooldown, host restrictions, and last-selection cursor as non-secret metadata.
 - [ ] Support manual, scheduled, round-robin, and confirmed-failure failover modes.
-- [ ] Classify provider errors into authentication, permission, rate limit, quota, network, runtime crash, and unknown.
+- [x] Classify provider errors into authentication, permission, rate limit, quota, network, runtime crash, malformed response, connector restart, and unknown using typed adapter/source signals.
 - [ ] Trigger automatic failover only from adapter-tested signals, never from matching arbitrary error text alone.
-- [ ] Do not rotate on network failure, connector restart, malformed response, or agent crash.
-- [ ] Apply cooldown and maximum-switch-per-hour limits to prevent rotation storms.
+- [x] Do not rotate on network failure, connector restart, malformed response, or agent crash.
+- [x] Apply cooldown and maximum-switch-per-hour limits to prevent rotation storms.
 - [ ] Notify the user and record the reason for every automatic switch.
-- [ ] Feature-gate quota-triggered rotation until OpenCode Go behavior and applicable terms have been validated.
+- [x] Feature-gate quota-triggered rotation until OpenCode Go behavior and applicable terms have been validated.
 
 ### Credential replacement
 
-- [ ] Add new secret as `staged`.
-- [ ] Validate it without overwriting the current secret.
-- [ ] Atomically point the profile to the new secret version.
-- [ ] Retain the old encrypted version for a short rollback window unless the user requests immediate removal.
+- [x] Add new secret as `staged`.
+- [x] Validate it without overwriting the current secret.
+- [x] Atomically point the profile to the new secret version.
+- [x] Retain the old encrypted version for a short rollback window unless the user requests immediate removal.
 - [ ] Confirm dependent runtimes can authenticate.
 - [ ] Mark old version superseded and securely remove it after the rollback window.
 - [ ] Clearly distinguish local deletion from upstream provider revocation.
 
 ## 13. OpenCode adapter implementation
 
-- [ ] Probe `/global/health` and record server version.
+- [x] Probe `/global/health` and record server version.
 - [ ] Fetch or test against `/doc` OpenAPI during development/compatibility CI.
 - [ ] Use `/project`, `/session`, `/session/status`, session messages, todos, diffs, and permission endpoints for snapshots and controls.
 - [ ] Subscribe to `/event` or `/global/event` SSE and record the initial `server.connected` boundary.
 - [ ] Normalize session, message, part, permission, todo, diff, provider, and error events.
 - [ ] Re-fetch affected source objects after ambiguous or incomplete SSE events.
-- [ ] Use async prompt endpoints when appropriate and correlate returned/source IDs.
-- [ ] Abort through the supported session abort endpoint.
-- [ ] Use provider/auth endpoints and runtime-discovered auth schemas for credential validation and activation.
-- [ ] Never assume a hard-coded OpenCode Go provider ID without verifying it against the installed version.
-- [ ] Support managed fixed host/port launch so the connector can reliably reconnect.
-- [ ] Protect the local OpenCode server with connector-only binding/authentication; do not expose port 4096 publicly.
+- [x] Use async prompt endpoints when appropriate and correlate returned/source IDs.
+- [x] Abort through the supported session abort endpoint.
+- [x] Use provider/auth endpoints and runtime-discovered auth schemas for credential validation and activation.
+- [x] Never assume a hard-coded OpenCode Go provider ID without verifying it against the installed version.
+- [x] Support managed fixed host/port launch so the connector can reliably reconnect.
+- [x] Protect the local OpenCode server with connector-only binding/authentication; do not expose port 4096 publicly.
 - [ ] Test SSE reconnect, duplicate events, missing events, reordered mobile delivery, and source restart.
 
 ### OpenCode restart recovery
 
 - [ ] On health loss, mark subscription stale and stop accepting mutations.
 - [ ] If connector-managed, request graceful shutdown only when necessary; otherwise preserve the process.
-- [ ] Restart with the same isolated profile and project configuration.
+- [x] Restart with the same isolated profile and project configuration.
 - [ ] Wait for health and provider/account validation.
 - [ ] List all sessions and compare source IDs, message counts, statuses, and active permissions to the last snapshot.
 - [ ] Emit synthetic reconciliation events for changes that occurred during downtime.
 - [ ] Expire approvals that no longer exist at the source.
-- [ ] Never recreate or manually modify OpenCode's internal session database.
+- [x] Never recreate or manually modify OpenCode's internal session database.
 
 ## 14. Codex adapter implementation
 
-- [ ] Launch `codex app-server` over stdio under a dedicated managed profile.
-- [ ] Perform initialization and capability negotiation.
-- [ ] Generate/test JSON-RPC schemas for the installed Codex version.
+- [x] Launch `codex app-server` over stdio under a dedicated managed profile.
+- [x] Perform initialization and capability negotiation.
+- [x] Generate/test JSON-RPC schemas for the installed Codex version.
 - [ ] Implement thread list/read/start/resume/fork where supported.
-- [ ] Implement turn start, steer, and interrupt.
+- [x] Implement turn start, steer, and interrupt.
 - [ ] Stream thread, turn, item, message delta, command, file-change, diff, usage, warning, and completion notifications.
-- [ ] Implement server-initiated command/edit approval requests and correlated responses.
-- [ ] Implement account read, login start/cancel, logout, update notifications, and rate-limit reads.
-- [ ] Preserve unknown notifications for compatibility diagnostics without displaying untrusted raw payloads as privileged UI.
-- [ ] Keep stderr tracing separate from JSON-RPC stdout.
+- [x] Implement server-initiated command/edit approval requests and correlated responses.
+- [x] Implement account read, login start/cancel, logout, update notifications, and rate-limit reads.
+- [x] Preserve unknown notifications for compatibility diagnostics without displaying untrusted raw payloads as privileged UI.
+- [x] Keep stderr tracing separate from JSON-RPC stdout.
 - [ ] Apply bounded queues and backpressure; coalesce UI deltas before mobile transmission.
-- [ ] Do not expose App Server directly to the network.
+- [x] Do not expose App Server directly to the network.
 
 ### Codex restart recovery
 
-- [ ] Detect App Server exit and capture only redacted crash metadata.
-- [ ] Mark any in-flight turn `outcome_unknown` until source reconciliation.
-- [ ] Restart the same isolated profile when policy allows.
-- [ ] Reinitialize and list/read persisted threads.
+- [x] Detect App Server exit and capture only redacted crash metadata.
+- [x] Mark any in-flight turn `outcome_unknown` until source reconciliation.
+- [x] Restart the same isolated profile when policy allows.
+- [x] Reinitialize and list/read persisted threads.
 - [ ] Compare known turn and item IDs with authoritative thread state.
 - [ ] Mark an unfinished turn interrupted/failed only when source state establishes that result; otherwise display “connection lost—verify before retry.”
-- [ ] Never automatically resend the last turn.
+- [x] Never automatically resend the last turn.
 - [ ] Re-read account identity and rate limits before accepting new work.
 - [ ] Run a dedicated spike to determine whether a new App Server can attach to a turn owned by the official Codex desktop app.
 
@@ -567,40 +567,40 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Project foundation
 
-- [ ] Create Flutter app with iOS and Android targets.
+- [x] Create Flutter app with iOS and Android targets.
 - [ ] Establish feature-first modules: onboarding, hosts, sessions, approvals, accounts, operations, settings, and diagnostics.
 - [ ] Select one predictable state-management approach and enforce it throughout the app.
 - [ ] Use declarative routing with deep links for push notifications.
-- [ ] Generate Dart protocol types from the canonical schema.
-- [ ] Use an encrypted or non-secret-only local database; keep device keys in native secure storage.
+- [x] Generate Dart protocol types from the canonical schema.
+- [x] Use an encrypted or non-secret-only local database; keep device keys in native secure storage.
 - [ ] Add platform channels/FFI only for security, background, and transport features that cannot be safely implemented in portable Dart.
 
 ### Screens
 
 - [ ] Onboarding and security explanation.
 - [ ] QR host pairing and safety-code verification.
-- [ ] Host fleet overview.
+- [x] Host fleet overview.
 - [ ] Host/runtime/project detail.
-- [ ] Unified OpenCode/Codex session timeline.
-- [ ] Approval inbox.
-- [ ] Credential profiles and validation status.
-- [ ] Assignment matrix by host/runtime/project.
-- [ ] Rotation-pool editor.
-- [ ] Bulk-switch impact preview and progress.
-- [ ] Recovery/degraded-state explanations.
+- [x] Unified OpenCode/Codex session timeline.
+- [x] Approval inbox.
+- [x] Credential profiles and validation status.
+- [x] Assignment matrix by host/runtime/project.
+- [x] Rotation-pool editor.
+- [x] Bulk-switch impact preview and progress.
+- [x] Recovery/degraded-state explanations.
 - [ ] Device/host revocation and security log.
-- [ ] Redacted diagnostics export.
+- [x] Redacted diagnostics export.
 
 ### Mobile lifecycle
 
 - [ ] Handle foreground, background, suspension, process death, network change, and low-memory events.
-- [ ] Persist sync cursor before background suspension.
+- [x] Persist sync cursor before background suspension.
 - [ ] Use push as a wake-up hint, never as authoritative state.
 - [ ] Fetch the current approval from the connector before rendering an action button from a notification.
-- [ ] Prevent double approval from repeated taps or duplicate pushes.
+- [x] Prevent double approval from repeated taps or duplicate pushes.
 - [ ] Test Android process death and iOS background eviction, not only hot reload/restart.
-- [ ] Blur sensitive content in app switcher previews.
-- [ ] Provide an optional app lock with biometric/PIN fallback.
+- [x] Blur sensitive content in app switcher previews.
+- [x] Provide an optional app lock with biometric/PIN fallback.
 
 ### Accessibility and phone ergonomics
 
@@ -637,10 +637,10 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### What to back up
 
 - [ ] Versioned connector configuration with secret references only.
-- [ ] Consistent metadata and audit SQLite snapshots.
-- [ ] Encrypted vault backup only when the user explicitly enables secret recovery.
-- [ ] Device and host registry with revocation state.
-- [ ] No raw OpenCode/Codex live SQLite/WAL/SHM files in Muxport backups.
+- [x] Consistent metadata and audit SQLite snapshots.
+- [x] Encrypted vault backup only when the user explicitly enables secret recovery.
+- [x] Device and host registry with revocation state.
+- [x] No raw OpenCode/Codex live SQLite/WAL/SHM files in Muxport backups.
 - [ ] Use vendor-supported export mechanisms separately for agent-session portability when available.
 
 ### Backup format
@@ -648,8 +648,8 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Authenticated, encrypted, versioned archive.
 - [ ] Manifest containing schema versions, hashes, timestamp, host ID, file sizes, record counts, and encryption parameters.
 - [ ] Recovery key/passphrase generated outside relay control.
-- [ ] Secrets excluded by default; UI must explain the consequence.
-- [ ] Never overwrite older generations automatically.
+- [x] Secrets excluded by default; the backup command and runbook explain the consequence.
+- [x] Never overwrite older generations automatically.
 
 ### Restore procedure
 
@@ -672,22 +672,22 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Unit tests
 
-- [ ] State-machine transition tables.
-- [ ] Assignment precedence.
-- [ ] Rotation selection, cooldown, and storm prevention.
-- [ ] Envelope encryption/decryption and replay rejection.
-- [ ] Command idempotency and deadline handling.
-- [ ] Event ordering, compaction, cursor gaps, and snapshot replacement.
-- [ ] Secret redaction and serialization denial.
-- [ ] Error classification with unknown-safe default.
+- [x] State-machine transition tables.
+- [x] Assignment precedence.
+- [x] Rotation selection, cooldown, and storm prevention.
+- [x] Envelope encryption/decryption and replay rejection.
+- [x] Command idempotency and deadline handling.
+- [x] Event ordering, compaction, cursor gaps, and snapshot replacement.
+- [x] Secret redaction and serialization denial.
+- [x] Error classification with unknown-safe default.
 
 ### Contract tests
 
 - [ ] Supported OpenCode versions against recorded and live API fixtures.
 - [ ] Supported Codex versions against generated schema fixtures.
-- [ ] Golden Rust/Dart protocol messages.
+- [x] Golden Rust/Dart protocol messages.
 - [ ] Capability downgrade and unsupported-version behavior.
-- [ ] Approval request/response correlation.
+- [x] Approval request/response correlation.
 
 ### Recovery and chaos tests
 
@@ -723,8 +723,8 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ## 19. CI/CD and release engineering
 
-- [ ] Pin toolchains and generate lockfiles.
-- [ ] Reproduce protocol generation in CI and fail on uncommitted schema output.
+- [x] Pin toolchains and generate lockfiles.
+- [x] Reproduce protocol generation in CI and fail on uncommitted schema output.
 - [ ] Build/test Rust on Windows, macOS, and Linux.
 - [ ] Build/test Flutter on iOS and Android with physical-device smoke testing before release.
 - [ ] Sign connector binaries, installers, mobile applications, and update manifests.
@@ -752,10 +752,10 @@ Exit: no unresolved blocker to safe managed-session sync, isolated profiles, or 
 ### Phase 1 — Monorepo, protocol, and fake system
 
 - [ ] Scaffold repository and CI.
-- [ ] Define canonical schemas and generated Rust/Dart packages.
+- [x] Define canonical schemas and generated Rust/Dart packages.
 - [ ] Implement fake connector, fake OpenCode/Codex adapters, and deterministic event playback.
 - [ ] Build Flutter navigation and screens against fake data.
-- [ ] Implement operation ledger, event journal, and state-machine tests.
+- [x] Implement operation ledger, event journal, and state-machine tests.
 
 Exit: mobile app can drive a simulated multi-host system through disconnect/reconnect tests.
 
@@ -780,9 +780,9 @@ Exit: one app operates OpenCode and Codex through one normalized UI without losi
 
 ### Phase 4 — Fleet, bulk switching, and rotation
 
-- [ ] Pair multiple hosts.
-- [ ] Implement assignment precedence and operation impact planning.
-- [ ] Implement bulk switching with partial results.
+- [x] Pair multiple hosts.
+- [x] Implement assignment precedence and operation impact planning.
+- [x] Implement bulk switching with partial results.
 - [ ] Implement rotation pools, cooldown, round robin, schedule, and guarded failover.
 - [ ] Add audit log and device/host revocation.
 
@@ -820,7 +820,7 @@ Exit: release criteria in Section 22 pass for two consecutive candidate builds.
 
 ## 21. Operational runbooks
 
-- [ ] Lost phone/device revocation.
+- [x] Lost phone/device revocation.
 - [ ] Host replacement and re-pairing.
 - [ ] Vault unlock failure.
 - [ ] Credential suspected compromised.
@@ -842,19 +842,19 @@ Every incident runbook must preserve facts, hypotheses, unknowns, logs, file has
 - [ ] No mutating command is duplicated across retry/reconnect tests.
 - [ ] Unknown outcomes are displayed as unknown, never guessed successful.
 - [ ] Snapshot reconciliation repairs all tested event gaps.
-- [ ] Active sessions never change credential identity silently.
+- [x] Active sessions never change credential identity silently.
 
 ### Restart resilience
 
 - [ ] Phone, connector, relay, OpenCode, Codex, and host can each restart independently.
 - [ ] Connector recovers desired/observed state and pending-operation status.
-- [ ] Runtime crash loops stop automatically.
+- [x] Runtime crash loops stop automatically.
 - [ ] Interrupted updates roll back to a signed working version.
 
 ### Credential safety
 
 - [ ] Provider secrets are absent from relay storage, mobile cache, logs, analytics, crash reports, push payloads, and repository history.
-- [ ] Bulk switch requires step-up authentication and impact confirmation.
+- [x] Bulk switch requires step-up authentication and impact confirmation.
 - [ ] New credential activation validates before replacing the old assignment.
 - [ ] Vault backup and restore pass an isolated recovery drill.
 

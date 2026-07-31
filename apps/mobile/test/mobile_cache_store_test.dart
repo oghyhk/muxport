@@ -1,0 +1,205 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:muxport_mobile/state/mobile_cache_store.dart';
+import 'package:muxport_mobile/state/mobile_sync_state.dart';
+
+void main() {
+  late Directory temporaryDirectory;
+  late GenerationMobileCacheStore store;
+
+  setUp(() async {
+    temporaryDirectory = await Directory.systemTemp.createTemp(
+      'muxport-mobile-cache-test-',
+    );
+    store = GenerationMobileCacheStore(temporaryDirectory);
+    await store.loadLatest();
+  });
+
+  tearDown(() async {
+    if (await temporaryDirectory.exists()) {
+      await temporaryDirectory.delete(recursive: true);
+    }
+  });
+
+  test('round trip restores host projection as stale', () async {
+    final generation = await store.save(
+      MobileCacheSnapshot(hosts: [_host(session: 'live')]),
+    );
+
+    final loaded = await store.loadLatest();
+
+    expect(generation, 1);
+    expect(loaded.generation, 1);
+    expect(loaded.recoveredFromPreviousGeneration, isFalse);
+    expect(loaded.snapshot.hosts.keys, ['host-1']);
+    expect(loaded.snapshot.hosts['host-1']?.phase, HostSyncPhase.cachedStale);
+    expect(loaded.snapshot.hosts['host-1']?.snapshot['session'], 'live');
+  });
+
+  test(
+    'multiple hosts retain independent identities cursors and state',
+    () async {
+      final first = _host(session: 'first-host-session');
+      final second = _host(
+        hostId: 'host-2',
+        pinnedHostKey: 'second-public-host-key',
+        displayName: 'Second host',
+        session: 'second-host-session',
+        cursor: const SyncCursor(hostEpoch: 'epoch-b', sequence: 19),
+      );
+      await store.save(MobileCacheSnapshot(hosts: [first, second]));
+
+      final hosts = (await store.loadLatest()).snapshot.hosts;
+
+      expect(hosts.keys, ['host-1', 'host-2']);
+      expect(hosts['host-1']?.pinnedHostKey, 'public-host-key');
+      expect(hosts['host-1']?.cursor?.hostEpoch, 'epoch-a');
+      expect(hosts['host-1']?.snapshot['session'], 'first-host-session');
+      expect(hosts['host-2']?.pinnedHostKey, 'second-public-host-key');
+      expect(hosts['host-2']?.cursor?.hostEpoch, 'epoch-b');
+      expect(hosts['host-2']?.cursor?.sequence, 19);
+      expect(hosts['host-2']?.snapshot['session'], 'second-host-session');
+    },
+  );
+
+  test('partial newest generation falls back to last valid cache', () async {
+    await store.save(MobileCacheSnapshot(hosts: [_host(session: 'first')]));
+    await store.save(MobileCacheSnapshot(hosts: [_host(session: 'second')]));
+    final partial = File(
+      '${temporaryDirectory.path}${Platform.pathSeparator}'
+      'host-cache-00000000000000000003.json',
+    );
+    await partial.writeAsString('{"envelopeVersion":1', flush: true);
+
+    final loaded = await store.loadLatest();
+
+    expect(loaded.generation, 2);
+    expect(loaded.recoveredFromPreviousGeneration, isTrue);
+    expect(loaded.snapshot.hosts['host-1']?.snapshot['session'], 'second');
+    expect(await partial.exists(), isTrue);
+  });
+
+  test('pending pairing endpoint and host pin survive restart', () async {
+    final pending = HostSyncState(
+      hostId: 'host-pairing',
+      pinnedHostKey: 'ed25519-host-pin',
+      displayName: 'Pairing host',
+      protocolVersion: mobileProtocolVersion,
+      phase: HostSyncPhase.pairingPending,
+      directAddress: '192.0.2.10',
+      directPort: 45821,
+      pairingPending: true,
+      snapshot: const {},
+      cursor: null,
+      sourceVersions: const {},
+      recentEventIds: const [],
+      pendingOperations: const {},
+    );
+    await store.save(MobileCacheSnapshot(hosts: [pending]));
+
+    final restored = (await store.loadLatest()).snapshot.hosts['host-pairing']!;
+
+    expect(restored.phase, HostSyncPhase.pairingPending);
+    expect(restored.pairingPending, isTrue);
+    expect(restored.directAddress, '192.0.2.10');
+    expect(restored.directPort, 45821);
+    expect(restored.pinnedHostKey, 'ed25519-host-pin');
+    expect(restored.canMutate, isFalse);
+  });
+
+  test('all corrupt generations fail without deleting evidence', () async {
+    final corrupt = File(
+      '${temporaryDirectory.path}${Platform.pathSeparator}'
+      'host-cache-00000000000000000001.json',
+    );
+    await corrupt.writeAsString('not-json', flush: true);
+
+    await expectLater(
+      store.loadLatest(),
+      throwsA(isA<MobileCacheRecoveryException>()),
+    );
+    await expectLater(
+      store.save(MobileCacheSnapshot(hosts: [_host(session: 'replacement')])),
+      throwsA(isA<MobileCacheRecoveryException>()),
+    );
+    expect(await corrupt.exists(), isTrue);
+  });
+
+  test('save requires recovery to run first', () async {
+    final unopenedStore = GenerationMobileCacheStore(temporaryDirectory);
+
+    await expectLater(
+      unopenedStore.save(
+        MobileCacheSnapshot(hosts: [_host(session: 'replacement')]),
+      ),
+      throwsStateError,
+    );
+  });
+
+  test('verified save retains current and previous generation only', () async {
+    await store.save(MobileCacheSnapshot(hosts: [_host(session: 'one')]));
+    await store.save(MobileCacheSnapshot(hosts: [_host(session: 'two')]));
+    await store.save(MobileCacheSnapshot(hosts: [_host(session: 'three')]));
+
+    final files = await temporaryDirectory
+        .list()
+        .where((entity) => entity is File)
+        .toList();
+    final loaded = await store.loadLatest();
+
+    expect(files, hasLength(2));
+    expect(loaded.generation, 3);
+    expect(loaded.snapshot.hosts['host-1']?.snapshot['session'], 'three');
+  });
+
+  test('concurrent saves serialize into unique generations', () async {
+    final generations = await Future.wait([
+      store.save(MobileCacheSnapshot(hosts: [_host(session: 'one')])),
+      store.save(MobileCacheSnapshot(hosts: [_host(session: 'two')])),
+      store.save(MobileCacheSnapshot(hosts: [_host(session: 'three')])),
+    ]);
+
+    final loaded = await store.loadLatest();
+
+    expect(generations, [1, 2, 3]);
+    expect(loaded.generation, 3);
+    expect(loaded.snapshot.hosts['host-1']?.snapshot['session'], 'three');
+  });
+
+  test('secret-shaped fields are rejected before writing', () async {
+    final unsafeHost = _host(
+      session: 'cached',
+      extraSnapshot: const {'api_key': 'must-not-reach-disk'},
+    );
+
+    await expectLater(
+      store.save(MobileCacheSnapshot(hosts: [unsafeHost])),
+      throwsA(isA<FormatException>()),
+    );
+
+    expect(await temporaryDirectory.list().isEmpty, isTrue);
+  });
+}
+
+HostSyncState _host({
+  String hostId = 'host-1',
+  String pinnedHostKey = 'public-host-key',
+  String displayName = 'Development host',
+  required String session,
+  SyncCursor cursor = const SyncCursor(hostEpoch: 'epoch-a', sequence: 4),
+  Map<String, Object?> extraSnapshot = const {},
+}) {
+  return HostSyncState(
+    hostId: hostId,
+    pinnedHostKey: pinnedHostKey,
+    displayName: displayName,
+    protocolVersion: mobileProtocolVersion,
+    phase: HostSyncPhase.synchronized,
+    snapshot: {'session': session, ...extraSnapshot},
+    cursor: cursor,
+    sourceVersions: const {'session-1': 1},
+    recentEventIds: const [],
+    pendingOperations: const {},
+  );
+}

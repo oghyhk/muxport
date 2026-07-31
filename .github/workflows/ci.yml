@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.85.1
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-targets
+
+  flutter:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: 3.44.7
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Verify generated protocol
+        run: |
+          pwsh ../../scripts/generate_protocol.ps1
+          git diff --exit-code -- ../../protocol/schema ../../packages/flutter_protocol/lib/src/generated
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build apk --debug

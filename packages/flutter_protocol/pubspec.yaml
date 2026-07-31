@@ -1,0 +1,12 @@
+name: flutter_protocol
+description: Generated Dart protocol models for Muxport.
+version: 0.1.0
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  fixnum: ^1.1.1
+  protobuf: ^6.0.0
+
+dev_dependencies:
+  test: ^1.24.0

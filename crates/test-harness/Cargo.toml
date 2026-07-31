@@ -1,0 +1,20 @@
+[package]
+name = "test-harness"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+adapter-api = { path = "../adapter-api" }
+muxport-protocol = { path = "../muxport-protocol" }
+muxport-crypto = { path = "../muxport-crypto" }
+connector-core = { path = "../connector-core" }
+event-journal = { path = "../event-journal" }
+credential-vault = { path = "../credential-vault" }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost = { workspace = true }

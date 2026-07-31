@@ -1,0 +1,13 @@
+[package]
+name = "mobile-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+muxport-protocol = { path = "../muxport-protocol" }
+muxport-crypto = { path = "../muxport-crypto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
