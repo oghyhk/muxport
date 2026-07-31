@@ -463,7 +463,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 ### Single-runtime switch transaction
 
 - [x] Create an operation with a unique idempotency key.
-- [ ] Check actor authorization and require biometric step-up on mobile.
+- [x] Check actor authorization and require biometric step-up on mobile.
 - [x] Confirm target profile is compatible with runtime/provider.
 - [x] Resolve the secret handle locally on the target host.
 - [x] Stage the credential without changing the active assignment.
