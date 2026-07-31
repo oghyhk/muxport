@@ -437,7 +437,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Discover existing managed child processes using verifiable PID, executable path, start time, and profile markers; do not trust PID alone.
 - [ ] Probe every source API and obtain authoritative snapshots.
 - [x] Reconcile pending operations without automatically replaying unknown mutations.
-- [ ] Start event subscriptions only after snapshot baseline identifiers are recorded.
+- [x] Start event subscriptions only after snapshot baseline identifiers are recorded.
 - [ ] Reconnect relay/direct clients and publish a new snapshot boundary.
 
 ### Runtime restart policy

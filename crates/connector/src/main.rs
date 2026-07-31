@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -189,6 +189,7 @@ enum SourceUpdate {
         config: RuntimeConfig,
         projects: Vec<ProjectInfo>,
         sessions: Vec<SessionSummary>,
+        persisted: oneshot::Sender<Result<(), String>>,
     },
     Event {
         config: RuntimeConfig,
@@ -571,25 +572,35 @@ fn apply_source_update(
             config,
             projects,
             sessions,
+            persisted,
         } => {
-            mirror.reconcile_runtime(
-                &config.runtime_id,
-                config.agent_type,
-                &config.runtime_name,
-                projects,
-                sessions,
-            );
-            mirror.set_runtime_active_profile(
-                &config.runtime_id,
-                &config.credential_profile_id,
-            );
-            mirror.set_connector_state(ConnectorState::Degraded);
-            mirror.save_snapshot(journal)?;
-            info!(
-                runtime_id = %config.runtime_id,
-                runtime = %config.runtime_name,
-                "runtime mirror synchronized"
-            );
+            let result: Result<(), event_journal::JournalError> = (|| {
+                mirror.reconcile_runtime(
+                    &config.runtime_id,
+                    config.agent_type,
+                    &config.runtime_name,
+                    projects,
+                    sessions,
+                );
+                mirror.set_runtime_active_profile(
+                    &config.runtime_id,
+                    &config.credential_profile_id,
+                );
+                mirror.set_connector_state(ConnectorState::Degraded);
+                mirror.save_snapshot(journal)?;
+                info!(
+                    runtime_id = %config.runtime_id,
+                    runtime = %config.runtime_name,
+                    "runtime mirror synchronized and durably baselined"
+                );
+                Ok(())
+            })();
+            let acknowledgement = result
+                .as_ref()
+                .map(|_| ())
+                .map_err(ToString::to_string);
+            let _ = persisted.send(acknowledgement);
+            result?;
         }
         SourceUpdate::Event { config, event } => {
             let is_delta = matches!(
@@ -778,14 +789,28 @@ async fn refresh_runtime_snapshot(
     adapter.probe().await?;
     let projects = adapter.discover_projects().await?;
     let sessions = adapter.list_sessions().await?;
+    let (persisted, acknowledgement) = oneshot::channel();
     updates
         .send(SourceUpdate::Snapshot {
             config: config.clone(),
             projects,
             sessions,
+            persisted,
         })
         .await
-        .map_err(|_| AdapterError::Internal("connector update receiver closed".into()))
+        .map_err(|_| AdapterError::Internal("connector update receiver closed".into()))?;
+    acknowledgement
+        .await
+        .map_err(|_| {
+            AdapterError::Internal(
+                "connector closed before persisting runtime baseline".into(),
+            )
+        })?
+        .map_err(|error| {
+            AdapterError::Internal(format!(
+                "connector could not persist runtime baseline: {error}"
+            ))
+        })
 }
 
 fn record_degraded(
@@ -1749,7 +1774,7 @@ mod tests {
 
     #[tokio::test]
     async fn synchronization_brackets_subscription_with_snapshots() {
-        let adapter = DeterministicFakeAdapter::new(AgentType::Codex);
+        let adapter = Arc::new(DeterministicFakeAdapter::new(AgentType::Codex));
         let config = RuntimeConfig {
             runtime_id: "codex-test".into(),
             agent_type: AgentType::Codex,
@@ -1758,9 +1783,13 @@ mod tests {
             managed_opencode: None,
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(4);
-        let mut events = synchronize_runtime(&adapter, &config, &updates_tx)
-            .await
-            .unwrap();
+        let synchronization = tokio::spawn({
+            let adapter = Arc::clone(&adapter);
+            let config = config.clone();
+            async move {
+                synchronize_runtime(adapter.as_ref(), &config, &updates_tx).await
+            }
+        });
 
         for _ in 0..2 {
             match updates_rx.recv().await.unwrap() {
@@ -1768,14 +1797,17 @@ mod tests {
                     config,
                     projects,
                     sessions,
+                    persisted,
                 } => {
                     assert_eq!(config.runtime_id, "codex-test");
                     assert_eq!(projects.len(), 1);
                     assert_eq!(sessions.len(), 1);
+                    persisted.send(Ok(())).unwrap();
                 }
                 _ => panic!("synchronization emitted a non-snapshot baseline"),
             }
         }
+        let mut events = synchronization.await.unwrap().unwrap();
         assert!(events.next().await.is_none());
     }
 
