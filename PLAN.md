@@ -584,7 +584,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [x] Unified OpenCode/Codex session timeline.
 - [x] Approval inbox.
 - [x] Credential profiles and validation status.
-- [ ] Assignment matrix by host/runtime/project.
+- [x] Assignment matrix by host/runtime/project.
 - [ ] Rotation-pool editor.
 - [ ] Bulk-switch impact preview and progress.
 - [x] Recovery/degraded-state explanations.

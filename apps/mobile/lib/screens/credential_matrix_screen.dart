@@ -46,6 +46,7 @@ class CredentialMatrixScreen extends StatelessWidget {
         left.profile['displayName'],
       ).compareTo(_string(right.profile['displayName'])),
     );
+    final assignments = _assignmentRows(hosts);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Account Profiles & Assignments')),
@@ -69,13 +70,19 @@ class CredentialMatrixScreen extends StatelessWidget {
             )
           : ListView.separated(
               padding: const EdgeInsets.all(16),
-              itemCount: profiles.length,
+              itemCount: profiles.length + 1,
               separatorBuilder: (_, _) => const SizedBox(height: 8),
               itemBuilder: (context, index) {
-                final item = profiles[index];
+                if (index == 0) {
+                  return _AssignmentMatrixCard(rows: assignments);
+                }
+                final item = profiles[index - 1];
                 final profile = item.profile;
                 final profileId = _string(profile['profileId']);
-                final assignments = _runtimeAssignments(item.host, profileId);
+                final activeAssignments = _runtimeAssignments(
+                  item.host,
+                  profileId,
+                );
                 final status = _credentialStatus(profile['status']);
                 return Card(
                   child: ListTile(
@@ -100,8 +107,8 @@ class CredentialMatrixScreen extends StatelessWidget {
                         ),
                         _maskedFingerprint(profile['accountFingerprint']),
                         _lastValidated(profile['lastValidatedAtMs']),
-                        if (assignments.isNotEmpty)
-                          'assigned to ${assignments.join(', ')}',
+                        if (activeAssignments.isNotEmpty)
+                          'assigned to ${activeAssignments.join(', ')}',
                       ].join(' • '),
                     ),
                     onTap: onAssignCredential == null || !item.host.canMutate
@@ -145,7 +152,7 @@ class CredentialMatrixScreen extends StatelessWidget {
                             },
                             itemBuilder: (context) => [
                               if (onRotateCredential != null &&
-                                  assignments.isNotEmpty)
+                                  activeAssignments.isNotEmpty)
                                 const PopupMenuItem(
                                   value: 'rotate',
                                   child: Text('Rotate an assigned runtime'),
@@ -440,6 +447,105 @@ class CredentialMatrixScreen extends StatelessWidget {
       controller.dispose();
     }
   }
+}
+
+List<_AssignmentRow> _assignmentRows(Iterable<HostSyncState> hosts) {
+  final rows = <_AssignmentRow>[];
+  for (final host in hosts) {
+    for (final raw in host.snapshot['runtimes'] as List? ?? const []) {
+      if (raw is! Map) continue;
+      final runtime = Map<String, Object?>.from(raw);
+      final runtimeId = _string(runtime['runtimeId']);
+      if (runtimeId.isEmpty) continue;
+      final projects = <String>[];
+      for (final rawPath in runtime['projectPaths'] as List? ?? const []) {
+        final path = _string(rawPath);
+        if (path.isNotEmpty) projects.add(path);
+      }
+      rows.add(
+        _AssignmentRow(
+          hostName: host.displayName,
+          runtimeName: _string(runtime['name'], fallback: runtimeId),
+          profileId: _string(runtime['activeCredentialProfileId']),
+          projects: List.unmodifiable(projects),
+          stale: !host.canMutate,
+        ),
+      );
+    }
+  }
+  rows.sort(
+    (left, right) => '${left.hostName}/${left.runtimeName}'.compareTo(
+      '${right.hostName}/${right.runtimeName}',
+    ),
+  );
+  return rows;
+}
+
+class _AssignmentMatrixCard extends StatelessWidget {
+  const _AssignmentMatrixCard({required this.rows});
+
+  final List<_AssignmentRow> rows;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Runtime assignment matrix',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Assignments affect new sessions only. Project paths are read-only source metadata.',
+            ),
+            const SizedBox(height: 8),
+            if (rows.isEmpty)
+              const Text('No runtime assignments are in the latest snapshots.')
+            else
+              for (final row in rows)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: const Icon(Icons.terminal),
+                  title: Text('${row.hostName} · ${row.runtimeName}'),
+                  subtitle: Text(
+                    [
+                      'profile ${row.profileId.isEmpty ? 'none' : row.profileId}',
+                      if (row.projects.isEmpty)
+                        'no known project'
+                      else
+                        row.projects.join(', '),
+                      if (row.stale) 'STALE',
+                    ].join(' • '),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AssignmentRow {
+  const _AssignmentRow({
+    required this.hostName,
+    required this.runtimeName,
+    required this.profileId,
+    required this.projects,
+    required this.stale,
+  });
+
+  final String hostName;
+  final String runtimeName;
+  final String profileId;
+  final List<String> projects;
+  final bool stale;
 }
 
 List<String> _runtimeAssignments(HostSyncState host, String profileId) {
