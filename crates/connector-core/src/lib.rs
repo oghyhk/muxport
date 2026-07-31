@@ -1030,6 +1030,14 @@ impl CommandLedger {
         &self.command_audit
     }
 
+    /// Returns the most recent redacted records in chronological order with a
+    /// caller-controlled hard cap to keep transport responses bounded.
+    pub fn recent_command_audit_records(&self, limit: usize) -> Vec<&CommandAuditRecord> {
+        let limit = limit.clamp(1, 100);
+        let first = self.command_audit.len().saturating_sub(limit);
+        self.command_audit[first..].iter().collect()
+    }
+
     pub fn select_rotation(
         &mut self,
         pool_id: &str,

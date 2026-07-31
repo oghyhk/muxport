@@ -119,7 +119,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('NOT CONNECTED'), findsOneWidget);
-    expect(find.text('NOT RUN'), findsOneWidget);
+    expect(find.text('NO AUTHENTICATED HOST'), findsOneWidget);
     expect(find.textContaining('ONLINE'), findsNothing);
     expect(find.textContaining('0 SECRETS'), findsNothing);
   });

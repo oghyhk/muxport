@@ -388,6 +388,7 @@ enum Command_Inner {
   provisionCredential,
   listRotationPools,
   upsertRotationPool,
+  listCommandAudit,
   notSet
 }
 
@@ -408,6 +409,7 @@ class Command extends $pb.GeneratedMessage {
     ProvisionCredentialCmd? provisionCredential,
     ListRotationPoolsCmd? listRotationPools,
     UpsertRotationPoolCmd? upsertRotationPool,
+    ListCommandAuditCmd? listCommandAudit,
   }) {
     final result = create();
     if (commandId != null) result.commandId = commandId;
@@ -426,6 +428,7 @@ class Command extends $pb.GeneratedMessage {
     if (listRotationPools != null) result.listRotationPools = listRotationPools;
     if (upsertRotationPool != null)
       result.upsertRotationPool = upsertRotationPool;
+    if (listCommandAudit != null) result.listCommandAudit = listCommandAudit;
     return result;
   }
 
@@ -451,6 +454,7 @@ class Command extends $pb.GeneratedMessage {
     12: Command_Inner.provisionCredential,
     13: Command_Inner.listRotationPools,
     14: Command_Inner.upsertRotationPool,
+    15: Command_Inner.listCommandAudit,
     0: Command_Inner.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -458,7 +462,7 @@ class Command extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
       createEmptyInstance: create)
-    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
     ..aOS(1, _omitFieldNames ? '' : 'commandId')
     ..aInt64(2, _omitFieldNames ? '' : 'deadlineMs')
     ..aOM<StartSessionCmd>(3, _omitFieldNames ? '' : 'startSession',
@@ -487,6 +491,8 @@ class Command extends $pb.GeneratedMessage {
     ..aOM<UpsertRotationPoolCmd>(
         14, _omitFieldNames ? '' : 'upsertRotationPool',
         subBuilder: UpsertRotationPoolCmd.create)
+    ..aOM<ListCommandAuditCmd>(15, _omitFieldNames ? '' : 'listCommandAudit',
+        subBuilder: ListCommandAuditCmd.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -519,6 +525,7 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(12)
   @$pb.TagNumber(13)
   @$pb.TagNumber(14)
+  @$pb.TagNumber(15)
   Command_Inner whichInner() => _Command_InnerByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -532,6 +539,7 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(12)
   @$pb.TagNumber(13)
   @$pb.TagNumber(14)
+  @$pb.TagNumber(15)
   void clearInner() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -684,6 +692,17 @@ class Command extends $pb.GeneratedMessage {
   void clearUpsertRotationPool() => $_clearField(14);
   @$pb.TagNumber(14)
   UpsertRotationPoolCmd ensureUpsertRotationPool() => $_ensure(13);
+
+  @$pb.TagNumber(15)
+  ListCommandAuditCmd get listCommandAudit => $_getN(14);
+  @$pb.TagNumber(15)
+  set listCommandAudit(ListCommandAuditCmd value) => $_setField(15, value);
+  @$pb.TagNumber(15)
+  $core.bool hasListCommandAudit() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearListCommandAudit() => $_clearField(15);
+  @$pb.TagNumber(15)
+  ListCommandAuditCmd ensureListCommandAudit() => $_ensure(14);
 }
 
 class StartSessionCmd extends $pb.GeneratedMessage {
@@ -1542,6 +1561,63 @@ class UpsertRotationPoolCmd extends $pb.GeneratedMessage {
   $core.bool hasQuotaFailoverEnabled() => $_has(7);
   @$pb.TagNumber(8)
   void clearQuotaFailoverEnabled() => $_clearField(8);
+}
+
+/// Reads the connector-local, redacted control-plane audit history. Records
+/// never contain command payloads, provider credential values, or raw errors.
+class ListCommandAuditCmd extends $pb.GeneratedMessage {
+  factory ListCommandAuditCmd({
+    $core.int? limit,
+  }) {
+    final result = create();
+    if (limit != null) result.limit = limit;
+    return result;
+  }
+
+  ListCommandAuditCmd._();
+
+  factory ListCommandAuditCmd.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListCommandAuditCmd.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListCommandAuditCmd',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
+      createEmptyInstance: create)
+    ..aI(1, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListCommandAuditCmd clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListCommandAuditCmd copyWith(void Function(ListCommandAuditCmd) updates) =>
+      super.copyWith((message) => updates(message as ListCommandAuditCmd))
+          as ListCommandAuditCmd;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListCommandAuditCmd create() => ListCommandAuditCmd._();
+  @$core.override
+  ListCommandAuditCmd createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ListCommandAuditCmd getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListCommandAuditCmd>(create);
+  static ListCommandAuditCmd? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get limit => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set limit($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasLimit() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearLimit() => $_clearField(1);
 }
 
 /// The provider secret is never a plaintext command field. `secret_ciphertext`

@@ -368,6 +368,15 @@ const Command$json = {
       '9': 0,
       '10': 'upsertRotationPool'
     },
+    {
+      '1': 'list_command_audit',
+      '3': 15,
+      '4': 1,
+      '5': 11,
+      '6': '.muxport.protocol.v1.ListCommandAuditCmd',
+      '9': 0,
+      '10': 'listCommandAudit'
+    },
   ],
   '8': [
     {'1': 'inner'},
@@ -394,7 +403,9 @@ final $typed_data.Uint8List commandDescriptor = $convert.base64Decode(
     'lzaW9uQ3JlZGVudGlhbBJbChNsaXN0X3JvdGF0aW9uX3Bvb2xzGA0gASgLMikubXV4cG9ydC5w'
     'cm90b2NvbC52MS5MaXN0Um90YXRpb25Qb29sc0NtZEgAUhFsaXN0Um90YXRpb25Qb29scxJeCh'
     'R1cHNlcnRfcm90YXRpb25fcG9vbBgOIAEoCzIqLm11eHBvcnQucHJvdG9jb2wudjEuVXBzZXJ0'
-    'Um90YXRpb25Qb29sQ21kSABSEnVwc2VydFJvdGF0aW9uUG9vbEIHCgVpbm5lcg==');
+    'Um90YXRpb25Qb29sQ21kSABSEnVwc2VydFJvdGF0aW9uUG9vbBJYChJsaXN0X2NvbW1hbmRfYX'
+    'VkaXQYDyABKAsyKC5tdXhwb3J0LnByb3RvY29sLnYxLkxpc3RDb21tYW5kQXVkaXRDbWRIAFIQ'
+    'bGlzdENvbW1hbmRBdWRpdEIHCgVpbm5lcg==');
 
 @$core.Deprecated('Use startSessionCmdDescriptor instead')
 const StartSessionCmd$json = {
@@ -593,6 +604,19 @@ final $typed_data.Uint8List upsertRotationPoolCmdDescriptor = $convert.base64Dec
     'ABKANSCmNvb2xkb3duTXMSMQoVbWF4X3N3aXRjaGVzX3Blcl9ob3VyGAYgASgNUhJtYXhTd2l0'
     'Y2hlc1BlckhvdXISKAoQYWxsb3dlZF9ob3N0X2lkcxgHIAMoCVIOYWxsb3dlZEhvc3RJZHMSNA'
     'oWcXVvdGFfZmFpbG92ZXJfZW5hYmxlZBgIIAEoCFIUcXVvdGFGYWlsb3ZlckVuYWJsZWQ=');
+
+@$core.Deprecated('Use listCommandAuditCmdDescriptor instead')
+const ListCommandAuditCmd$json = {
+  '1': 'ListCommandAuditCmd',
+  '2': [
+    {'1': 'limit', '3': 1, '4': 1, '5': 13, '10': 'limit'},
+  ],
+};
+
+/// Descriptor for `ListCommandAuditCmd`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listCommandAuditCmdDescriptor =
+    $convert.base64Decode(
+        'ChNMaXN0Q29tbWFuZEF1ZGl0Q21kEhQKBWxpbWl0GAEgASgNUgVsaW1pdA==');
 
 @$core.Deprecated('Use provisionCredentialCmdDescriptor instead')
 const ProvisionCredentialCmd$json = {

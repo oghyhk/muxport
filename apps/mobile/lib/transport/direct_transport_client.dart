@@ -926,6 +926,30 @@ class AuthenticatedDirectConnection {
     );
   }
 
+  /// Reads a bounded, already-redacted connector audit history. It never
+  /// returns command bodies, provider credentials, project paths, or raw
+  /// source errors.
+  Future<wire.CommandResult> listCommandAudit({
+    required String commandId,
+    required String idempotencyKey,
+    int limit = 50,
+    Duration deadline = const Duration(seconds: 30),
+  }) {
+    if (deadline <= Duration.zero || limit < 1 || limit > 100) {
+      throw const DirectTransportProtocolException(
+        'command audit query parameters are invalid',
+      );
+    }
+    return sendCommand(
+      wire.Command(
+        commandId: commandId,
+        deadlineMs: Int64(DateTime.now().add(deadline).millisecondsSinceEpoch),
+        listCommandAudit: wire.ListCommandAuditCmd(limit: limit),
+      ),
+      idempotencyKey: idempotencyKey,
+    );
+  }
+
   /// Writes non-secret rotation policy after the connector validates every
   /// profile against its local vault. This method cannot carry credential
   /// material or force an active runtime to switch.

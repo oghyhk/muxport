@@ -17,6 +17,7 @@ import 'screens/credential_provisioning_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'state/app_bootstrap.dart';
 import 'state/bulk_switch_plan.dart';
+import 'state/command_audit.dart';
 import 'state/host_sync_orchestrator.dart';
 import 'state/mobile_cache_store.dart';
 import 'state/mobile_lifecycle.dart';
@@ -303,7 +304,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onListRotationPools: _canAssignCredential ? _listRotationPools : null,
         onUpsertRotationPool: _canAssignCredential ? _upsertRotationPool : null,
       ),
-      DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
+      DiagnosticsScreen(
+        bootstrap: widget.bootstrap,
+        hosts: _hosts.values,
+        onLoadCommandAudit: widget.bootstrap.canAuthenticateTransport
+            ? _listCommandAudit
+            : null,
+      ),
     ];
     return Scaffold(
       body: IndexedStack(index: _currentIndex, children: screens),
@@ -751,6 +758,49 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         for (final raw in decoded['pools']! as List)
           if (raw is Map)
             RotationPoolSummary.fromJson(Map<String, Object?>.from(raw)),
+      ];
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  Future<List<CommandAuditEntry>> _listCommandAudit(HostSyncState host) async {
+    final identity = widget.bootstrap.identity;
+    if (!host.canMutate ||
+        identity == null ||
+        host.directAddress == null ||
+        host.directPort == null) {
+      throw StateError('command audit is not safely routable for this host');
+    }
+    final commandId =
+        'list-command-audit-${identity.deviceId}-${DateTime.now().microsecondsSinceEpoch}';
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.listCommandAudit(
+        commandId: commandId,
+        idempotencyKey: commandId,
+      );
+      if (!result.success ||
+          result.state != wire.RemoteOpState.REMOTE_OP_STATE_SUCCEEDED) {
+        throw StateError('connector did not confirm the audit history');
+      }
+      final decoded = jsonDecode(result.resultJson);
+      if (decoded is! Map || decoded['records'] is! List) {
+        throw const FormatException('connector returned invalid audit history');
+      }
+      return [
+        for (final raw in decoded['records']! as List)
+          if (raw is Map)
+            CommandAuditEntry.fromJson(Map<String, Object?>.from(raw)),
       ];
     } finally {
       await connection?.close();

@@ -111,6 +111,7 @@ message Command {
     ProvisionCredentialCmd provision_credential = 12;
     ListRotationPoolsCmd list_rotation_pools = 13;
     UpsertRotationPoolCmd upsert_rotation_pool = 14;
+    ListCommandAuditCmd list_command_audit = 15;
   }
 }
 
@@ -179,6 +180,12 @@ message UpsertRotationPoolCmd {
   uint32 max_switches_per_hour = 6;
   repeated string allowed_host_ids = 7;
   bool quota_failover_enabled = 8;
+}
+
+// Reads the connector-local, redacted control-plane audit history. Records
+// never contain command payloads, provider credential values, or raw errors.
+message ListCommandAuditCmd {
+  uint32 limit = 1;
 }
 
 // The provider secret is never a plaintext command field. `secret_ciphertext`

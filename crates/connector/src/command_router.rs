@@ -701,6 +701,20 @@ impl CommandRouter {
                     .collect::<Vec<_>>();
                 Ok(json!({"pools": pools}))
             }
+            Some(command::Inner::ListCommandAudit(request)) => {
+                let limit = if request.limit == 0 {
+                    50
+                } else {
+                    request.limit.min(100) as usize
+                };
+                let ledger = self.ledger.lock().await;
+                let records = ledger
+                    .recent_command_audit_records(limit)
+                    .into_iter()
+                    .map(command_audit_json)
+                    .collect::<Vec<_>>();
+                Ok(json!({"records": records}))
+            }
             Some(command::Inner::UpsertRotationPool(request)) => {
                 let mode = parse_rotation_mode(&request.mode)?;
                 if request.pool_id.trim().is_empty()
@@ -1000,6 +1014,16 @@ fn command_audit_action_target(command: &Command) -> (&'static str, String) {
     }
 }
 
+fn command_audit_json(record: &CommandAuditRecord) -> Value {
+    json!({
+        "actorFingerprint": audit_key(&record.actor),
+        "action": record.action,
+        "target": record.target,
+        "outcome": record.outcome,
+        "completedAtMs": record.completed_at_ms,
+    })
+}
+
 fn remote_op_state_name(value: i32) -> &'static str {
     match RemoteOpState::try_from(value).ok() {
         Some(RemoteOpState::Created) => "created",
@@ -1123,8 +1147,9 @@ mod tests {
     use credential_vault::{CredentialEnrollment, KeyEncryptionKey};
     use muxport_crypto::{secret_provisioning_aad, SecretProvisioningKey};
     use muxport_protocol::{
-        AgentType, ChangeAssignmentCmd, Command, ListRotationPoolsCmd, QueryOperationCmd,
-        RotateCredentialCmd, StartSessionCmd, ProvisionCredentialCmd, UpsertRotationPoolCmd,
+        AgentType, ChangeAssignmentCmd, Command, ListCommandAuditCmd, ListRotationPoolsCmd,
+        QueryOperationCmd, RotateCredentialCmd, StartSessionCmd, ProvisionCredentialCmd,
+        UpsertRotationPoolCmd,
     };
     use std::sync::Arc;
     use test_harness::DeterministicFakeAdapter;
@@ -1200,6 +1225,14 @@ mod tests {
             command_id: "list-rotation-pools-command-1".into(),
             deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
             inner: Some(command::Inner::ListRotationPools(ListRotationPoolsCmd {})),
+        }
+    }
+
+    fn list_command_audit_command() -> Command {
+        Command {
+            command_id: "list-command-audit-command-1".into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::ListCommandAudit(ListCommandAuditCmd { limit: 20 })),
         }
     }
 
@@ -1631,6 +1664,19 @@ mod tests {
         assert_eq!(audit[0].action, "upsert_rotation_pool");
         assert_eq!(audit[1].action, "list_rotation_pools");
         assert!(!format!("{audit:?}").contains("secret-go-a"));
+        let audit_result = router
+            .dispatch("rotation-policy-audit", &list_command_audit_command())
+            .await
+            .unwrap();
+        assert!(audit_result.success, "{}", audit_result.error_message);
+        let audit_json: Value = serde_json::from_str(&audit_result.result_json).unwrap();
+        assert_eq!(audit_json["records"].as_array().unwrap().len(), 2);
+        assert_eq!(audit_json["records"][0]["action"], "upsert_rotation_pool");
+        assert!(audit_json["records"][0]["actorFingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("audit:"));
+        assert!(!audit_result.result_json.contains("connector-local"));
 
         let rejected = router
             .dispatch(

@@ -2,23 +2,64 @@ import 'package:flutter/material.dart';
 
 import '../diagnostics/redacted_diagnostic_export.dart';
 import '../state/app_bootstrap.dart';
+import '../state/command_audit.dart';
 import '../state/mobile_sync_state.dart';
 
-class DiagnosticsScreen extends StatelessWidget {
+class DiagnosticsScreen extends StatefulWidget {
   const DiagnosticsScreen({
     required this.bootstrap,
     required this.hosts,
+    this.onLoadCommandAudit,
     super.key,
   });
 
   final AppBootstrapState bootstrap;
   final Iterable<HostSyncState> hosts;
+  final Future<List<CommandAuditEntry>> Function(HostSyncState host)?
+  onLoadCommandAudit;
+
+  @override
+  State<DiagnosticsScreen> createState() => _DiagnosticsScreenState();
+}
+
+class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
+  final Map<String, List<CommandAuditEntry>> _auditByHost = {};
+  var _auditLoading = false;
+  var _auditLoadFailed = false;
+
+  Future<void> _loadCommandAudit() async {
+    final load = widget.onLoadCommandAudit;
+    if (load == null || _auditLoading) return;
+    final hosts = widget.hosts.where((host) => host.canMutate).toList();
+    if (hosts.isEmpty) return;
+    setState(() {
+      _auditLoading = true;
+      _auditLoadFailed = false;
+    });
+    final next = <String, List<CommandAuditEntry>>{};
+    var failed = false;
+    for (final host in hosts) {
+      try {
+        next[host.hostId] = await load(host);
+      } on Object {
+        failed = true;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _auditByHost
+        ..clear()
+        ..addAll(next);
+      _auditLoading = false;
+      _auditLoadFailed = failed;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final identityReady =
-        bootstrap.identityStatus == IdentityBootstrapStatus.ready;
-    final syncHealthy = hosts.any(
+        widget.bootstrap.identityStatus == IdentityBootstrapStatus.ready;
+    final syncHealthy = widget.hosts.any(
       (host) => host.phase == HostSyncPhase.synchronized,
     );
 
@@ -40,15 +81,16 @@ class DiagnosticsScreen extends StatelessWidget {
                   const SizedBox(height: 12),
                   _HealthRow(
                     title: 'Host cache',
-                    value: _cacheLabel(bootstrap.cacheStatus),
+                    value: _cacheLabel(widget.bootstrap.cacheStatus),
                     healthy:
-                        bootstrap.cacheStatus == CacheBootstrapStatus.ready ||
-                        bootstrap.cacheStatus ==
+                        widget.bootstrap.cacheStatus ==
+                            CacheBootstrapStatus.ready ||
+                        widget.bootstrap.cacheStatus ==
                             CacheBootstrapStatus.recoveredPreviousGeneration,
                   ),
                   _HealthRow(
                     title: 'Cache generation',
-                    value: bootstrap.cacheGeneration.toString(),
+                    value: widget.bootstrap.cacheGeneration.toString(),
                     healthy: true,
                   ),
                   _HealthRow(
@@ -63,10 +105,10 @@ class DiagnosticsScreen extends StatelessWidget {
                         : 'NOT CONNECTED',
                     healthy: syncHealthy,
                   ),
-                  const _HealthRow(
-                    title: 'Secret leak audit',
-                    value: 'NOT RUN',
-                    healthy: false,
+                  _HealthRow(
+                    title: 'Connector security log',
+                    value: _auditStatus(),
+                    healthy: !_auditLoadFailed,
                   ),
                 ],
               ),
@@ -74,9 +116,25 @@ class DiagnosticsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           FilledButton.icon(
+            icon: _auditLoading
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.history),
+            label: const Text('Refresh connector security log'),
+            onPressed: widget.onLoadCommandAudit == null || _auditLoading
+                ? null
+                : _loadCommandAudit,
+          ),
+          for (final host in widget.hosts)
+            if (_auditByHost.containsKey(host.hostId))
+              _AuditHostCard(host: host, entries: _auditByHost[host.hostId]!),
+          const SizedBox(height: 16),
+          FilledButton.icon(
             icon: const Icon(Icons.download),
             label: const Text('Export redacted diagnostics'),
-            onPressed: bootstrap.sensitiveArtifactStore == null
+            onPressed: widget.bootstrap.sensitiveArtifactStore == null
                 ? null
                 : () => _confirmAndExport(context),
           ),
@@ -86,7 +144,7 @@ class DiagnosticsScreen extends StatelessWidget {
   }
 
   Future<void> _confirmAndExport(BuildContext context) async {
-    final store = bootstrap.sensitiveArtifactStore;
+    final store = widget.bootstrap.sensitiveArtifactStore;
     if (store == null) {
       return;
     }
@@ -126,7 +184,7 @@ class DiagnosticsScreen extends StatelessWidget {
     try {
       final export = await RedactedDiagnosticExporter(
         store,
-      ).create(bootstrap: bootstrap, hosts: hosts);
+      ).create(bootstrap: widget.bootstrap, hosts: widget.hosts);
       if (!context.mounted) {
         return;
       }
@@ -162,6 +220,55 @@ class DiagnosticsScreen extends StatelessWidget {
       CacheBootstrapStatus.corrupt => 'CORRUPT / WRITE BLOCKED',
       CacheBootstrapStatus.unavailable => 'UNAVAILABLE',
     };
+  }
+
+  String _auditStatus() {
+    if (widget.onLoadCommandAudit == null) {
+      return 'NO AUTHENTICATED HOST';
+    }
+    if (_auditLoading) return 'REFRESHING';
+    if (_auditLoadFailed) return 'PARTIAL READ FAILURE';
+    final count = _auditByHost.values.fold<int>(
+      0,
+      (total, entries) => total + entries.length,
+    );
+    return _auditByHost.isEmpty ? 'NOT LOADED' : '$count REDACTED RECORDS';
+  }
+}
+
+class _AuditHostCard extends StatelessWidget {
+  const _AuditHostCard({required this.host, required this.entries});
+
+  final HostSyncState host;
+  final List<CommandAuditEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ExpansionTile(
+        leading: const Icon(Icons.shield_outlined),
+        title: Text('${host.displayName} security log'),
+        subtitle: Text('${entries.length} redacted record(s)'),
+        children: [
+          if (entries.isEmpty)
+            const ListTile(title: Text('No recent connector records')),
+          for (final entry in entries)
+            ListTile(
+              title: Text('${entry.action} · ${entry.outcome}'),
+              subtitle: Text(
+                '${entry.target} · device ${entry.actorFingerprint.substring(entry.actorFingerprint.length - 12)}',
+              ),
+              trailing: Text(
+                DateTime.fromMillisecondsSinceEpoch(
+                  entry.completedAtMs,
+                ).toLocal().toIso8601String().substring(0, 16),
+                textAlign: TextAlign.end,
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 
