@@ -540,7 +540,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [x] Launch `codex app-server` over stdio under a dedicated managed profile.
 - [x] Perform initialization and capability negotiation.
-- [ ] Generate/test JSON-RPC schemas for the installed Codex version.
+- [x] Generate/test JSON-RPC schemas for the installed Codex version.
 - [ ] Implement thread list/read/start/resume/fork where supported.
 - [x] Implement turn start, steer, and interrupt.
 - [ ] Stream thread, turn, item, message delta, command, file-change, diff, usage, warning, and completion notifications.
