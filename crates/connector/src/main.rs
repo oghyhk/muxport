@@ -1099,7 +1099,12 @@ fn read_runtime_manifest(path: &Path) -> Result<RuntimeManifest, DynError> {
         )
         .into());
     }
-    let metadata = fs::symlink_metadata(path)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "headless vault passphrase file is unavailable",
+        )
+    })?;
     if metadata.file_type().is_symlink() {
         return Err(invalid_manifest("runtime manifest must not be a symbolic link").into());
     }
@@ -2337,7 +2342,12 @@ fn headless_vault_key_from_passphrase_file(
         }
     }
 
-    let mut passphrase = fs::read(path)?;
+    let mut passphrase = fs::read(path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "headless vault passphrase file could not be read",
+        )
+    })?;
     let mut salt = [0_u8; 16];
     let mut hasher = Sha256::new();
     hasher.update(b"muxport-headless-vault-salt-v1");
