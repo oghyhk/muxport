@@ -672,7 +672,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Unit tests
 
-- [ ] State-machine transition tables.
+- [x] State-machine transition tables.
 - [x] Assignment precedence.
 - [x] Rotation selection, cooldown, and storm prevention.
 - [x] Envelope encryption/decryption and replay rejection.
@@ -723,7 +723,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ## 19. CI/CD and release engineering
 
-- [ ] Pin toolchains and generate lockfiles.
+- [x] Pin toolchains and generate lockfiles.
 - [x] Reproduce protocol generation in CI and fail on uncommitted schema output.
 - [ ] Build/test Rust on Windows, macOS, and Linux.
 - [ ] Build/test Flutter on iOS and Android with physical-device smoke testing before release.
