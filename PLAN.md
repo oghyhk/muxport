@@ -597,7 +597,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] Persist sync cursor before background suspension.
 - [ ] Use push as a wake-up hint, never as authoritative state.
 - [ ] Fetch the current approval from the connector before rendering an action button from a notification.
-- [ ] Prevent double approval from repeated taps or duplicate pushes.
+- [x] Prevent double approval from repeated taps or duplicate pushes.
 - [ ] Test Android process death and iOS background eviction, not only hot reload/restart.
 - [ ] Blur sensitive content in app switcher previews.
 - [ ] Provide an optional app lock with biometric/PIN fallback.

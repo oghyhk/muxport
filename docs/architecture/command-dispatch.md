@@ -79,3 +79,11 @@ secret material. A separate step-up-authenticated provisioning flow with
 domain-separated encryption and no secret-derived durable fingerprint is
 still required. Relay routing and the desired-state assignment registry also
 remain pending.
+
+The Flutter approval inbox derives unresolved approval IDs from the
+authenticated replay window and resolves runtime routing through the matching
+authoritative session snapshot. Before network dispatch it durably records a
+unique pending operation, disabling every later tap for that approval. It then
+sends one encrypted, idempotent `ApproveActionCmd`. Transport ambiguity is
+persisted as `ReconciliationRequired`; the UI does not claim that the source
+accepted or rejected the action.
