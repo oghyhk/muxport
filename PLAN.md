@@ -280,7 +280,7 @@ secret_handle          # opaque reference into vault
 
 - [x] Store the mobile device identity in Keychain/Android Keystore.
 - [x] Keep provider secrets off the phone by default.
-- [ ] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
+- [x] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
 - [x] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
 - [x] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
 - [ ] Require biometric/device authentication before provisioning, bulk assignment, export, or rotation.

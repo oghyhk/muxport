@@ -38,7 +38,7 @@ class _CredentialProvisioningScreenState
   late final TextEditingController _providerController;
   late final TextEditingController _typeController;
   late final TextEditingController _secretController;
-  HostSyncState? _selectedHost;
+  final Set<String> _selectedHostIds = <String>{};
   bool _submitting = false;
 
   List<HostSyncState> get _eligibleHosts => [
@@ -58,7 +58,10 @@ class _CredentialProvisioningScreenState
     _secretController = widget.sensitiveInputs.createController();
     _providerController.text = 'openai';
     _typeController.text = 'api_key';
-    _selectedHost = _eligibleHosts.firstOrNull;
+    final first = _eligibleHosts.firstOrNull;
+    if (first != null) {
+      _selectedHostIds.add(first.hostId);
+    }
   }
 
   @override
@@ -71,13 +74,16 @@ class _CredentialProvisioningScreenState
   }
 
   Future<void> _submit() async {
-    final host = _selectedHost;
+    final hosts = [
+      for (final host in _eligibleHosts)
+        if (_selectedHostIds.contains(host.hostId)) host,
+    ];
     final displayName = _nameController.text.trim();
     final provider = _providerController.text.trim();
     final credentialType = _typeController.text.trim();
     final originalSecret = _secretController.text;
     if (_submitting ||
-        host == null ||
+        hosts.isEmpty ||
         displayName.isEmpty ||
         provider.isEmpty ||
         credentialType.isEmpty ||
@@ -86,7 +92,7 @@ class _CredentialProvisioningScreenState
       return;
     }
     final authorized = await widget.stepUpAuthenticator.authorize(
-      reason: 'Authorize adding a provider credential to ${host.displayName}',
+      reason: 'Authorize adding a provider credential to ${hosts.length} selected host${hosts.length == 1 ? '' : 's'}',
     );
     if (!mounted) {
       return;
@@ -113,54 +119,62 @@ class _CredentialProvisioningScreenState
     setState(() {
       _submitting = true;
     });
-    AuthenticatedDirectConnection? connection;
+    final provisioned = <HostSyncState>[];
+    final failedHosts = <HostSyncState>[];
     try {
       final now = DateTime.now();
-      final operationId =
-          'provision-${widget.identity.deviceId}-${now.microsecondsSinceEpoch}';
-      connection = await AuthenticatedDirectConnection.connect(
-        address: host.directAddress!,
-        port: host.directPort!,
-        pinnedHost: PinnedHostIdentity(
-          hostId: host.hostId,
-          publicKeyHex: host.pinnedHostKey,
-        ),
-        identity: widget.identity,
-      );
-      final result = await connection.provisionCredential(
-        commandId: operationId,
-        idempotencyKey: operationId,
-        profileId: operationId,
-        displayName: displayName,
-        provider: provider,
-        credentialType: credentialType,
-        accountFingerprint: accountFingerprint,
-        secret: secret,
-      );
+      for (var index = 0; index < hosts.length; index++) {
+        final host = hosts[index];
+        final operationId =
+            'provision-${widget.identity.deviceId}-${now.microsecondsSinceEpoch}-$index';
+        AuthenticatedDirectConnection? connection;
+        try {
+          connection = await AuthenticatedDirectConnection.connect(
+            address: host.directAddress!,
+            port: host.directPort!,
+            pinnedHost: PinnedHostIdentity(
+              hostId: host.hostId,
+              publicKeyHex: host.pinnedHostKey,
+            ),
+            identity: widget.identity,
+          );
+          final result = await connection.provisionCredential(
+            commandId: operationId,
+            idempotencyKey: operationId,
+            profileId: operationId,
+            displayName: displayName,
+            provider: provider,
+            credentialType: credentialType,
+            accountFingerprint: accountFingerprint,
+            secret: secret,
+          );
+          if (result.success) {
+            await widget.onProvisioned(host);
+            provisioned.add(host);
+          } else {
+            failedHosts.add(host);
+          }
+        } on Object {
+          failedHosts.add(host);
+        } finally {
+          await connection?.close();
+        }
+      }
       if (!mounted) {
         return;
       }
-      if (!result.success) {
-        _show('The host did not accept the credential. Nothing was activated.');
-        return;
-      }
-      await widget.onProvisioned(host);
-      if (!mounted) {
-        return;
-      }
-      _show(
-        'Credential sealed on ${host.displayName}; it is not assigned yet.',
-      );
-      Navigator.of(context).pop();
-    } on Object {
-      secret.fillRange(0, secret.length, 0);
-      if (mounted) {
+      if (failedHosts.isEmpty) {
         _show(
-          'Provisioning could not be confirmed. Verify the host before retrying.',
+          'Credential sealed on ${provisioned.length} host${provisioned.length == 1 ? '' : 's'}; it is not assigned yet.',
+        );
+        Navigator.of(context).pop();
+      } else {
+        _show(
+          'Sealed on ${provisioned.length}; ${failedHosts.length} host${failedHosts.length == 1 ? '' : 's'} could not confirm it. Verify those hosts before retrying.',
         );
       }
     } finally {
-      await connection?.close();
+      secret.fillRange(0, secret.length, 0);
       if (mounted) {
         setState(() {
           _submitting = false;
@@ -181,21 +195,29 @@ class _CredentialProvisioningScreenState
             'The key is encrypted directly for the selected host after device authentication. It is not saved on this phone or sent to the relay.',
           ),
           const SizedBox(height: 20),
-          DropdownButtonFormField<HostSyncState>(
-            initialValue: _selectedHost,
-            decoration: const InputDecoration(
-              labelText: 'Target host',
-              border: OutlineInputBorder(),
+          const Text('Target hosts'),
+          const SizedBox(height: 4),
+          Card(
+            child: Column(
+              children: [
+                for (final host in hosts)
+                  CheckboxListTile(
+                    value: _selectedHostIds.contains(host.hostId),
+                    title: Text(host.displayName),
+                    subtitle: Text(host.hostId),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    onChanged: _submitting
+                        ? null
+                        : (selected) => setState(() {
+                            if (selected ?? false) {
+                              _selectedHostIds.add(host.hostId);
+                            } else {
+                              _selectedHostIds.remove(host.hostId);
+                            }
+                          }),
+                  ),
+              ],
             ),
-            items: [
-              for (final host in hosts)
-                DropdownMenuItem(value: host, child: Text(host.displayName)),
-            ],
-            onChanged: _submitting
-                ? null
-                : (host) => setState(() {
-                    _selectedHost = host;
-                  }),
           ),
           if (hosts.isEmpty) ...[
             const SizedBox(height: 12),
