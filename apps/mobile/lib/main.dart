@@ -565,12 +565,19 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         state,
       );
       await _persistHost(resolved, cacheStore);
-      if (!result.success) {
+      if (state == RemoteOpState.succeeded) {
+        return _BulkAssignmentOutcome.confirmed;
+      }
+      if (state == RemoteOpState.failed ||
+          state == RemoteOpState.expired ||
+          state == RemoteOpState.cancelled ||
+          state == RemoteOpState.rejectedOffline) {
         return _BulkAssignmentOutcome.rejected;
       }
-      return state == RemoteOpState.reconciliationRequired
-          ? _BulkAssignmentOutcome.unknown
-          : _BulkAssignmentOutcome.confirmed;
+      // A transport-level acknowledgement or a non-final command result is
+      // deliberately not counted as a completed switch. The persisted
+      // operation remains available for authoritative reconciliation.
+      return _BulkAssignmentOutcome.unknown;
     } on Object {
       final current = _hosts[host.hostId] ?? pendingHost;
       final unresolved = current.resolveOperation(
