@@ -10,7 +10,7 @@ use connector::{
 };
 use credential_vault::{
     HostIdentityManager, LoadedHostIdentity, OsHostIdentityStore, OsVaultKeyStore,
-    PersistentVault, VaultKeyManager,
+    KeyEncryptionKey, PersistentVault, VaultKeyManager,
 };
 use event_journal::EventJournal;
 use futures::StreamExt;
@@ -34,6 +34,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+use zeroize::Zeroize;
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
@@ -47,6 +48,7 @@ const RUNTIME_MANIFEST_VERSION: u32 = 1;
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_MANAGED_RUNTIMES: usize = 64;
 const MAX_MANAGED_STDERR_TAIL_BYTES: usize = 8 * 1024;
+const MAX_HEADLESS_VAULT_PASSPHRASE_BYTES: u64 = 4096;
 
 type DynError = Box<dyn Error + Send + Sync>;
 
@@ -463,21 +465,20 @@ async fn main() -> Result<(), DynError> {
     };
     let vault_file =
         std::env::var("MUXPORT_VAULT_FILE").unwrap_or_else(|_| "vault.sealed".into());
-    let vault_key =
-        VaultKeyManager::new(OsVaultKeyStore::new()).load_or_create(&host_id);
+    let vault_key = load_connector_vault_key(&host_id);
     let credential_vault = match vault_key {
-        Ok(vault_key) => {
-            let key_created = vault_key.was_created();
+        Ok((vault_key, key_created, key_source)) => {
             match PersistentVault::open_or_create(
                 &vault_file,
                 &host_id,
-                vault_key.into_key_encryption_key(),
+                vault_key,
             ) {
                 Ok(vault) => {
                     info!(
                         path = %vault_file,
                         key_created,
-                        "OS-protected credential vault is available"
+                        key_source,
+                        "credential vault is available"
                     );
                     Some(Arc::new(tokio::sync::Mutex::new(vault)))
                 }
@@ -2270,6 +2271,86 @@ fn vault_profile_projection(vault: &PersistentVault) -> Vec<CredentialProfileInf
         .collect()
 }
 
+/// Loads the normal OS-protected key first. A headless fallback is available
+/// only when the operator explicitly points `MUXPORT_VAULT_PASSPHRASE_FILE` at
+/// an owner-private credential file; plaintext environment values are never
+/// accepted as a vault key source.
+fn load_connector_vault_key(
+    host_id: &str,
+) -> Result<(KeyEncryptionKey, bool, &'static str), DynError> {
+    match VaultKeyManager::new(OsVaultKeyStore::new()).load_or_create(host_id) {
+        Ok(key) => {
+            let created = key.was_created();
+            Ok((key.into_key_encryption_key(), created, "os-protected"))
+        }
+        Err(os_error) => match headless_vault_key_from_env(host_id)? {
+            Some(key) => Ok((key, false, "headless-passphrase-file")),
+            None => Err(Box::new(os_error)),
+        },
+    }
+}
+
+fn headless_vault_key_from_env(
+    host_id: &str,
+) -> Result<Option<KeyEncryptionKey>, DynError> {
+    let Some(path) = std::env::var_os("MUXPORT_VAULT_PASSPHRASE_FILE") else {
+        return Ok(None);
+    };
+    headless_vault_key_from_passphrase_file(Path::new(&path), host_id).map(Some)
+}
+
+fn headless_vault_key_from_passphrase_file(
+    path: &Path,
+    host_id: &str,
+) -> Result<KeyEncryptionKey, DynError> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "headless vault passphrase file must be an absolute path",
+        )
+        .into());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "headless vault passphrase source must be a regular file",
+        )
+        .into());
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_HEADLESS_VAULT_PASSPHRASE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "headless vault passphrase file has an invalid size",
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "headless vault passphrase file must be owner-private",
+            )
+            .into());
+        }
+    }
+
+    let mut passphrase = fs::read(path)?;
+    let mut salt = [0_u8; 16];
+    let mut hasher = Sha256::new();
+    hasher.update(b"muxport-headless-vault-salt-v1");
+    hasher.update((host_id.len() as u64).to_be_bytes());
+    hasher.update(host_id.as_bytes());
+    salt.copy_from_slice(&hasher.finalize()[..16]);
+    let key = KeyEncryptionKey::derive_from_passphrase(&passphrase, &salt)
+        .map_err(|error| Box::new(error) as DynError);
+    passphrase.zeroize();
+    salt.zeroize();
+    key
+}
+
 fn new_boot_epoch() -> u64 {
     (uuid::Uuid::new_v4().as_u128() & i64::MAX as u128) as u64
 }
@@ -2301,6 +2382,83 @@ mod tests {
     #[test]
     fn boot_epoch_fits_sqlite_integer() {
         assert!(new_boot_epoch() <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn owner_private_headless_passphrase_reopens_the_same_vault() {
+        let root = std::env::temp_dir().join(format!(
+            "muxport-headless-vault-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let passphrase_file = root.join("credential");
+        fs::write(&passphrase_file, b"headless-test-passphrase").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&passphrase_file, fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let vault_path = root.join("vault.sealed");
+        {
+            let mut vault = PersistentVault::open_or_create(
+                &vault_path,
+                "host-headless",
+                headless_vault_key_from_passphrase_file(&passphrase_file, "host-headless")
+                    .unwrap(),
+            )
+            .unwrap();
+            vault
+                .enroll_credential(
+                    credential_vault::CredentialEnrollment {
+                        profile_id: "profile-1".into(),
+                        display_name: "Headless profile".into(),
+                        provider: "provider".into(),
+                        credential_type: "api_key".into(),
+                        account_fingerprint: "fingerprint".into(),
+                        created_at_ms: 1,
+                        last_validated_at_ms: 1,
+                    },
+                    b"secret",
+                )
+                .unwrap();
+        }
+        let reopened = PersistentVault::open_or_create(
+            &vault_path,
+            "host-headless",
+            headless_vault_key_from_passphrase_file(&passphrase_file, "host-headless")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .decrypt_active_secret("profile-1")
+                .unwrap()
+                .expose_secret(),
+            b"secret"
+        );
+        drop(reopened);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_passphrase_file_rejects_group_or_world_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "muxport-headless-permissions-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let passphrase_file = root.join("credential");
+        fs::write(&passphrase_file, b"test-passphrase").unwrap();
+        fs::set_permissions(&passphrase_file, fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(headless_vault_key_from_passphrase_file(&passphrase_file, "host-1").is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

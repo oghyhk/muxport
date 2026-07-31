@@ -48,6 +48,11 @@ The host identity key remains in the configured OS credential store and is
 not exported. Restoring a pairing registry without its original host identity
 will correctly require phones to pair again.
 
+For headless connectors, retain access to the external systemd/TPM/secret
+manager credential that backs `MUXPORT_VAULT_PASSPHRASE_FILE`; it is not part
+of a Muxport backup. Restoring `vault.sealed` without that separate credential
+leaves the vault locked by design and must not trigger generation of a new key.
+
 The Muxport event journal (`state.db` by default) is reconstructible from
 authoritative agent snapshots, but it may be rebuilt only after the original
 database, WAL/SHM companions, logs, hashes, and versions have been preserved

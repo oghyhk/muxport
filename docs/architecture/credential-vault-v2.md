@@ -61,16 +61,28 @@ rejection, metadata confidentiality, owner-only Unix permissions, lifecycle
 recovery, and ciphertext context swapping.
 
 If the native store is unavailable, corrupt, or contains a key that cannot open
-the sealed vault, daemon startup continues in a credential-locked state.
-Credential operations remain disabled and no plaintext or generated-file
-fallback is used.
+the sealed vault, daemon startup continues in a credential-locked state unless
+the operator explicitly configures the headless unlock source below. Credential
+operations remain disabled and no plaintext or generated-file fallback is used.
+
+### Headless Linux and container unlock
+
+For a headless server, set `MUXPORT_VAULT_PASSPHRASE_FILE` to an **absolute,
+regular, owner-private** credential file. This is intended for a systemd
+`LoadCredential=` file, an equivalent TPM/external-secret-manager materialized
+file, or a carefully managed container secret mount. The connector rejects
+symlinks, empty files, files over 4 KiB, and (on Unix) any group/world-readable
+file. It never reads a vault passphrase from a plaintext environment variable.
+
+The complete file bytes are passed to Argon2id using a host-bound salt to derive
+the KEK. The passphrase buffer is zeroized after derivation. Removing this
+setting does not create a substitute OS key for an existing vault; the existing
+vault simply remains locked, preserving evidence and preventing accidental key
+replacement.
 
 ## Remaining integration
 
-- Add reviewed systemd credential, TPM, and external secret-manager KEK
-  providers for headless hosts.
 - Connect enrollment and stage/validate/activate/rollback to managed OpenCode
   and Codex profile directories.
-- Add explicit local-disable metadata, upstream-revocation status, and audited
-  deletion.
+- Add audited deletion and provider-specific upstream revocation workflows.
 - Add native Windows/macOS/Linux crash and backup/restore tests.
