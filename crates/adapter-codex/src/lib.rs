@@ -3,9 +3,9 @@ mod jsonrpc;
 
 pub use managed::{ManagedCodexError, ManagedCodexProfile};
 use adapter_api::{
-    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialKind, CredentialMaterial,
-    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot,
-    UsageWindow,
+    AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
+    CredentialKind, CredentialMaterial, CredentialValidation, EventStream, ProjectInfo,
+    SessionSummary, UsageBucket, UsageSnapshot, UsageWindow, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use jsonrpc::{Incoming, JsonRpcPeer, ProcessConfig};
@@ -574,16 +574,25 @@ impl AgentAdapter for CodexAdapter {
         AgentType::Codex
     }
 
-    async fn probe(&self) -> Result<CapabilitySet, AdapterError> {
+    async fn probe(&self) -> Result<AdapterProbe, AdapterError> {
         self.record_version().await?;
         self.ensure_client().await?;
-        Ok(CapabilitySet {
-            can_stream_deltas: true,
-            can_approve_commands: true,
-            can_approve_edits: true,
-            can_interrupt: true,
-            can_switch_credentials_live: !self.profile_id.is_empty(),
-            can_read_usage: !self.profile_id.is_empty(),
+        let executable_version = self.observed_version()?.ok_or_else(|| {
+            AdapterError::Internal("Codex version disappeared after a successful probe".into())
+        })?;
+        Ok(AdapterProbe {
+            executable_version,
+            source_api_version: "app-server-jsonrpc-v2".into(),
+            capability_version: ADAPTER_CAPABILITY_VERSION,
+            capabilities: CapabilitySet {
+                can_stream_deltas: true,
+                can_approve_commands: true,
+                can_approve_edits: true,
+                can_interrupt: true,
+                can_switch_credentials_live: !self.profile_id.is_empty(),
+                can_read_usage: !self.profile_id.is_empty(),
+            },
+            health: AdapterHealth::Healthy,
         })
     }
 

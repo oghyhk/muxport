@@ -258,8 +258,8 @@ mod tests {
 
         for _ in 0..2 {
             let adapter = profile.adapter();
-            let capabilities = adapter.probe().await.unwrap();
-            assert!(capabilities.can_switch_credentials_live);
+            let probe = adapter.probe().await.unwrap();
+            assert!(probe.capabilities.can_switch_credentials_live);
             let account = adapter.read_account(false).await.unwrap();
             assert!(account.account.is_none());
             adapter.shutdown_gracefully().await.unwrap();

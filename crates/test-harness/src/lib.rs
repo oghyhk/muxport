@@ -1,7 +1,7 @@
 use adapter_api::{
-    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialMaterial,
-    CredentialValidation, EventStream, ProjectInfo, SessionSummary, UsageBucket, UsageSnapshot,
-    UsageWindow,
+    AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
+    CredentialMaterial, CredentialValidation, EventStream, ProjectInfo, SessionSummary,
+    UsageBucket, UsageSnapshot, UsageWindow, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -54,17 +54,23 @@ impl AgentAdapter for DeterministicFakeAdapter {
         self.agent_type
     }
 
-    async fn probe(&self) -> Result<CapabilitySet, AdapterError> {
+    async fn probe(&self) -> Result<AdapterProbe, AdapterError> {
         if self.should_fail.load(Ordering::SeqCst) {
             return Err(AdapterError::InitFailed("Injected fake probe failure".into()));
         }
-        Ok(CapabilitySet {
-            can_stream_deltas: true,
-            can_approve_commands: true,
-            can_approve_edits: true,
-            can_interrupt: true,
-            can_switch_credentials_live: true,
-            can_read_usage: true,
+        Ok(AdapterProbe {
+            executable_version: "fake-1.0.0".into(),
+            source_api_version: "fake-v1".into(),
+            capability_version: ADAPTER_CAPABILITY_VERSION,
+            capabilities: CapabilitySet {
+                can_stream_deltas: true,
+                can_approve_commands: true,
+                can_approve_edits: true,
+                can_interrupt: true,
+                can_switch_credentials_live: true,
+                can_read_usage: true,
+            },
+            health: AdapterHealth::Healthy,
         })
     }
 

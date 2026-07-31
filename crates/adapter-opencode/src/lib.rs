@@ -3,9 +3,9 @@ mod managed;
 pub use managed::{ManagedOpenCodeError, ManagedOpenCodeProfile};
 
 use adapter_api::{
-    AccountState, AdapterError, AgentAdapter, CapabilitySet, CredentialKind,
-    CredentialMaterial, CredentialValidation, EventStream, ProjectInfo, SessionSummary,
-    UsageSnapshot,
+    AccountState, AdapterError, AdapterHealth, AdapterProbe, AgentAdapter, CapabilitySet,
+    CredentialKind, CredentialMaterial, CredentialValidation, EventStream, ProjectInfo,
+    SessionSummary, UsageSnapshot, ADAPTER_CAPABILITY_VERSION,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -705,7 +705,7 @@ impl AgentAdapter for OpenCodeAdapter {
         AgentType::Opencode
     }
 
-    async fn probe(&self) -> Result<CapabilitySet, AdapterError> {
+    async fn probe(&self) -> Result<AdapterProbe, AdapterError> {
         let health: HealthResponse = self
             .get_json(&["global", "health"], "health probe")
             .await?;
@@ -719,17 +719,24 @@ impl AgentAdapter for OpenCodeAdapter {
                 "OpenCode health endpoint returned an empty version".into(),
             ));
         }
+        let version = health.version;
         *self.observed_version.write().map_err(|_| {
             AdapterError::Internal("OpenCode version state lock was poisoned".into())
-        })? = Some(health.version);
+        })? = Some(version.clone());
 
-        Ok(CapabilitySet {
-            can_stream_deltas: true,
-            can_approve_commands: true,
-            can_approve_edits: true,
-            can_interrupt: true,
-            can_switch_credentials_live: self.managed_profile_id.is_some(),
-            can_read_usage: false,
+        Ok(AdapterProbe {
+            executable_version: version.clone(),
+            source_api_version: version,
+            capability_version: ADAPTER_CAPABILITY_VERSION,
+            capabilities: CapabilitySet {
+                can_stream_deltas: true,
+                can_approve_commands: true,
+                can_approve_edits: true,
+                can_interrupt: true,
+                can_switch_credentials_live: self.managed_profile_id.is_some(),
+                can_read_usage: false,
+            },
+            health: AdapterHealth::Healthy,
         })
     }
 
@@ -1403,11 +1410,15 @@ mod tests {
         )])
         .await;
         let adapter = OpenCodeAdapter::new(base_url, Some("secret".into()));
-        let capabilities = adapter.probe().await.unwrap();
-        assert!(capabilities.can_stream_deltas);
-        assert!(capabilities.can_interrupt);
-        assert!(capabilities.can_approve_commands);
-        assert!(!capabilities.can_switch_credentials_live);
+        let probe = adapter.probe().await.unwrap();
+        assert_eq!(probe.executable_version, "1.2.3");
+        assert_eq!(probe.source_api_version, "1.2.3");
+        assert_eq!(probe.capability_version, ADAPTER_CAPABILITY_VERSION);
+        assert_eq!(probe.health, AdapterHealth::Healthy);
+        assert!(probe.capabilities.can_stream_deltas);
+        assert!(probe.capabilities.can_interrupt);
+        assert!(probe.capabilities.can_approve_commands);
+        assert!(!probe.capabilities.can_switch_credentials_live);
         assert_eq!(adapter.observed_version().unwrap().as_deref(), Some("1.2.3"));
         server.await.unwrap();
         let requests = requests.lock().unwrap();

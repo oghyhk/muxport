@@ -43,6 +43,23 @@ pub struct CapabilitySet {
     pub can_read_usage: bool,
 }
 
+pub const ADAPTER_CAPABILITY_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterHealth {
+    Healthy,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AdapterProbe {
+    pub executable_version: String,
+    pub source_api_version: String,
+    pub capability_version: u32,
+    pub capabilities: CapabilitySet,
+    pub health: AdapterHealth,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProjectInfo {
     pub path: String,
@@ -168,7 +185,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, AdapterError>> + 
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn agent_type(&self) -> AgentType;
-    async fn probe(&self) -> Result<CapabilitySet, AdapterError>;
+    async fn probe(&self) -> Result<AdapterProbe, AdapterError>;
     async fn discover_projects(&self) -> Result<Vec<ProjectInfo>, AdapterError>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AdapterError>;
     async fn read_session(&self, session_id: &str) -> Result<SessionSummary, AdapterError>;

@@ -130,7 +130,7 @@ muxport/
 
 Define a versioned `AgentAdapter` interface with:
 
-- [ ] `probe()` — executable version, API version, capabilities, and health.
+- [x] `probe()` — executable version, API version, capabilities, and health.
 - [x] `discover_projects()` — repositories/workspaces visible to the runtime.
 - [x] `list_sessions()` and `read_session()` — authoritative snapshot.
 - [x] `subscribe()` — normalized live-event stream.
