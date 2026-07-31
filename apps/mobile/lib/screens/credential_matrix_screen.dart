@@ -3,9 +3,14 @@ import 'package:flutter/material.dart';
 import '../state/mobile_sync_state.dart';
 
 class CredentialMatrixScreen extends StatelessWidget {
-  const CredentialMatrixScreen({required this.hosts, super.key});
+  const CredentialMatrixScreen({
+    required this.hosts,
+    this.onProvisionCredential,
+    super.key,
+  });
 
   final Iterable<HostSyncState> hosts;
+  final VoidCallback? onProvisionCredential;
 
   @override
   Widget build(BuildContext context) {
@@ -26,6 +31,13 @@ class CredentialMatrixScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Account Profiles & Assignments')),
+      floatingActionButton: onProvisionCredential == null
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: onProvisionCredential,
+              icon: const Icon(Icons.add),
+              label: const Text('Add credential'),
+            ),
       body: profiles.isEmpty
           ? const Center(
               child: Padding(

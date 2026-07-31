@@ -348,6 +348,7 @@ enum Command_Inner {
   rotateCredential,
   probeHost,
   queryOperation,
+  provisionCredential,
   notSet
 }
 
@@ -365,6 +366,7 @@ class Command extends $pb.GeneratedMessage {
     RotateCredentialCmd? rotateCredential,
     ProbeHostCmd? probeHost,
     QueryOperationCmd? queryOperation,
+    ProvisionCredentialCmd? provisionCredential,
   }) {
     final result = create();
     if (commandId != null) result.commandId = commandId;
@@ -378,6 +380,8 @@ class Command extends $pb.GeneratedMessage {
     if (rotateCredential != null) result.rotateCredential = rotateCredential;
     if (probeHost != null) result.probeHost = probeHost;
     if (queryOperation != null) result.queryOperation = queryOperation;
+    if (provisionCredential != null)
+      result.provisionCredential = provisionCredential;
     return result;
   }
 
@@ -400,6 +404,7 @@ class Command extends $pb.GeneratedMessage {
     9: Command_Inner.rotateCredential,
     10: Command_Inner.probeHost,
     11: Command_Inner.queryOperation,
+    12: Command_Inner.provisionCredential,
     0: Command_Inner.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -407,7 +412,7 @@ class Command extends $pb.GeneratedMessage {
       package:
           const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
       createEmptyInstance: create)
-    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11])
+    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
     ..aOS(1, _omitFieldNames ? '' : 'commandId')
     ..aInt64(2, _omitFieldNames ? '' : 'deadlineMs')
     ..aOM<StartSessionCmd>(3, _omitFieldNames ? '' : 'startSession',
@@ -428,6 +433,9 @@ class Command extends $pb.GeneratedMessage {
         subBuilder: ProbeHostCmd.create)
     ..aOM<QueryOperationCmd>(11, _omitFieldNames ? '' : 'queryOperation',
         subBuilder: QueryOperationCmd.create)
+    ..aOM<ProvisionCredentialCmd>(
+        12, _omitFieldNames ? '' : 'provisionCredential',
+        subBuilder: ProvisionCredentialCmd.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -457,6 +465,7 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(9)
   @$pb.TagNumber(10)
   @$pb.TagNumber(11)
+  @$pb.TagNumber(12)
   Command_Inner whichInner() => _Command_InnerByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -467,6 +476,7 @@ class Command extends $pb.GeneratedMessage {
   @$pb.TagNumber(9)
   @$pb.TagNumber(10)
   @$pb.TagNumber(11)
+  @$pb.TagNumber(12)
   void clearInner() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -585,6 +595,18 @@ class Command extends $pb.GeneratedMessage {
   void clearQueryOperation() => $_clearField(11);
   @$pb.TagNumber(11)
   QueryOperationCmd ensureQueryOperation() => $_ensure(10);
+
+  @$pb.TagNumber(12)
+  ProvisionCredentialCmd get provisionCredential => $_getN(11);
+  @$pb.TagNumber(12)
+  set provisionCredential(ProvisionCredentialCmd value) =>
+      $_setField(12, value);
+  @$pb.TagNumber(12)
+  $core.bool hasProvisionCredential() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearProvisionCredential() => $_clearField(12);
+  @$pb.TagNumber(12)
+  ProvisionCredentialCmd ensureProvisionCredential() => $_ensure(11);
 }
 
 class StartSessionCmd extends $pb.GeneratedMessage {
@@ -1270,6 +1292,141 @@ class QueryOperationCmd extends $pb.GeneratedMessage {
   $core.bool hasIdempotencyKey() => $_has(0);
   @$pb.TagNumber(1)
   void clearIdempotencyKey() => $_clearField(1);
+}
+
+/// The provider secret is never a plaintext command field. `secret_ciphertext`
+/// is separately encrypted with a purpose-separated provisioning key derived
+/// from the authenticated device/host handshake and bound to every metadata
+/// field below.
+class ProvisionCredentialCmd extends $pb.GeneratedMessage {
+  factory ProvisionCredentialCmd({
+    $core.String? profileId,
+    $core.String? displayName,
+    $core.String? provider,
+    $core.String? credentialType,
+    $core.String? accountFingerprint,
+    $core.List<$core.int>? secretNonce,
+    $core.List<$core.int>? secretCiphertext,
+  }) {
+    final result = create();
+    if (profileId != null) result.profileId = profileId;
+    if (displayName != null) result.displayName = displayName;
+    if (provider != null) result.provider = provider;
+    if (credentialType != null) result.credentialType = credentialType;
+    if (accountFingerprint != null)
+      result.accountFingerprint = accountFingerprint;
+    if (secretNonce != null) result.secretNonce = secretNonce;
+    if (secretCiphertext != null) result.secretCiphertext = secretCiphertext;
+    return result;
+  }
+
+  ProvisionCredentialCmd._();
+
+  factory ProvisionCredentialCmd.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ProvisionCredentialCmd.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ProvisionCredentialCmd',
+      package:
+          const $pb.PackageName(_omitMessageNames ? '' : 'muxport.protocol.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'profileId')
+    ..aOS(2, _omitFieldNames ? '' : 'displayName')
+    ..aOS(3, _omitFieldNames ? '' : 'provider')
+    ..aOS(4, _omitFieldNames ? '' : 'credentialType')
+    ..aOS(5, _omitFieldNames ? '' : 'accountFingerprint')
+    ..a<$core.List<$core.int>>(
+        6, _omitFieldNames ? '' : 'secretNonce', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(
+        7, _omitFieldNames ? '' : 'secretCiphertext', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProvisionCredentialCmd clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProvisionCredentialCmd copyWith(
+          void Function(ProvisionCredentialCmd) updates) =>
+      super.copyWith((message) => updates(message as ProvisionCredentialCmd))
+          as ProvisionCredentialCmd;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ProvisionCredentialCmd create() => ProvisionCredentialCmd._();
+  @$core.override
+  ProvisionCredentialCmd createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ProvisionCredentialCmd getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ProvisionCredentialCmd>(create);
+  static ProvisionCredentialCmd? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get profileId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set profileId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProfileId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProfileId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get displayName => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set displayName($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDisplayName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDisplayName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get provider => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set provider($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasProvider() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearProvider() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get credentialType => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set credentialType($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasCredentialType() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearCredentialType() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.String get accountFingerprint => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set accountFingerprint($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAccountFingerprint() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAccountFingerprint() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get secretNonce => $_getN(5);
+  @$pb.TagNumber(6)
+  set secretNonce($core.List<$core.int> value) => $_setBytes(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasSecretNonce() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearSecretNonce() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get secretCiphertext => $_getN(6);
+  @$pb.TagNumber(7)
+  set secretCiphertext($core.List<$core.int> value) => $_setBytes(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasSecretCiphertext() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSecretCiphertext() => $_clearField(7);
 }
 
 /// Command Result

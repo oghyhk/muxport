@@ -11,6 +11,9 @@ const int directTransportProtocolVersion = 1;
 const int directTransportChallengeLifetimeMs = 15000;
 const int directTransportClockSkewMs = 60000;
 const int directTransportMaximumPlaintextBytes = 1024 * 1024;
+const String _secretProvisioningKeyInfo = 'muxport-secret-provisioning-v1';
+const String _secretProvisioningAadDomain =
+    'muxport-secret-provisioning-envelope-v1';
 
 class DirectTransportProtocolException implements Exception {
   const DirectTransportProtocolException(this.message, [this.cause]);
@@ -160,16 +163,19 @@ class DirectSessionKeys {
     required List<int> receiveKey,
     required List<int> sendNoncePrefix,
     required List<int> receiveNoncePrefix,
+    required List<int> provisioningKey,
     required List<int> aad,
   }) : sendKey = Uint8List.fromList(sendKey),
        receiveKey = Uint8List.fromList(receiveKey),
        sendNoncePrefix = Uint8List.fromList(sendNoncePrefix),
        receiveNoncePrefix = Uint8List.fromList(receiveNoncePrefix),
+       provisioningKey = Uint8List.fromList(provisioningKey),
        aad = Uint8List.fromList(aad) {
     if (sendKey.length != 32 ||
         receiveKey.length != 32 ||
         sendNoncePrefix.length != 4 ||
         receiveNoncePrefix.length != 4 ||
+        provisioningKey.length != 32 ||
         aad.isEmpty) {
       throw const DirectTransportProtocolException(
         'directional session key material is invalid',
@@ -181,6 +187,7 @@ class DirectSessionKeys {
   final Uint8List receiveKey;
   final Uint8List sendNoncePrefix;
   final Uint8List receiveNoncePrefix;
+  final Uint8List provisioningKey;
   final Uint8List aad;
 
   void destroy() {
@@ -188,6 +195,7 @@ class DirectSessionKeys {
     receiveKey.fillRange(0, receiveKey.length, 0);
     sendNoncePrefix.fillRange(0, sendNoncePrefix.length, 0);
     receiveNoncePrefix.fillRange(0, receiveNoncePrefix.length, 0);
+    provisioningKey.fillRange(0, provisioningKey.length, 0);
     aad.fillRange(0, aad.length, 0);
   }
 }
@@ -223,10 +231,22 @@ Future<DirectSessionKeys> _deriveInitiatorSessionKeys({
         info: utf8.encode('muxport-directional-session-v1'),
       );
   late final Uint8List material;
+  late final Uint8List provisioningKey;
   try {
     material = Uint8List.fromList(await directional.extractBytes());
   } finally {
     directional.destroy();
+  }
+  final provisioning = await Hkdf(hmac: Hmac.sha256(), outputLength: 32)
+      .deriveKey(
+        secretKey: sharedSecret,
+        nonce: transcriptHash,
+        info: utf8.encode(_secretProvisioningKeyInfo),
+      );
+  try {
+    provisioningKey = Uint8List.fromList(await provisioning.extractBytes());
+  } finally {
+    provisioning.destroy();
   }
   try {
     return DirectSessionKeys(
@@ -234,11 +254,122 @@ Future<DirectSessionKeys> _deriveInitiatorSessionKeys({
       receiveKey: material.sublist(32, 64),
       sendNoncePrefix: material.sublist(64, 68),
       receiveNoncePrefix: material.sublist(68, 72),
+      provisioningKey: provisioningKey,
       aad: aad,
     );
   } finally {
     material.fillRange(0, material.length, 0);
+    provisioningKey.fillRange(0, provisioningKey.length, 0);
   }
+}
+
+class SealedProvisioningSecret {
+  SealedProvisioningSecret({
+    required List<int> nonce,
+    required List<int> ciphertext,
+  }) : nonce = Uint8List.fromList(nonce),
+       ciphertext = Uint8List.fromList(ciphertext) {
+    if (this.nonce.length != 12 || this.ciphertext.length < 16) {
+      throw const DirectTransportProtocolException(
+        'sealed provisioning secret is invalid',
+      );
+    }
+  }
+
+  final Uint8List nonce;
+  final Uint8List ciphertext;
+
+  void destroy() {
+    nonce.fillRange(0, nonce.length, 0);
+    ciphertext.fillRange(0, ciphertext.length, 0);
+  }
+}
+
+/// Encrypts a provider secret with a session purpose that is separate from
+/// regular command encryption. The caller must immediately discard the input
+/// buffer after this method returns.
+class SecretProvisioningCipher {
+  SecretProvisioningCipher(List<int> key)
+    : _key = SecretKeyData(key, overwriteWhenDestroyed: true) {
+    if (key.length != 32) {
+      throw const DirectTransportProtocolException(
+        'secret provisioning key is invalid',
+      );
+    }
+  }
+
+  final SecretKeyData _key;
+  final Cipher _cipher = Chacha20.poly1305Aead();
+  bool _destroyed = false;
+
+  Future<SealedProvisioningSecret> seal(
+    List<int> secret, {
+    required List<int> aad,
+  }) async {
+    if (_destroyed || secret.isEmpty || secret.length > 64 * 1024) {
+      throw const DirectTransportProtocolException(
+        'secret provisioning payload is invalid',
+      );
+    }
+    final nonce = Uint8List(12);
+    final random = Random.secure();
+    for (var index = 0; index < nonce.length; index += 1) {
+      nonce[index] = random.nextInt(256);
+    }
+    try {
+      final box = await _cipher.encrypt(
+        secret,
+        secretKey: _key,
+        nonce: nonce,
+        aad: aad,
+      );
+      return SealedProvisioningSecret(
+        nonce: nonce,
+        ciphertext: [...box.cipherText, ...box.mac.bytes],
+      );
+    } finally {
+      nonce.fillRange(0, nonce.length, 0);
+    }
+  }
+
+  void destroy() {
+    if (_destroyed) {
+      return;
+    }
+    _destroyed = true;
+    _key.destroy();
+  }
+}
+
+Uint8List secretProvisioningAad({
+  required String hostId,
+  required String deviceId,
+  required String commandId,
+  required String idempotencyKey,
+  required String profileId,
+  required String displayName,
+  required String provider,
+  required String credentialType,
+  required String accountFingerprint,
+}) {
+  final fields = <List<int>>[
+    utf8.encode(_secretProvisioningAadDomain),
+    utf8.encode(hostId),
+    utf8.encode(deviceId),
+    utf8.encode(commandId),
+    utf8.encode(idempotencyKey),
+    utf8.encode(profileId),
+    utf8.encode(displayName),
+    utf8.encode(provider),
+    utf8.encode(credentialType),
+    utf8.encode(accountFingerprint),
+  ];
+  final output = BytesBuilder(copy: false);
+  for (final field in fields) {
+    output.add(_uint64(field.length));
+    output.add(field);
+  }
+  return output.takeBytes();
 }
 
 class DirectEncryptedFrame {

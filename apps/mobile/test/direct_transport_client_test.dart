@@ -317,6 +317,7 @@ void main() {
       receiveKey: List<int>.filled(32, 2),
       sendNoncePrefix: const [3, 4, 5, 6],
       receiveNoncePrefix: const [7, 8, 9, 10],
+      provisioningKey: List<int>.filled(32, 3),
       aad: utf8.encode('bound-session'),
     );
     final responderKeys = DirectSessionKeys(
@@ -324,6 +325,7 @@ void main() {
       receiveKey: List<int>.filled(32, 1),
       sendNoncePrefix: const [7, 8, 9, 10],
       receiveNoncePrefix: const [3, 4, 5, 6],
+      provisioningKey: List<int>.filled(32, 3),
       aad: utf8.encode('bound-session'),
     );
     final initiator = DirectSessionCipher(initiatorKeys);
@@ -342,6 +344,76 @@ void main() {
     initiator.destroy();
     responder.destroy();
   });
+
+  test(
+    'credential provisioning uses a distinct key and binds metadata',
+    () async {
+      final keyBytes = List<int>.generate(32, (index) => index + 1);
+      final provisioning = SecretProvisioningCipher(keyBytes);
+      final aad = secretProvisioningAad(
+        hostId: 'host-1',
+        deviceId: 'device-1',
+        commandId: 'command-1',
+        idempotencyKey: 'idempotency-1',
+        profileId: 'profile-1',
+        displayName: 'Primary',
+        provider: 'openai',
+        credentialType: 'api_key',
+        accountFingerprint: 'key-1234',
+      );
+      final secret = Uint8List.fromList(utf8.encode('provider-secret'));
+      final sealed = await provisioning.seal(secret, aad: aad);
+      secret.fillRange(0, secret.length, 0);
+      expect(
+        utf8.decode(sealed.ciphertext, allowMalformed: true),
+        isNot(contains('provider-secret')),
+      );
+
+      final cipher = Chacha20.poly1305Aead();
+      final decryptKey = SecretKeyData(keyBytes, overwriteWhenDestroyed: true);
+      final macOffset = sealed.ciphertext.length - 16;
+      expect(
+        utf8.decode(
+          await cipher.decrypt(
+            SecretBox(
+              sealed.ciphertext.sublist(0, macOffset),
+              nonce: sealed.nonce,
+              mac: Mac(sealed.ciphertext.sublist(macOffset)),
+            ),
+            secretKey: decryptKey,
+            aad: aad,
+          ),
+        ),
+        'provider-secret',
+      );
+      await expectLater(
+        cipher.decrypt(
+          SecretBox(
+            sealed.ciphertext.sublist(0, macOffset),
+            nonce: sealed.nonce,
+            mac: Mac(sealed.ciphertext.sublist(macOffset)),
+          ),
+          secretKey: decryptKey,
+          aad: secretProvisioningAad(
+            hostId: 'host-1',
+            deviceId: 'device-1',
+            commandId: 'command-1',
+            idempotencyKey: 'idempotency-1',
+            profileId: 'profile-2',
+            displayName: 'Primary',
+            provider: 'openai',
+            credentialType: 'api_key',
+            accountFingerprint: 'key-1234',
+          ),
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
+      decryptKey.destroy();
+      provisioning.destroy();
+      sealed.destroy();
+      aad.fillRange(0, aad.length, 0);
+    },
+  );
 
   test('Dart protocol matches the committed cross-language fixture', () async {
     final fixture = Map<String, Object?>.from(
@@ -472,6 +544,7 @@ Future<void> _serveSync({
       receiveKey: material.sublist(0, 32),
       sendNoncePrefix: material.sublist(68, 72),
       receiveNoncePrefix: material.sublist(64, 68),
+      provisioningKey: List<int>.filled(32, 0),
       aad: _sessionAad('host-1', expectedDeviceId, transcript),
     );
     material.fillRange(0, material.length, 0);
@@ -726,6 +799,7 @@ Future<void> _servePairing({
       receiveKey: material.sublist(0, 32),
       sendNoncePrefix: material.sublist(68, 72),
       receiveNoncePrefix: material.sublist(64, 68),
+      provisioningKey: List<int>.filled(32, 0),
       aad: transcript,
     );
     material.fillRange(0, material.length, 0);
@@ -851,6 +925,7 @@ Future<void> _serveProbe({
       receiveKey: material.sublist(0, 32),
       sendNoncePrefix: material.sublist(68, 72),
       receiveNoncePrefix: material.sublist(64, 68),
+      provisioningKey: List<int>.filled(32, 0),
       aad: _sessionAad('host-1', expectedDeviceId, transcript),
     );
     material.fillRange(0, material.length, 0);

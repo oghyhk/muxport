@@ -22,7 +22,7 @@ The plan is organized as an implementation checklist. A checkbox is complete onl
 - [x] Make adapters built-in and signed for MVP; do not load arbitrary third-party code into the connector process.
 - [x] Keep the relay optional and unable to decrypt application payloads.
 - [x] Support a direct path over LAN or a user-managed private network such as Tailscale.
-- [ ] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
+- [x] Keep credentials on explicitly selected hosts; the phone stores provider secrets only transiently during optional provisioning.
 - [x] Treat runtime session state on the host as the source of truth.
 - [x] Treat mobile caches and the connector event journal as reconstructible state.
 - [x] Apply account changes to new sessions only; never silently move an active turn to another identity.
@@ -281,7 +281,7 @@ secret_handle          # opaque reference into vault
 - [x] Store the mobile device identity in Keychain/Android Keystore.
 - [x] Keep provider secrets off the phone by default.
 - [ ] When a user enters a key on the phone, encrypt it directly to each selected host before leaving the credential screen.
-- [ ] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
+- [x] Keep plaintext only in a short-lived buffer; clear clipboard and field state after provisioning.
 - [x] Disable screenshots/app-switcher previews on credential-entry and recovery-key screens where the OS permits.
 - [ ] Require biometric/device authentication before provisioning, bulk assignment, export, or rotation.
 - [x] Exclude provider credentials and E2EE private keys from ordinary cloud backup.

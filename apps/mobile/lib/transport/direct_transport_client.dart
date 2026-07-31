@@ -550,12 +550,14 @@ class AuthenticatedDirectConnection {
     required Socket socket,
     required _SocketRecordReader reader,
     required DirectSessionCipher cipher,
+    required SecretProvisioningCipher provisioningCipher,
     required this.hostId,
     required this.deviceId,
     required this.localBootEpoch,
   }) : _socket = socket,
        _reader = reader,
-       _cipher = cipher;
+       _cipher = cipher,
+       _provisioningCipher = provisioningCipher;
 
   static Future<AuthenticatedDirectConnection> connect({
     required String address,
@@ -573,6 +575,7 @@ class AuthenticatedDirectConnection {
     Socket? socket;
     _SocketRecordReader? reader;
     PendingDirectHandshake? pendingHandshake;
+    SecretProvisioningCipher? provisioningCipher;
     try {
       socket = await Socket.connect(address, port, timeout: connectTimeout);
       socket.setOption(SocketOption.tcpNoDelay, true);
@@ -601,22 +604,26 @@ class AuthenticatedDirectConnection {
         jsonDecode(utf8.decode(responderRecord)),
       );
       final cipher = DirectSessionCipher(keys);
+      provisioningCipher = SecretProvisioningCipher(keys.provisioningKey);
       keys.destroy();
       return AuthenticatedDirectConnection._(
         socket: socket,
         reader: reader,
         cipher: cipher,
+        provisioningCipher: provisioningCipher,
         hostId: pinnedHost.hostId,
         deviceId: identity.deviceId,
         localBootEpoch: _newBootEpoch(),
       );
     } on DirectTransportProtocolException {
       pendingHandshake?.abort();
+      provisioningCipher?.destroy();
       await reader?.cancel();
       socket?.destroy();
       rethrow;
     } on Object catch (error) {
       pendingHandshake?.abort();
+      provisioningCipher?.destroy();
       await reader?.cancel();
       socket?.destroy();
       throw DirectTransportProtocolException(
@@ -629,6 +636,7 @@ class AuthenticatedDirectConnection {
   final Socket _socket;
   final _SocketRecordReader _reader;
   final DirectSessionCipher _cipher;
+  final SecretProvisioningCipher _provisioningCipher;
   final String hostId;
   final String deviceId;
   final int localBootEpoch;
@@ -709,6 +717,71 @@ class AuthenticatedDirectConnection {
       ),
       idempotencyKey: idempotencyKey,
     );
+  }
+
+  /// Consumes and clears [secret] after encrypting it with the dedicated
+  /// provisioning key. The plaintext never enters a normal command field.
+  Future<wire.CommandResult> provisionCredential({
+    required String commandId,
+    required String idempotencyKey,
+    required String profileId,
+    required String displayName,
+    required String provider,
+    required String credentialType,
+    required String accountFingerprint,
+    required Uint8List secret,
+    Duration deadline = const Duration(seconds: 30),
+  }) async {
+    if (deadline <= Duration.zero ||
+        profileId.trim().isEmpty ||
+        displayName.trim().isEmpty ||
+        provider.trim().isEmpty ||
+        credentialType.trim().isEmpty ||
+        accountFingerprint.trim().isEmpty ||
+        secret.isEmpty ||
+        secret.length > 64 * 1024) {
+      secret.fillRange(0, secret.length, 0);
+      throw const DirectTransportProtocolException(
+        'credential provisioning input is invalid',
+      );
+    }
+    final aad = secretProvisioningAad(
+      hostId: hostId,
+      deviceId: deviceId,
+      commandId: commandId,
+      idempotencyKey: idempotencyKey,
+      profileId: profileId,
+      displayName: displayName,
+      provider: provider,
+      credentialType: credentialType,
+      accountFingerprint: accountFingerprint,
+    );
+    SealedProvisioningSecret? sealed;
+    try {
+      sealed = await _provisioningCipher.seal(secret, aad: aad);
+      return await sendCommand(
+        wire.Command(
+          commandId: commandId,
+          deadlineMs: Int64(
+            DateTime.now().add(deadline).millisecondsSinceEpoch,
+          ),
+          provisionCredential: wire.ProvisionCredentialCmd(
+            profileId: profileId,
+            displayName: displayName,
+            provider: provider,
+            credentialType: credentialType,
+            accountFingerprint: accountFingerprint,
+            secretNonce: sealed.nonce,
+            secretCiphertext: sealed.ciphertext,
+          ),
+        ),
+        idempotencyKey: idempotencyKey,
+      );
+    } finally {
+      secret.fillRange(0, secret.length, 0);
+      aad.fillRange(0, aad.length, 0);
+      sealed?.destroy();
+    }
   }
 
   Future<wire.CommandResult> sendCommand(
@@ -806,6 +879,7 @@ class AuthenticatedDirectConnection {
     }
     _closed = true;
     _cipher.destroy();
+    _provisioningCipher.destroy();
     await _reader.cancel();
     try {
       await _socket.close();

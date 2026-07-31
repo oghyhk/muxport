@@ -6,11 +6,15 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+const SECRET_PROVISIONING_KEY_INFO: &[u8] = b"muxport-secret-provisioning-v1";
+const SECRET_PROVISIONING_AAD_DOMAIN: &[u8] = b"muxport-secret-provisioning-envelope-v1";
 
 #[derive(Error, Debug)]
 pub enum CryptoError {
@@ -273,6 +277,103 @@ pub struct DirectionalSessionKeys {
     pub responder_to_initiator_key: [u8; 32],
     pub initiator_nonce_prefix: [u8; 4],
     pub responder_nonce_prefix: [u8; 4],
+}
+
+/// A purpose-separated key used only to wrap provider credentials before they
+/// are placed in an otherwise ordinary authenticated command envelope. The
+/// transport key and this key deliberately have different HKDF labels, so a
+/// future transport change cannot accidentally turn a command key into a
+/// credential-encryption key.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SecretProvisioningKey {
+    key: [u8; 32],
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct OpenedSecret {
+    bytes: Vec<u8>,
+}
+
+impl OpenedSecret {
+    pub fn expose_secret(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl SecretProvisioningKey {
+    pub fn derive(
+        shared_secret: &[u8; 32],
+        transcript: &[u8],
+    ) -> Result<Self, CryptoError> {
+        let transcript_hash = Sha256::digest(transcript);
+        let hk = Hkdf::<Sha256>::new(Some(&transcript_hash), shared_secret);
+        let mut key = [0_u8; 32];
+        hk.expand(SECRET_PROVISIONING_KEY_INFO, &mut key)
+            .map_err(|_| CryptoError::InvalidKeyLength)?;
+        Ok(Self { key })
+    }
+
+    pub fn seal(
+        &self,
+        secret: &[u8],
+        aad: &[u8],
+    ) -> Result<([u8; 12], Vec<u8>), CryptoError> {
+        let mut nonce = [0_u8; 12];
+        OsRng.fill_bytes(&mut nonce);
+        let ciphertext = encrypt_frame(&self.key, &nonce, secret, aad)?;
+        Ok((nonce, ciphertext))
+    }
+
+    pub fn open(
+        &self,
+        nonce: &[u8],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<OpenedSecret, CryptoError> {
+        let nonce: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| CryptoError::InvalidFrameEncoding)?;
+        let bytes = decrypt_frame(&self.key, &nonce, ciphertext, aad)?;
+        Ok(OpenedSecret { bytes })
+    }
+}
+
+/// Canonical AAD for a credential envelope. Every routing and non-secret
+/// credential field is authenticated again by the purpose-separated inner
+/// encryption layer, in addition to the outer transport envelope.
+pub fn secret_provisioning_aad(
+    host_id: &str,
+    device_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    profile_id: &str,
+    display_name: &str,
+    provider: &str,
+    credential_type: &str,
+    account_fingerprint: &str,
+) -> Result<Vec<u8>, CryptoError> {
+    let fields = [
+        SECRET_PROVISIONING_AAD_DOMAIN,
+        host_id.as_bytes(),
+        device_id.as_bytes(),
+        command_id.as_bytes(),
+        idempotency_key.as_bytes(),
+        profile_id.as_bytes(),
+        display_name.as_bytes(),
+        provider.as_bytes(),
+        credential_type.as_bytes(),
+        account_fingerprint.as_bytes(),
+    ];
+    let mut aad = Vec::new();
+    for field in fields {
+        let len: u64 = field
+            .len()
+            .try_into()
+            .map_err(|_| CryptoError::InvalidFrameEncoding)?;
+        aad.extend_from_slice(&len.to_be_bytes());
+        aad.extend_from_slice(field);
+    }
+    Ok(aad)
 }
 
 impl Drop for DirectionalSessionKeys {
@@ -723,6 +824,46 @@ mod tests {
                 is_revoked: false,
             }),
             Err(CryptoError::DeviceIdentityConflict)
+        ));
+    }
+
+    #[test]
+    fn purpose_separated_provisioning_key_binds_credential_context() {
+        let shared = [11_u8; 32];
+        let transcript = b"provisioning transcript";
+        let sender = SecretProvisioningKey::derive(&shared, transcript).unwrap();
+        let receiver = SecretProvisioningKey::derive(&shared, transcript).unwrap();
+        let aad = secret_provisioning_aad(
+            "host-1",
+            "device-1",
+            "command-1",
+            "idem-1",
+            "profile-1",
+            "Primary",
+            "openai",
+            "api_key",
+            "acct-fingerprint",
+        )
+        .unwrap();
+        let (nonce, ciphertext) = sender.seal(b"provider-secret", &aad).unwrap();
+        let opened = receiver.open(&nonce, &ciphertext, &aad).unwrap();
+        assert_eq!(opened.expose_secret(), b"provider-secret");
+
+        let wrong_aad = secret_provisioning_aad(
+            "host-1",
+            "device-1",
+            "command-1",
+            "idem-1",
+            "profile-2",
+            "Primary",
+            "openai",
+            "api_key",
+            "acct-fingerprint",
+        )
+        .unwrap();
+        assert!(matches!(
+            receiver.open(&nonce, &ciphertext, &wrong_aad),
+            Err(CryptoError::DecryptionFailed)
         ));
     }
 

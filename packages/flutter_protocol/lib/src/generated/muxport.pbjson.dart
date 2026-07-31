@@ -328,6 +328,15 @@ const Command$json = {
       '9': 0,
       '10': 'queryOperation'
     },
+    {
+      '1': 'provision_credential',
+      '3': 12,
+      '4': 1,
+      '5': 11,
+      '6': '.muxport.protocol.v1.ProvisionCredentialCmd',
+      '9': 0,
+      '10': 'provisionCredential'
+    },
   ],
   '8': [
     {'1': 'inner'},
@@ -349,7 +358,9 @@ final $typed_data.Uint8List commandDescriptor = $convert.base64Decode(
     'LnYxLlJvdGF0ZUNyZWRlbnRpYWxDbWRIAFIQcm90YXRlQ3JlZGVudGlhbBJCCgpwcm9iZV9ob3'
     'N0GAogASgLMiEubXV4cG9ydC5wcm90b2NvbC52MS5Qcm9iZUhvc3RDbWRIAFIJcHJvYmVIb3N0'
     'ElEKD3F1ZXJ5X29wZXJhdGlvbhgLIAEoCzImLm11eHBvcnQucHJvdG9jb2wudjEuUXVlcnlPcG'
-    'VyYXRpb25DbWRIAFIOcXVlcnlPcGVyYXRpb25CBwoFaW5uZXI=');
+    'VyYXRpb25DbWRIAFIOcXVlcnlPcGVyYXRpb24SYAoUcHJvdmlzaW9uX2NyZWRlbnRpYWwYDCAB'
+    'KAsyKy5tdXhwb3J0LnByb3RvY29sLnYxLlByb3Zpc2lvbkNyZWRlbnRpYWxDbWRIAFITcHJvdm'
+    'lzaW9uQ3JlZGVudGlhbEIHCgVpbm5lcg==');
 
 @$core.Deprecated('Use startSessionCmdDescriptor instead')
 const StartSessionCmd$json = {
@@ -497,6 +508,41 @@ const QueryOperationCmd$json = {
 final $typed_data.Uint8List queryOperationCmdDescriptor = $convert.base64Decode(
     'ChFRdWVyeU9wZXJhdGlvbkNtZBInCg9pZGVtcG90ZW5jeV9rZXkYASABKAlSDmlkZW1wb3Rlbm'
     'N5S2V5');
+
+@$core.Deprecated('Use provisionCredentialCmdDescriptor instead')
+const ProvisionCredentialCmd$json = {
+  '1': 'ProvisionCredentialCmd',
+  '2': [
+    {'1': 'profile_id', '3': 1, '4': 1, '5': 9, '10': 'profileId'},
+    {'1': 'display_name', '3': 2, '4': 1, '5': 9, '10': 'displayName'},
+    {'1': 'provider', '3': 3, '4': 1, '5': 9, '10': 'provider'},
+    {'1': 'credential_type', '3': 4, '4': 1, '5': 9, '10': 'credentialType'},
+    {
+      '1': 'account_fingerprint',
+      '3': 5,
+      '4': 1,
+      '5': 9,
+      '10': 'accountFingerprint'
+    },
+    {'1': 'secret_nonce', '3': 6, '4': 1, '5': 12, '10': 'secretNonce'},
+    {
+      '1': 'secret_ciphertext',
+      '3': 7,
+      '4': 1,
+      '5': 12,
+      '10': 'secretCiphertext'
+    },
+  ],
+};
+
+/// Descriptor for `ProvisionCredentialCmd`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List provisionCredentialCmdDescriptor = $convert.base64Decode(
+    'ChZQcm92aXNpb25DcmVkZW50aWFsQ21kEh0KCnByb2ZpbGVfaWQYASABKAlSCXByb2ZpbGVJZB'
+    'IhCgxkaXNwbGF5X25hbWUYAiABKAlSC2Rpc3BsYXlOYW1lEhoKCHByb3ZpZGVyGAMgASgJUghw'
+    'cm92aWRlchInCg9jcmVkZW50aWFsX3R5cGUYBCABKAlSDmNyZWRlbnRpYWxUeXBlEi8KE2FjY2'
+    '91bnRfZmluZ2VycHJpbnQYBSABKAlSEmFjY291bnRGaW5nZXJwcmludBIhCgxzZWNyZXRfbm9u'
+    'Y2UYBiABKAxSC3NlY3JldE5vbmNlEisKEXNlY3JldF9jaXBoZXJ0ZXh0GAcgASgMUhBzZWNyZX'
+    'RDaXBoZXJ0ZXh0');
 
 @$core.Deprecated('Use commandResultDescriptor instead')
 const CommandResult$json = {

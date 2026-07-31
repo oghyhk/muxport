@@ -13,6 +13,16 @@ void main() {
       contains('android:dataExtractionRules="@xml/data_extraction_rules"'),
     );
     expect(manifest, contains('android:fullBackupContent="@xml/backup_rules"'));
+    expect(manifest, contains('android.permission.USE_BIOMETRIC'));
+    final activity = File(
+      'android/app/src/main/kotlin/io/muxport/mobile/MainActivity.kt',
+    ).readAsStringSync();
+    expect(activity, contains('FlutterFragmentActivity'));
+    expect(activity, contains('FLAG_SECURE'));
+    final styles = File(
+      'android/app/src/main/res/values/styles.xml',
+    ).readAsStringSync();
+    expect(styles, contains('Theme.AppCompat.DayNight'));
 
     final extractionRules = File(
       'android/app/src/main/res/xml/data_extraction_rules.xml',
@@ -58,5 +68,7 @@ void main() {
     final source = File('lib/security/device_identity.dart').readAsStringSync();
     expect(source, contains('KeychainAccessibility.first_unlock_this_device'));
     expect(source, contains('synchronizable: false'));
+    final info = File('ios/Runner/Info.plist').readAsStringSync();
+    expect(info, contains('NSFaceIDUsageDescription'));
   });
 }

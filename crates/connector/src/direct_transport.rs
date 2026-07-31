@@ -12,7 +12,7 @@ use muxport_crypto::{
     derive_shared_secret, pairing_connection_challenge,
     verify_authorized_initiator, CryptoError, DeviceRegistry, EncryptedFrame,
     InitiatorHello, KeyPair, ResponderHello, SessionCipher, SessionRole,
-    HANDSHAKE_PROTOCOL_VERSION,
+    SecretProvisioningKey, HANDSHAKE_PROTOCOL_VERSION,
 };
 use muxport_protocol::{muxport_envelope, Ack};
 use rand::rngs::OsRng;
@@ -29,6 +29,7 @@ use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const MAX_ENCRYPTED_RECORD_BYTES: usize =
@@ -431,13 +432,16 @@ impl DirectTransportService {
             &responder_key.public,
         )?;
         let transcript = authenticated_transcript(&initiator, &responder)?;
-        let shared_secret = derive_shared_secret(
+        let mut shared_secret = derive_shared_secret(
             responder_key.secret,
             verified.ephemeral_public(),
             &transcript,
         )?;
         let directional_keys =
             derive_session_keys(&shared_secret, &transcript)?;
+        let provisioning_key =
+            SecretProvisioningKey::derive(&shared_secret, &transcript)?;
+        shared_secret.zeroize();
         let cipher = SessionCipher::from_directional_keys(
             &directional_keys,
             SessionRole::Responder,
@@ -493,9 +497,11 @@ impl DirectTransportService {
             let authenticated = session.decrypt_command(&frame)?;
             let result = self
                 .command_router
-                .dispatch(
+                .dispatch_authenticated(
                     &authenticated.idempotency_key,
                     &authenticated.command,
+                    &authenticated.sender_id,
+                    &provisioning_key,
                 )
                 .await?;
             let response = session.encrypt_payload(

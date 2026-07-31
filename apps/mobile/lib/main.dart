@@ -7,10 +7,12 @@ import 'package:flutter_protocol/flutter_protocol.dart';
 import 'pairing/signed_pairing_offer.dart';
 import 'security/device_identity.dart';
 import 'security/sensitive_inputs.dart';
+import 'security/step_up_authenticator.dart';
 import 'screens/host_fleet_screen.dart';
 import 'screens/session_timeline_screen.dart';
 import 'screens/approval_inbox_screen.dart';
 import 'screens/credential_matrix_screen.dart';
+import 'screens/credential_provisioning_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'state/app_bootstrap.dart';
 import 'state/host_sync_orchestrator.dart';
@@ -149,6 +151,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
   bool _isForeground = true;
   final SensitiveInputRegistry _sensitiveInputs = SensitiveInputRegistry();
   final HostSyncOrchestrator _syncOrchestrator = const HostSyncOrchestrator();
+  final StepUpAuthenticator _stepUpAuthenticator =
+      PlatformStepUpAuthenticator();
 
   @override
   void initState() {
@@ -266,7 +270,12 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
             ? _respondToApproval
             : null,
       ),
-      CredentialMatrixScreen(hosts: _hosts.values),
+      CredentialMatrixScreen(
+        hosts: _hosts.values,
+        onProvisionCredential: _canProvisionCredential
+            ? _openCredentialProvisioning
+            : null,
+      ),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
     return Scaffold(
@@ -296,6 +305,39 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       !_pairingInProgress &&
       widget.bootstrap.canAuthenticateTransport &&
       widget.bootstrap.cacheStore != null;
+
+  bool get _canProvisionCredential =>
+      widget.bootstrap.identity != null &&
+      widget.bootstrap.canAuthenticateTransport &&
+      _hosts.values.any(
+        (host) =>
+            host.canMutate &&
+            host.directAddress != null &&
+            host.directPort != null,
+      );
+
+  Future<void> _openCredentialProvisioning() async {
+    final identity = widget.bootstrap.identity;
+    if (identity == null || !_canProvisionCredential) {
+      _showMessage(
+        'Connect to an authenticated host before adding a credential.',
+      );
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) => CredentialProvisioningScreen(
+          hosts: _hosts.values,
+          identity: identity,
+          sensitiveInputs: _sensitiveInputs,
+          stepUpAuthenticator: _stepUpAuthenticator,
+          onProvisioned: (host) async {
+            await _syncAllHosts();
+          },
+        ),
+      ),
+    );
+  }
 
   Future<void> _pairHost() async {
     final identity = widget.bootstrap.identity;

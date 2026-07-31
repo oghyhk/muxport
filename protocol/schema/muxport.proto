@@ -102,6 +102,7 @@ message Command {
     RotateCredentialCmd rotate_credential = 9;
     ProbeHostCmd probe_host = 10;
     QueryOperationCmd query_operation = 11;
+    ProvisionCredentialCmd provision_credential = 12;
   }
 }
 
@@ -155,6 +156,20 @@ message ProbeHostCmd {}
 
 message QueryOperationCmd {
   string idempotency_key = 1;
+}
+
+// The provider secret is never a plaintext command field. `secret_ciphertext`
+// is separately encrypted with a purpose-separated provisioning key derived
+// from the authenticated device/host handshake and bound to every metadata
+// field below.
+message ProvisionCredentialCmd {
+  string profile_id = 1;
+  string display_name = 2;
+  string provider = 3;
+  string credential_type = 4;
+  string account_fingerprint = 5;
+  bytes secret_nonce = 6;
+  bytes secret_ciphertext = 7;
 }
 
 // Command Result

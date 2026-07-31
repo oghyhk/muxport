@@ -3,7 +3,8 @@ use connector_core::{
     switch_runtime_assignment, CommandLedger, CoreError, CredentialSwitchError,
     RotationEligibility, RotationRequest, RotationTrigger,
 };
-use credential_vault::PersistentVault;
+use credential_vault::{CredentialEnrollment, PersistentVault};
+use muxport_crypto::{secret_provisioning_aad, SecretProvisioningKey};
 use muxport_protocol::{
     command, Command, CommandResult, CredentialStatus, RemoteOpState,
 };
@@ -42,6 +43,15 @@ pub struct CommandRouter {
         HashMap<String, Arc<StdRwLock<HashMap<String, String>>>>,
     vault: Option<Arc<Mutex<PersistentVault>>>,
     in_flight: StdMutex<HashMap<String, Arc<Notify>>>,
+}
+
+/// Context supplied only by an authenticated transport after the pairing and
+/// session checks have established the device identity. It is intentionally
+/// not stored in the command ledger or copied into command results.
+struct ProvisioningContext<'a> {
+    actor_id: &'a str,
+    idempotency_key: &'a str,
+    key: &'a SecretProvisioningKey,
 }
 
 impl CommandRouter {
@@ -147,6 +157,42 @@ impl CommandRouter {
         idempotency_key: &str,
         command: &Command,
     ) -> Result<CommandResult, CommandDispatchError> {
+        self.dispatch_with_context(idempotency_key, command, None).await
+    }
+
+    /// Dispatches a command received over a live authenticated transport.
+    /// Only this path is allowed to process the additional, separately
+    /// encrypted provider-secret envelope used by `ProvisionCredentialCmd`.
+    pub async fn dispatch_authenticated(
+        &self,
+        idempotency_key: &str,
+        command: &Command,
+        actor_id: &str,
+        provisioning_key: &SecretProvisioningKey,
+    ) -> Result<CommandResult, CommandDispatchError> {
+        if actor_id.trim().is_empty() {
+            return Err(CommandDispatchError::CorruptResult(
+                "authenticated provisioning actor is empty".into(),
+            ));
+        }
+        self.dispatch_with_context(
+            idempotency_key,
+            command,
+            Some(ProvisioningContext {
+                actor_id,
+                idempotency_key,
+                key: provisioning_key,
+            }),
+        )
+        .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        idempotency_key: &str,
+        command: &Command,
+        provisioning_context: Option<ProvisioningContext<'_>>,
+    ) -> Result<CommandResult, CommandDispatchError> {
         let fingerprint = command_fingerprint(command);
         let _dispatch_guard = 'reserve: loop {
             let prior = {
@@ -211,7 +257,7 @@ impl CommandRouter {
             return restore_stored_result(command, state, &stored_result);
         };
 
-        let execution = self.execute(command).await;
+        let execution = self.execute(command, provisioning_context).await;
         if matches!(
             &execution,
             Err(AdapterError::ConnectionLost)
@@ -275,7 +321,11 @@ impl CommandRouter {
             .map(|in_flight| in_flight.get(idempotency_key).cloned())
     }
 
-    async fn execute(&self, command: &Command) -> Result<Value, AdapterError> {
+    async fn execute(
+        &self,
+        command: &Command,
+        provisioning_context: Option<ProvisioningContext<'_>>,
+    ) -> Result<Value, AdapterError> {
         if command.command_id.trim().is_empty() {
             return Err(AdapterError::InvalidInput(
                 "command id must not be empty".into(),
@@ -602,6 +652,82 @@ impl CommandRouter {
                     "reason_code": decision.reason_code
                 }))
             }
+            Some(command::Inner::ProvisionCredential(request)) => {
+                let context = provisioning_context.ok_or_else(|| {
+                    AdapterError::Unsupported(
+                        "credential provisioning requires a live authenticated device session"
+                            .into(),
+                    )
+                })?;
+                if request.secret_nonce.len() != 12
+                    || request.secret_ciphertext.len() < 16
+                    || request.secret_ciphertext.len() > 64 * 1024 + 16
+                {
+                    return Err(AdapterError::InvalidInput(
+                        "credential provisioning envelope is invalid".into(),
+                    ));
+                }
+                let aad = secret_provisioning_aad(
+                    &self.host_id,
+                    context.actor_id,
+                    &command.command_id,
+                    context.idempotency_key,
+                    &request.profile_id,
+                    &request.display_name,
+                    &request.provider,
+                    &request.credential_type,
+                    &request.account_fingerprint,
+                )
+                .map_err(|_| {
+                    AdapterError::InvalidInput(
+                        "credential provisioning context is invalid".into(),
+                    )
+                })?;
+                let secret = context
+                    .key
+                    .open(
+                        &request.secret_nonce,
+                        &request.secret_ciphertext,
+                        &aad,
+                    )
+                    .map_err(|_| {
+                        AdapterError::InvalidInput(
+                            "credential provisioning envelope was rejected".into(),
+                        )
+                    })?;
+                let now = chrono::Utc::now().timestamp_millis();
+                let vault = self.vault.as_ref().ok_or_else(|| {
+                    AdapterError::Unsupported("credential vault is unavailable or locked".into())
+                })?;
+                vault
+                    .lock()
+                    .await
+                    .enroll_credential(
+                        CredentialEnrollment {
+                            profile_id: request.profile_id.clone(),
+                            display_name: request.display_name.clone(),
+                            provider: request.provider.clone(),
+                            credential_type: request.credential_type.clone(),
+                            account_fingerprint: request.account_fingerprint.clone(),
+                            created_at_ms: now,
+                            // Enrollment only records a secret after the host
+                            // has accepted its bound envelope. Provider
+                            // validation is performed before assignment.
+                            last_validated_at_ms: now,
+                        },
+                        secret.expose_secret(),
+                    )
+                    .map_err(|_| {
+                        AdapterError::InvalidInput(
+                            "credential enrollment was rejected by the host vault".into(),
+                        )
+                    })?;
+                Ok(json!({
+                    "profile_id": request.profile_id,
+                    "provider": request.provider,
+                    "provisioned_at_ms": now
+                }))
+            }
             None => Err(AdapterError::InvalidInput(
                 "command payload must not be empty".into(),
             )),
@@ -797,9 +923,10 @@ mod tests {
     use super::*;
     use connector_core::{RotationMode, RotationPool};
     use credential_vault::{CredentialEnrollment, KeyEncryptionKey};
+    use muxport_crypto::{secret_provisioning_aad, SecretProvisioningKey};
     use muxport_protocol::{
         AgentType, ChangeAssignmentCmd, Command, QueryOperationCmd, RotateCredentialCmd,
-        StartSessionCmd,
+        StartSessionCmd, ProvisionCredentialCmd,
     };
     use std::sync::Arc;
     use test_harness::DeterministicFakeAdapter;
@@ -1122,6 +1249,98 @@ mod tests {
             RemoteOpState::Expired
         );
         assert_eq!(adapter.start_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn provisioning_requires_live_bound_context_and_never_uses_plaintext_command_data() {
+        let db_path = std::env::temp_dir().join(format!(
+            "muxport-router-provisioning-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let vault_path = db_path.with_extension("vault");
+        let vault = Arc::new(Mutex::new(
+            PersistentVault::open_or_create(
+                &vault_path,
+                "host-test",
+                KeyEncryptionKey::derive_from_passphrase(
+                    b"test-only-vault-passphrase",
+                    &[8_u8; 16],
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        ));
+        let router = CommandRouter::open_sqlite_with_vault(
+            &db_path,
+            HashMap::new(),
+            Arc::clone(&vault),
+        )
+        .unwrap()
+        .with_host_id("host-test");
+        let key = SecretProvisioningKey::derive(
+            &[12_u8; 32],
+            b"authenticated-device-session",
+        )
+        .unwrap();
+        let command_id = "provision-command-1";
+        let idempotency_key = "provision-idempotency-1";
+        let aad = secret_provisioning_aad(
+            "host-test",
+            "device-test",
+            command_id,
+            idempotency_key,
+            "profile-provisioned",
+            "Provisioned Profile",
+            "openai",
+            "api_key",
+            "acct-provisioned",
+        )
+        .unwrap();
+        let (nonce, ciphertext) = key.seal(b"provider-secret-not-in-command", &aad).unwrap();
+        let command = Command {
+            command_id: command_id.into(),
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            inner: Some(command::Inner::ProvisionCredential(
+                ProvisionCredentialCmd {
+                    profile_id: "profile-provisioned".into(),
+                    display_name: "Provisioned Profile".into(),
+                    provider: "openai".into(),
+                    credential_type: "api_key".into(),
+                    account_fingerprint: "acct-provisioned".into(),
+                    secret_nonce: nonce.to_vec(),
+                    secret_ciphertext: ciphertext,
+                },
+            )),
+        };
+        assert!(
+            !String::from_utf8_lossy(&command.encode_to_vec())
+                .contains("provider-secret-not-in-command")
+        );
+
+        let unauthenticated = router
+            .dispatch("unauthenticated-provision", &command)
+            .await
+            .unwrap();
+        assert!(!unauthenticated.success);
+        assert!(vault.lock().await.get_profile("profile-provisioned").is_none());
+
+        let result = router
+            .dispatch_authenticated(idempotency_key, &command, "device-test", &key)
+            .await
+            .unwrap();
+        assert!(result.success, "{}", result.error_message);
+        let secret = vault
+            .lock()
+            .await
+            .decrypt_active_secret("profile-provisioned")
+            .unwrap();
+        assert_eq!(secret.expose_secret(), b"provider-secret-not-in-command");
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(vault_path);
     }
 
     #[tokio::test]
