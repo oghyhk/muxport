@@ -472,7 +472,7 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 - [ ] If work is active, default to “apply to new sessions”; require explicit drain/restart confirmation for immediate mode.
 - [x] Activate the credential through the supported adapter method.
 - [x] Read back account fingerprint/provider state.
-- [ ] Commit the assignment only after readback matches.
+- [x] Commit the assignment only after readback matches.
 - [x] On failure, retain or restore the previous assignment.
 - [ ] Record a redacted audit event and per-host result.
 

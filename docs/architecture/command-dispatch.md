@@ -1,7 +1,7 @@
 # Durable Command Dispatch
 
-- **Status:** Implemented local dispatch boundary; transport wiring pending
-- **Reviewed:** 2026-07-30
+- **Status:** Implemented authenticated direct dispatch and staged runtime activation
+- **Reviewed:** 2026-07-31
 
 ## Purpose
 
@@ -54,8 +54,16 @@ session-ID collision. Implemented commands route as follows:
 
 - start session, send input, steer, interrupt, and approve: selected adapter;
 - probe host: local success;
-- change assignment and rotate credential: fail closed until vault transactions
-  and managed profile isolation are connected.
+- runtime assignment to a staged credential: the router locks the host vault,
+  validates and activates through the selected managed adapter, confirms
+  provider account readback, and only then commits the vault version;
+- project assignment and rotation-pool commands: fail closed until the
+  desired-state assignment and pool registries are implemented.
+
+If activation or readback fails, the prior runtime credential is reactivated
+and the staged vault version remains available for diagnosis or retry. If
+runtime rollback itself cannot be confirmed, the durable command result is
+`ReconciliationRequired`, never a false failure or success.
 
 Adapter transport-loss and unknown-outcome errors become
 `ReconciliationRequired`. Known validation, unsupported-operation, and source
@@ -63,7 +71,11 @@ rejection errors become terminal failures.
 
 ## Boundary still pending
 
-No unauthenticated network listener is connected to this router. The next
-transport slice must authenticate the paired device, decrypt and validate the
-envelope, enforce recipient/boot/sequence rules, pass the header idempotency key
-and command to the router, then encrypt the returned `CommandResult`.
+The authenticated direct transport now decrypts and validates paired-device
+commands before this router and encrypts returned results. Secret enrollment
+and staging are intentionally not added to the ordinary command ledger: its
+SHA-256 command fingerprint would become an unnecessary offline verifier for
+secret material. A separate step-up-authenticated provisioning flow with
+domain-separated encryption and no secret-derived durable fingerprint is
+still required. Relay routing and the desired-state assignment registry also
+remain pending.
