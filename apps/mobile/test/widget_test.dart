@@ -201,6 +201,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Work account'), findsOneWidget);
     expect(find.textContaining('assigned to Codex'), findsOneWidget);
+    expect(
+      find.textContaining('validated 1970-01-01T00:00:00.010Z'),
+      findsOneWidget,
+    );
     expect(find.text('Active'), findsOneWidget);
   });
 }

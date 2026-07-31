@@ -271,7 +271,7 @@ rotation_pool_id?
 secret_handle          # opaque reference into vault
 ```
 
-- [ ] Display only labels, last validation time, account fingerprint, and status.
+- [x] Display only non-secret metadata: labels, provider, assignments, last validation time, account fingerprint, and status.
 - [x] Never reveal a stored API key after enrollment.
 - [x] Detect accidental duplicate enrollment using a non-reversible keyed fingerprint.
 - [ ] Provide disable and revoke separately; local disable must not falsely claim the provider key was revoked upstream.
@@ -292,7 +292,7 @@ secret_handle          # opaque reference into vault
 - [x] Protect each managed account with a separate runtime-state directory once supported isolation is validated.
 - [x] Enforce owner-only filesystem permissions on profile directories.
 - [ ] Record only an account fingerprint and plan label in Muxport metadata.
-- [ ] Do not include vendor-managed auth state in support bundles.
+- [x] Do not include vendor-managed auth state in support bundles.
 
 ## 9. Pairing and end-to-end encryption
 

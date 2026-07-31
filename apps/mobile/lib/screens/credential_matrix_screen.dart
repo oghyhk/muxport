@@ -69,6 +69,7 @@ class CredentialMatrixScreen extends StatelessWidget {
                           fallback: 'unknown provider',
                         ),
                         _maskedFingerprint(profile['accountFingerprint']),
+                        _lastValidated(profile['lastValidatedAtMs']),
                         if (assignments.isNotEmpty)
                           'assigned to ${assignments.join(', ')}',
                       ].join(' • '),
@@ -130,6 +131,14 @@ String _maskedFingerprint(Object? raw) {
     return fingerprint;
   }
   return '${fingerprint.substring(0, 8)}…${fingerprint.substring(fingerprint.length - 4)}';
+}
+
+String _lastValidated(Object? raw) {
+  if (raw is! int || raw <= 0) {
+    return 'never validated';
+  }
+  final timestamp = DateTime.fromMillisecondsSinceEpoch(raw, isUtc: true);
+  return 'validated ${timestamp.toIso8601String()}';
 }
 
 String _string(Object? value, {String fallback = ''}) {
