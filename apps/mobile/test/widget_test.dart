@@ -6,8 +6,10 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 
 import 'package:muxport_mobile/main.dart';
+import 'package:muxport_mobile/screens/session_timeline_screen.dart';
 import 'package:muxport_mobile/state/app_bootstrap.dart';
 import 'package:muxport_mobile/state/mobile_cache_store.dart';
 import 'package:muxport_mobile/state/mobile_sync_state.dart';
@@ -206,5 +208,53 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Active'), findsOneWidget);
+  });
+
+  testWidgets('opens recent bounded session output from the action sheet', (
+    tester,
+  ) async {
+    final host = HostSyncState(
+      hostId: 'host-1',
+      pinnedHostKey: 'public-key',
+      displayName: 'Development VPS',
+      protocolVersion: mobileProtocolVersion,
+      phase: HostSyncPhase.synchronized,
+      snapshot: const {
+        'activeSessions': [
+          {
+            'sessionId': 'session-1',
+            'runtimeId': 'codex-work',
+            'projectPath': '/srv/project',
+            'title': 'Live task',
+            'credentialProfileId': 'work-account',
+            'status': 'running',
+          },
+        ],
+        'recentEvents': [
+          {
+            'kind': 'streamDelta',
+            'sessionId': 'session-1',
+            'deltaText': 'Live response from the remote runtime.',
+          },
+        ],
+      },
+      cursor: const SyncCursor(hostEpoch: '1', sequence: 10),
+      sourceVersions: const {},
+      recentEventIds: const [],
+      pendingOperations: const {},
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SessionTimelineScreen(
+          hosts: [host],
+          onSendInput: (_, _, _, _) async {},
+        ),
+      ),
+    );
+    await tester.tap(find.text('Live task'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('View recent output'));
+    await tester.pumpAndSettle();
+    expect(find.text('Live response from the remote runtime.'), findsOneWidget);
   });
 }
