@@ -102,11 +102,15 @@ host snapshot.
 | `MUXPORT_OPENCODE_PASSWORD` | OpenCode HTTP Basic password | unset |
 | `MUXPORT_OPENCODE_RUNTIME_ID` | Stable OpenCode runtime correlation ID | `opencode-local` |
 | `MUXPORT_CODEX_PATH` | Codex executable used to own an App Server child | `codex` |
+| `MUXPORT_CODEX_PROFILE_ID` | Enables a connector-managed isolated Codex profile | unset |
+| `MUXPORT_CODEX_PROJECT` | Working directory for the managed Codex App Server | connector working directory |
 | `MUXPORT_CODEX_RUNTIME_ID` | Stable Codex runtime correlation ID | `codex-local` |
+| `MUXPORT_PROFILES_DIR` | Parent for isolated OpenCode and Codex profile roots | `./profiles` |
 
 Passwords are read from the environment and are not persisted in snapshots,
-events, or logs. Codex uses the account state already visible to its isolated
-process environment; the connector does not mutate that state.
+events, or logs. A managed Codex profile uses supported App Server account
+methods inside its isolated roots; the connector never edits Codex's
+credential or SQLite files.
 
 Desktop startup loads the host identity and provider-vault KEK from the native
 credential store. If either is locked or unavailable, non-secret runtime
@@ -124,6 +128,7 @@ mirroring continues while pairing and/or credential operations remain disabled.
 - Relay/direct delivery, client acknowledgements, snapshot transfer, command
   dispatch, and mobile application state replacement are not connected to this
   mirror yet.
-- Managed runtime restart and credential/profile isolation are not implemented.
-  OpenCode is observed externally; Codex owns one child using the current
-  process account state.
+- Managed OpenCode and Codex profiles are implemented for one configured
+  instance of each runtime. Multi-instance desired-state supervision,
+  surviving-child adoption, crash-loop policy, and Windows profile ACL
+  enforcement remain incomplete.

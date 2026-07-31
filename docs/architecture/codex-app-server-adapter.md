@@ -1,8 +1,8 @@
 # Codex App Server Adapter
 
-- **Status:** Implemented adapter and durable daemon mirror foundation
-- **Reviewed:** 2026-07-30
-- **Protocol fixture:** `codex-cli 0.146.0-alpha.3.1`
+- **Status:** Implemented adapter, isolated-account, and durable daemon mirror foundation
+- **Reviewed:** 2026-07-31
+- **Protocol fixtures:** generated `codex-cli 0.146.0-alpha.3.1` schemas and live `codex-cli 0.146.0`
 
 ## Protocol boundary
 
@@ -35,6 +35,9 @@ decisions can use the observed runtime rather than an assumed version.
 - Thread, turn, and agent-message notification normalization.
 - Command and file-change approval requests and one-shot accept/decline
   responses.
+- `account/read`, API-key login, ChatGPT browser/device-code login start,
+  login cancellation, logout, account-update tracking, and ChatGPT rate-limit
+  reads/updates.
 - Graceful stdin closure, bounded child wait, and forced termination fallback.
 
 Mutating transport failures return an unknown-outcome error and require source
@@ -54,13 +57,26 @@ Permission-profile requests, tool input, MCP elicitation, dynamic tools, and
 managed-token refresh are not represented by the current Muxport boolean
 approval command and are not claimed as supported.
 
-## Credential boundary
+## Credential and managed-profile boundary
 
-The adapter never calls account login/logout or writes Codex credential state.
-Profile-bound session creation, credential validation, and credential
-activation fail closed. Supporting multiple Codex accounts requires a managed
-process per profile with isolated `CODEX_HOME` state, staged validation,
-activation health checks, rollback, restart recovery, and compatibility tests.
+A managed profile is rooted at
+`<profiles_root>/codex/<profile_id>/`. It receives separate `CODEX_HOME` and
+`CODEX_SQLITE_HOME` directories and a scrubbed process environment. Arbitrary
+provider keys are not inherited. The connector forces Codex's supported
+file-based credential backend within that private `CODEX_HOME`; this avoids an
+OS keyring namespace shared by otherwise isolated profiles.
+
+Codex App Server remains the only component that writes its credential state.
+Muxport never reads, copies, edits, or backs up `auth.json` or Codex SQLite
+files. It starts and observes login through the documented `account/*`
+JSON-RPC methods. API-key activation is profile-bound and participates in the
+connector's staged activation/readback/rollback transaction. Browser and
+device-code login results expose only the supported URL/code ceremony; tokens
+never pass through the mobile protocol.
+
+Profile paths reject traversal and symbolic-link substitution and use mode
+`0700` on Unix. Windows owner-only ACL enforcement still requires a dedicated
+implementation and test before public release.
 
 ## Restart and reconciliation boundary
 
@@ -74,3 +90,10 @@ every 30 seconds, and reconnects this runtime independently with bounded
 backoff. Process-bound active turns and approvals still cannot be reconstructed
 after App Server loss, so they are cleared instead of being presented as
 actionable.
+
+The ignored live compatibility fixture starts official `codex-cli 0.146.0`,
+performs `initialize` and `account/read`, shuts it down, then repeats against
+the same isolated profile root. This verifies current argument ordering,
+environment selection, stdio framing, account schema, and same-profile
+restart. It intentionally uses a signed-out disposable profile and does not
+exercise a real user credential.

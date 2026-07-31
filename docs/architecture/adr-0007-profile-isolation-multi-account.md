@@ -12,6 +12,9 @@
      - Codex: `<profiles_root>/codex/<profile_id>/`
    - OpenCode receives isolated home and XDG roots and does not inherit
      arbitrary provider environment variables.
+   - Codex receives isolated `CODEX_HOME`, `CODEX_SQLITE_HOME`, and OS home
+     roots, a scrubbed environment, and the supported per-profile file
+     credential backend. App Server alone owns the credential file.
    - Externally adopted runtimes are read/control-only for credentials.
 2. **Session Identity Immutability:**
    - Every session records an immutable `session_binding` containing the `credential_profile_id` under which it was created.
@@ -23,6 +26,10 @@
 
 - Managed OpenCode sessions carry their bound profile ID into snapshots and
   normalized session events.
-- The design prevents intentional cross-profile state reuse. Complete
-  cross-platform proof still requires Windows ACL enforcement, real OpenCode
-  compatibility fixtures, Codex profile isolation, and crash-adoption tests.
+- The design prevents intentional cross-profile state reuse. Live disposable
+  fixtures now restart OpenCode 1.18.10 and Codex 0.146.0 against their
+  respective isolated roots on Linux.
+- Complete cross-platform proof still requires Windows ACL enforcement and
+  crash-adoption tests. OpenCode Go rotation also remains disabled because the
+  tested OpenCode release does not advertise that provider through its auth
+  discovery endpoint.

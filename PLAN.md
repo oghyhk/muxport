@@ -288,8 +288,8 @@ secret_handle          # opaque reference into vault
 
 ### Codex and OpenCode vendor state
 
-- [ ] Use supported login/auth APIs; never copy or edit vendor token databases.
-- [ ] Protect each managed account with a separate runtime-state directory once supported isolation is validated.
+- [x] Use supported login/auth APIs; never copy or edit vendor token databases.
+- [x] Protect each managed account with a separate runtime-state directory once supported isolation is validated.
 - [ ] Enforce owner-only filesystem permissions on profile directories.
 - [ ] Record only an account fingerprint and plan label in Muxport metadata.
 - [ ] Do not include vendor-managed auth state in support bundles.
@@ -538,14 +538,14 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ## 14. Codex adapter implementation
 
-- [ ] Launch `codex app-server` over stdio under a dedicated managed profile.
+- [x] Launch `codex app-server` over stdio under a dedicated managed profile.
 - [x] Perform initialization and capability negotiation.
 - [ ] Generate/test JSON-RPC schemas for the installed Codex version.
 - [ ] Implement thread list/read/start/resume/fork where supported.
-- [ ] Implement turn start, steer, and interrupt.
+- [x] Implement turn start, steer, and interrupt.
 - [ ] Stream thread, turn, item, message delta, command, file-change, diff, usage, warning, and completion notifications.
 - [x] Implement server-initiated command/edit approval requests and correlated responses.
-- [ ] Implement account read, login start/cancel, logout, update notifications, and rate-limit reads.
+- [x] Implement account read, login start/cancel, logout, update notifications, and rate-limit reads.
 - [ ] Preserve unknown notifications for compatibility diagnostics without displaying untrusted raw payloads as privileged UI.
 - [x] Keep stderr tracing separate from JSON-RPC stdout.
 - [ ] Apply bounded queues and backpressure; coalesce UI deltas before mobile transmission.
@@ -555,8 +555,8 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 - [ ] Detect App Server exit and capture only redacted crash metadata.
 - [ ] Mark any in-flight turn `outcome_unknown` until source reconciliation.
-- [ ] Restart the same isolated profile when policy allows.
-- [ ] Reinitialize and list/read persisted threads.
+- [x] Restart the same isolated profile when policy allows.
+- [x] Reinitialize and list/read persisted threads.
 - [ ] Compare known turn and item IDs with authoritative thread state.
 - [ ] Mark an unfinished turn interrupted/failed only when source state establishes that result; otherwise display “connection lost—verify before retry.”
 - [x] Never automatically resend the last turn.

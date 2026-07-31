@@ -134,6 +134,25 @@ into the managed runtime. This is a development path: crash adoption,
 multi-profile daemon registration, mobile enrollment, and production
 installers are not complete.
 
+### Development managed Codex profile
+
+The connector can own one Codex account profile with separate configuration,
+authentication, session, log, skill-metadata, and SQLite roots:
+
+```sh
+export MUXPORT_PROFILES_DIR="$PWD/muxport-profiles"
+export MUXPORT_CODEX_PROFILE_ID="personal"
+export MUXPORT_CODEX_PATH="/absolute/path/to/codex"
+export MUXPORT_CODEX_PROJECT="/absolute/path/to/project"
+cargo run -p connector --bin muxport-connector
+```
+
+This launches App Server over stdio with isolated `CODEX_HOME` and
+`CODEX_SQLITE_HOME` directories. Codex owns login persistence and token
+refresh. Muxport uses supported `account/*` methods and never reads, edits, or
+copies Codex credential/database files. Mobile account enrollment and
+multi-profile daemon registration remain incomplete.
+
 ## Security
 
 Never report a security issue containing live credentials in a public issue.
