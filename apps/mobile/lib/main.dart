@@ -169,9 +169,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         identityStatus: widget.bootstrap.identityStatus,
         onPairHost: _canPairHost ? _pairHost : null,
       ),
-      const SessionTimelineScreen(),
-      const ApprovalInboxScreen(),
-      const CredentialMatrixScreen(),
+      SessionTimelineScreen(hosts: _hosts.values),
+      ApprovalInboxScreen(hosts: _hosts.values),
+      CredentialMatrixScreen(hosts: _hosts.values),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
     return Scaffold(

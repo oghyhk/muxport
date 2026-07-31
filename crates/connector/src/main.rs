@@ -15,7 +15,8 @@ use credential_vault::{
 use event_journal::EventJournal;
 use futures::StreamExt;
 use muxport_protocol::{
-    event, AgentType, ConnectorState, Event, RuntimeState, RuntimeStateEvent,
+    event, AgentType, ConnectorState, CredentialProfileInfo, Event, RuntimeState,
+    RuntimeStateEvent,
 };
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
@@ -380,11 +381,11 @@ async fn main() -> Result<(), DynError> {
             (config.runtime_id.clone(), Arc::clone(adapter))
         })
         .collect();
-    let command_router = match credential_vault {
+    let command_router = match credential_vault.as_ref() {
         Some(vault) => Arc::new(CommandRouter::open_sqlite_with_vault(
             &command_db,
             adapter_registry,
-            vault,
+            Arc::clone(vault),
         )?),
         None => Arc::new(CommandRouter::open_sqlite(
             &command_db,
@@ -392,6 +393,10 @@ async fn main() -> Result<(), DynError> {
         )?),
     };
     info!(path = %command_db, "persistent command ledger initialized");
+    if let Some(vault) = credential_vault.as_ref() {
+        mirror.replace_credential_profiles(vault_profile_projection(&vault.lock().await));
+        mirror.save_snapshot(&journal)?;
+    }
 
     let (updates_tx, mut updates_rx) = mpsc::channel(SOURCE_UPDATE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -501,6 +506,11 @@ async fn main() -> Result<(), DynError> {
                     warn!("all runtime monitor tasks stopped");
                     break;
                 };
+                if let Some(vault) = credential_vault.as_ref() {
+                    mirror.replace_credential_profiles(
+                        vault_profile_projection(&vault.lock().await),
+                    );
+                }
                 apply_source_update(
                     update,
                     &mut journal,
@@ -1038,6 +1048,21 @@ fn managed_codex_profile(profile_id: &str) -> Result<ManagedCodexProfile, DynErr
         executable,
         project_directory,
     )?)
+}
+
+fn vault_profile_projection(vault: &PersistentVault) -> Vec<CredentialProfileInfo> {
+    vault
+        .list_profiles()
+        .into_iter()
+        .map(|profile| CredentialProfileInfo {
+            profile_id: profile.profile_id,
+            display_name: profile.display_name,
+            provider: profile.provider,
+            account_fingerprint: profile.account_fingerprint,
+            status: profile.status as i32,
+            last_validated_at_ms: profile.last_validated_at_ms,
+        })
+        .collect()
 }
 
 fn new_boot_epoch() -> u64 {

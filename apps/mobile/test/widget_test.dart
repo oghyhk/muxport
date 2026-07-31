@@ -89,4 +89,84 @@ void main() {
     expect(find.textContaining('ONLINE'), findsNothing);
     expect(find.textContaining('0 SECRETS'), findsNothing);
   });
+
+  testWidgets('renders synchronized session approval and account projections', (
+    tester,
+  ) async {
+    final host = HostSyncState(
+      hostId: 'host-1',
+      pinnedHostKey: 'public-key',
+      displayName: 'Development VPS',
+      protocolVersion: mobileProtocolVersion,
+      phase: HostSyncPhase.synchronized,
+      snapshot: const {
+        'runtimes': [
+          {
+            'runtimeId': 'codex-managed-work',
+            'name': 'Codex',
+            'activeCredentialProfileId': 'work-account',
+          },
+        ],
+        'activeSessions': [
+          {
+            'sessionId': 'session-1',
+            'runtimeId': 'codex-managed-work',
+            'projectPath': '/srv/project',
+            'title': 'Implement sync',
+            'credentialProfileId': 'work-account',
+            'status': 'waiting_approval',
+          },
+        ],
+        'credentialProfiles': [
+          {
+            'profileId': 'work-account',
+            'displayName': 'Work account',
+            'provider': 'openai',
+            'accountFingerprint': 'fingerprint-1234567890',
+            'status': 1,
+            'lastValidatedAtMs': 10,
+          },
+        ],
+        'recentEvents': [
+          {
+            'eventId': 'event-1',
+            'timestampMs': 10,
+            'kind': 'approvalRequested',
+            'approvalId': 'approval-1234567890',
+            'sessionId': 'session-1',
+            'actionType': 'command',
+          },
+        ],
+      },
+      cursor: const SyncCursor(hostEpoch: '1', sequence: 10),
+      sourceVersions: const {},
+      recentEventIds: const [],
+      pendingOperations: const {},
+    );
+    final bootstrap = AppBootstrapState(
+      cache: MobileCacheSnapshot(hosts: [host]),
+      cacheGeneration: 1,
+      cacheStatus: CacheBootstrapStatus.ready,
+      identity: null,
+      identityStatus: IdentityBootstrapStatus.unavailable,
+    );
+    await tester.pumpWidget(MuxportApp(bootstrap: Future.value(bootstrap)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Sessions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Implement sync'), findsOneWidget);
+    expect(find.textContaining('profile work-account'), findsOneWidget);
+
+    await tester.tap(find.text('Approvals'));
+    await tester.pumpAndSettle();
+    expect(find.text('command approval'), findsOneWidget);
+    expect(find.text('Session session-1'), findsOneWidget);
+
+    await tester.tap(find.text('Accounts'));
+    await tester.pumpAndSettle();
+    expect(find.text('Work account'), findsOneWidget);
+    expect(find.textContaining('assigned to Codex'), findsOneWidget);
+    expect(find.text('Active'), findsOneWidget);
+  });
 }

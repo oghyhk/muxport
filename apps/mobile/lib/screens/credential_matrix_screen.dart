@@ -1,78 +1,144 @@
 import 'package:flutter/material.dart';
 
+import '../state/mobile_sync_state.dart';
+
 class CredentialMatrixScreen extends StatelessWidget {
-  const CredentialMatrixScreen({super.key});
+  const CredentialMatrixScreen({required this.hosts, super.key});
+
+  final Iterable<HostSyncState> hosts;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Account Profiles & Rotation'),
-        actions: [IconButton(icon: const Icon(Icons.add), onPressed: null)],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
-        children: [
-          _buildProfileTile(
-            name: 'opencode-go-profile-1',
-            provider: 'OpenCode Go',
-            fingerprint: 'sha256:a1b2c3d4...',
-            status: 'Active',
-            statusColor: Colors.green,
-          ),
-          _buildProfileTile(
-            name: 'opencode-go-profile-2',
-            provider: 'OpenCode Go',
-            fingerprint: 'sha256:e5f6g7h8...',
-            status: 'Staged / Cooling Down',
-            statusColor: Colors.orange,
-          ),
-          _buildProfileTile(
-            name: 'codex-work-api-key',
-            provider: 'Codex / OpenAI',
-            fingerprint: 'sha256:99887766...',
-            status: 'Active',
-            statusColor: Colors.green,
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.sync_alt),
-            label: const Text('One-Tap Bulk Identity Switch'),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.all(16),
-              backgroundColor: Colors.purple,
-            ),
-            onPressed: null,
-          ),
-        ],
-      ),
+    final profiles =
+        <({HostSyncState host, Map<String, Object?> profile})>[];
+    for (final host in hosts) {
+      final raw = host.snapshot['credentialProfiles'] as List? ?? const [];
+      for (final value in raw) {
+        if (value is Map) {
+          profiles.add((
+            host: host,
+            profile: Map<String, Object?>.from(value),
+          ));
+        }
+      }
+    }
+    profiles.sort(
+      (left, right) => _string(
+        left.profile['displayName'],
+      ).compareTo(_string(right.profile['displayName'])),
     );
-  }
 
-  Widget _buildProfileTile({
-    required String name,
-    required String provider,
-    required String fingerprint,
-    required String status,
-    required Color statusColor,
-  }) {
-    return Card(
-      child: ListTile(
-        leading: const Icon(Icons.vpn_key, color: Colors.purpleAccent),
-        title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-        subtitle: Text('$provider • $fingerprint'),
-        trailing: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: statusColor.withValues(alpha: 0.2),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: Text(
-            status,
-            style: TextStyle(color: statusColor, fontSize: 10),
-          ),
-        ),
-      ),
+    return Scaffold(
+      appBar: AppBar(title: const Text('Account Profiles & Assignments')),
+      body: profiles.isEmpty
+          ? const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'No credential profiles are present in the latest '
+                  'authenticated host snapshots.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: profiles.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final item = profiles[index];
+                final profile = item.profile;
+                final profileId = _string(profile['profileId']);
+                final assignments = _runtimeAssignments(
+                  item.host,
+                  profileId,
+                );
+                final status = _credentialStatus(profile['status']);
+                return Card(
+                  child: ListTile(
+                    leading: const Icon(
+                      Icons.vpn_key_outlined,
+                      color: Colors.purpleAccent,
+                    ),
+                    title: Text(
+                      _string(
+                        profile['displayName'],
+                        fallback: profileId.isEmpty
+                            ? 'Unnamed profile'
+                            : profileId,
+                      ),
+                    ),
+                    subtitle: Text(
+                      [
+                        item.host.displayName,
+                        _string(profile['provider'], fallback: 'unknown provider'),
+                        _maskedFingerprint(profile['accountFingerprint']),
+                        if (assignments.isNotEmpty)
+                          'assigned to ${assignments.join(', ')}',
+                      ].join(' • '),
+                    ),
+                    trailing: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(status),
+                        if (!item.host.canMutate)
+                          const Text(
+                            'STALE',
+                            style: TextStyle(
+                              color: Colors.amber,
+                              fontSize: 10,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
+}
+
+List<String> _runtimeAssignments(HostSyncState host, String profileId) {
+  final result = <String>[];
+  final runtimes = host.snapshot['runtimes'] as List? ?? const [];
+  for (final value in runtimes) {
+    if (value is! Map) {
+      continue;
+    }
+    final runtime = Map<String, Object?>.from(value);
+    if (runtime['activeCredentialProfileId'] == profileId) {
+      result.add(
+        _string(runtime['name'], fallback: _string(runtime['runtimeId'])),
+      );
+    }
+  }
+  return result;
+}
+
+String _credentialStatus(Object? raw) {
+  return switch (raw) {
+    1 => 'Active',
+    2 => 'Staged',
+    3 => 'Cooling down',
+    4 => 'Invalid',
+    5 => 'Revoked',
+    _ => 'Unknown',
+  };
+}
+
+String _maskedFingerprint(Object? raw) {
+  final fingerprint = _string(raw);
+  if (fingerprint.isEmpty) {
+    return 'no account fingerprint';
+  }
+  if (fingerprint.length <= 12) {
+    return fingerprint;
+  }
+  return '${fingerprint.substring(0, 8)}…${fingerprint.substring(fingerprint.length - 4)}';
+}
+
+String _string(Object? value, {String fallback = ''}) {
+  return value is String && value.trim().isNotEmpty ? value : fallback;
 }

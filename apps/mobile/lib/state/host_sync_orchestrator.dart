@@ -206,6 +206,33 @@ NormalizedSyncEvent _normalizeEvent(
     'timestampMs': event.timestampMs.toInt(),
     'kind': event.whichInner().name,
   };
+  switch (event.whichInner()) {
+    case wire.Event_Inner.approvalRequested:
+      payload.addAll({
+        'approvalId': event.approvalRequested.approvalId,
+        'sessionId': event.approvalRequested.sessionId,
+        'actionType': event.approvalRequested.actionType,
+      });
+    case wire.Event_Inner.approvalResolved:
+      payload.addAll({
+        'approvalId': event.approvalResolved.approvalId,
+        'sessionId': event.approvalResolved.sessionId,
+        'approved': event.approvalResolved.approved,
+      });
+    case wire.Event_Inner.sessionUpdated:
+      payload.addAll({
+        'sessionId': event.sessionUpdated.sessionId,
+        'runtimeId': event.sessionUpdated.runtimeId,
+        'status': event.sessionUpdated.status,
+      });
+    case wire.Event_Inner.credentialRotated:
+      payload.addAll({
+        'profileId': event.credentialRotated.profileId,
+        'runtimeId': event.credentialRotated.runtimeId,
+      });
+    default:
+      break;
+  }
   final sourceId = switch (event.whichInner()) {
     wire.Event_Inner.hostStatus => event.hostStatus.hostId,
     wire.Event_Inner.runtimeState => event.runtimeState.runtimeId,

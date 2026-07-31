@@ -26,7 +26,8 @@ pub use secure_session::{
 use adapter_api::{ProjectInfo, SessionSummary};
 use event_journal::{EventJournal, JournalError};
 use muxport_protocol::{
-    event, AgentType, ConnectorState, Event, HostSnapshot, RuntimeInfo, RuntimeState, SessionInfo,
+    event, AgentType, ConnectorState, CredentialProfileInfo, Event, HostSnapshot, RuntimeInfo,
+    RuntimeState, SessionInfo,
 };
 
 /// In-memory projection of authoritative runtime snapshots plus journaled
@@ -167,6 +168,11 @@ impl RuntimeMirror {
         {
             runtime.active_credential_profile_id = profile_id.to_owned();
         }
+    }
+
+    pub fn replace_credential_profiles(&mut self, mut profiles: Vec<CredentialProfileInfo>) {
+        profiles.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
+        self.snapshot.credential_profiles = profiles;
     }
 
     /// Adds the runtime correlation missing from a vendor-neutral adapter
@@ -413,7 +419,7 @@ fn runtime_state_for_session_status(status: &str) -> Option<RuntimeState> {
 mod tests {
     use super::*;
     use muxport_protocol::{
-        ApprovalResolvedEvent, SessionUpdatedEvent, StreamDeltaEvent,
+        ApprovalResolvedEvent, CredentialStatus, SessionUpdatedEvent, StreamDeltaEvent,
     };
 
     fn session(id: &str, project_path: &str, title: &str, status: &str) -> SessionSummary {
@@ -464,6 +470,36 @@ mod tests {
             snapshot.runtimes[0].active_credential_profile_id,
             "go-account-a"
         );
+    }
+
+    #[test]
+    fn credential_profile_projection_is_authoritative_and_sorted() {
+        let mut mirror =
+            RuntimeMirror::new("host", "hostname", ConnectorState::Recovering, 0);
+        mirror.replace_credential_profiles(vec![
+            CredentialProfileInfo {
+                profile_id: "profile-b".into(),
+                display_name: "B".into(),
+                provider: "openai".into(),
+                account_fingerprint: "fingerprint-b".into(),
+                status: CredentialStatus::Staged as i32,
+                last_validated_at_ms: 2,
+            },
+            CredentialProfileInfo {
+                profile_id: "profile-a".into(),
+                display_name: "A".into(),
+                provider: "openai".into(),
+                account_fingerprint: "fingerprint-a".into(),
+                status: CredentialStatus::Active as i32,
+                last_validated_at_ms: 1,
+            },
+        ]);
+        let snapshot = mirror.snapshot_at(0);
+        assert_eq!(snapshot.credential_profiles.len(), 2);
+        assert_eq!(snapshot.credential_profiles[0].profile_id, "profile-a");
+
+        mirror.replace_credential_profiles(Vec::new());
+        assert!(mirror.snapshot_at(0).credential_profiles.is_empty());
     }
 
     #[test]
