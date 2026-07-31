@@ -9,6 +9,7 @@ class CredentialMatrixScreen extends StatelessWidget {
     this.onProvisionCredential,
     this.onAssignCredential,
     this.onRotateCredential,
+    this.onBulkAssignCredentials,
     super.key,
   });
 
@@ -26,6 +27,8 @@ class CredentialMatrixScreen extends StatelessWidget {
     String rotationPoolId,
   )?
   onRotateCredential;
+  final Future<void> Function(List<BulkCredentialSwitchTarget> targets)?
+  onBulkAssignCredentials;
 
   @override
   Widget build(BuildContext context) {
@@ -174,21 +177,86 @@ class CredentialMatrixScreen extends StatelessWidget {
       provider: provider,
       accountFingerprint: fingerprint,
     );
+    if (onBulkAssignCredentials == null) {
+      return;
+    }
+    final selected = {...plan.ready};
     await showDialog<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Multi-host switch impact'),
-        content: Text(
-          'Ready: ${plan.ready.length}\nAlready assigned: ${plan.alreadyAssigned.length}\nOffline or stale: ${plan.offline.length}\nMissing this account: ${plan.missingProfile.length}\n\nOnly ready targets can be selected for dispatch. No host has changed.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Close'),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Multi-host switch impact'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Applies to future work only. Busy runtimes are never '
+                    'stopped or moved automatically.',
+                  ),
+                  const SizedBox(height: 12),
+                  Text('Ready to switch: ${plan.ready.length}'),
+                  for (final target in plan.ready)
+                    CheckboxListTile(
+                      value: selected.contains(target),
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(_targetLabel(target)),
+                      onChanged: (checked) => setDialogState(() {
+                        if (checked == true) {
+                          selected.add(target);
+                        } else {
+                          selected.remove(target);
+                        }
+                      }),
+                    ),
+                  Text('Already assigned: ${plan.alreadyAssigned.length}'),
+                  Text('Offline or stale: ${plan.offline.length}'),
+                  Text('Missing this account: ${plan.missingProfile.length}'),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Each selected runtime is an independent, persisted '
+                    'operation. Results can be partial; unconfirmed results '
+                    'will be reconciled before they are safe to retry.',
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: selected.isEmpty
+                  ? null
+                  : () async {
+                      final targets = selected.toList(growable: false);
+                      Navigator.of(dialogContext).pop();
+                      await onBulkAssignCredentials!(targets);
+                    },
+              child: Text('Switch ${selected.length}'),
+            ),
+          ],
+        ),
       ),
     );
+  }
+
+  String _targetLabel(BulkCredentialSwitchTarget target) {
+    for (final raw in target.host.snapshot['runtimes'] as List? ?? const []) {
+      if (raw is Map) {
+        final runtime = Map<String, Object?>.from(raw);
+        if (_string(runtime['runtimeId']) == target.runtimeId) {
+          return '${target.host.displayName} · ${_string(runtime['name'], fallback: target.runtimeId)}';
+        }
+      }
+    }
+    return '${target.host.displayName} · ${target.runtimeId}';
   }
 
   Future<void> _chooseRuntimeAssignment(

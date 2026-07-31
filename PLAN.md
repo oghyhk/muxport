@@ -478,12 +478,12 @@ After any restart, Muxport must reconstruct truth from the source runtime before
 
 ### Bulk switch
 
-- [ ] Build and display an impact plan before dispatch.
+- [x] Build and display an impact plan before dispatch.
 - [ ] List compatible, incompatible, offline, locked, busy, and unmanaged runtimes separately.
-- [ ] Let the user exclude individual targets.
-- [ ] Dispatch one independently idempotent child operation per host/runtime.
-- [ ] Show partial progress and partial failure honestly.
-- [ ] Do not claim global success until every selected target has reconciled.
+- [x] Let the user exclude individual targets.
+- [x] Dispatch one independently idempotent child operation per host/runtime.
+- [x] Show partial progress and partial failure honestly.
+- [x] Do not claim global success until every selected target has reconciled.
 - [ ] Offer retry for failed targets with the original operation group ID.
 - [ ] Never attempt distributed rollback of already successful hosts unless the user explicitly chooses “revert successful targets.”
 
@@ -782,7 +782,7 @@ Exit: one app operates OpenCode and Codex through one normalized UI without losi
 
 - [x] Pair multiple hosts.
 - [x] Implement assignment precedence and operation impact planning.
-- [ ] Implement bulk switching with partial results.
+- [x] Implement bulk switching with partial results.
 - [ ] Implement rotation pools, cooldown, round robin, schedule, and guarded failover.
 - [ ] Add audit log and device/host revocation.
 
@@ -854,7 +854,7 @@ Every incident runbook must preserve facts, hypotheses, unknowns, logs, file has
 ### Credential safety
 
 - [ ] Provider secrets are absent from relay storage, mobile cache, logs, analytics, crash reports, push payloads, and repository history.
-- [ ] Bulk switch requires step-up authentication and impact confirmation.
+- [x] Bulk switch requires step-up authentication and impact confirmation.
 - [ ] New credential activation validates before replacing the old assignment.
 - [ ] Vault backup and restore pass an isolated recovery drill.
 

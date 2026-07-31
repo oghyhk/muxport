@@ -16,6 +16,7 @@ import 'screens/credential_matrix_screen.dart';
 import 'screens/credential_provisioning_screen.dart';
 import 'screens/diagnostics_screen.dart';
 import 'state/app_bootstrap.dart';
+import 'state/bulk_switch_plan.dart';
 import 'state/host_sync_orchestrator.dart';
 import 'state/mobile_cache_store.dart';
 import 'state/mobile_lifecycle.dart';
@@ -27,6 +28,8 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MuxportApp());
 }
+
+enum _BulkAssignmentOutcome { confirmed, rejected, unknown, unavailable }
 
 class MuxportApp extends StatelessWidget {
   const MuxportApp({super.key, this.bootstrap});
@@ -290,6 +293,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
         onRotateCredential: _canAssignCredential
             ? _rotateCredentialForRuntime
             : null,
+        onBulkAssignCredentials: _canAssignCredential
+            ? _bulkAssignCredentials
+            : null,
       ),
       DiagnosticsScreen(bootstrap: widget.bootstrap, hosts: _hosts.values),
     ];
@@ -448,6 +454,131 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       _showMessage(
         'Assignment outcome is unknown; verify host state before retrying: $error',
       );
+    } finally {
+      await connection?.close();
+    }
+  }
+
+  Future<void> _bulkAssignCredentials(
+    List<BulkCredentialSwitchTarget> targets,
+  ) async {
+    final identity = widget.bootstrap.identity;
+    final cacheStore = widget.bootstrap.cacheStore;
+    if (targets.isEmpty || identity == null || cacheStore == null) {
+      return;
+    }
+    final authorized = await _stepUpAuthenticator.authorize(
+      reason:
+          'Authorize changing credentials for ${targets.length} remote runtimes',
+    );
+    if (!authorized || !mounted) {
+      if (mounted) {
+        _showMessage('Device authentication is required. No changes were sent.');
+      }
+      return;
+    }
+
+    var confirmed = 0;
+    var rejected = 0;
+    var unknown = 0;
+    var unavailable = 0;
+    for (var index = 0; index < targets.length; index += 1) {
+      final target = targets[index];
+      final outcome = await _dispatchBulkCredentialAssignment(
+        target,
+        identity,
+        cacheStore,
+        index,
+      );
+      switch (outcome) {
+        case _BulkAssignmentOutcome.confirmed:
+          confirmed += 1;
+        case _BulkAssignmentOutcome.rejected:
+          rejected += 1;
+        case _BulkAssignmentOutcome.unknown:
+          unknown += 1;
+        case _BulkAssignmentOutcome.unavailable:
+          unavailable += 1;
+      }
+    }
+    if (mounted) {
+      _showMessage(
+        'Multi-host switch: $confirmed confirmed, $rejected rejected, '
+        '$unknown need reconciliation, $unavailable unavailable. '
+        'No global success is claimed until every selected runtime reconciles.',
+      );
+    }
+    unawaited(_syncAllHosts());
+  }
+
+  Future<_BulkAssignmentOutcome> _dispatchBulkCredentialAssignment(
+    BulkCredentialSwitchTarget target,
+    MobileDeviceIdentity identity,
+    GenerationMobileCacheStore cacheStore,
+    int index,
+  ) async {
+    final host = _hosts[target.host.hostId];
+    if (host == null ||
+        !host.canMutate ||
+        host.directAddress == null ||
+        host.directPort == null ||
+        target.runtimeId.trim().isEmpty ||
+        target.credentialProfileId.trim().isEmpty) {
+      return _BulkAssignmentOutcome.unavailable;
+    }
+    final now = DateTime.now();
+    final operationId =
+        'bulk-assignment-${identity.deviceId}-${now.microsecondsSinceEpoch}-$index';
+    final pending = PendingOperation.local(
+      idempotencyKey: operationId,
+      kind: 'assignment:${target.runtimeId}',
+      createdAtMs: now.millisecondsSinceEpoch,
+      deadlineMs: now.add(const Duration(seconds: 30)).millisecondsSinceEpoch,
+    );
+    final pendingHost = host.addPendingOperation(pending);
+    await _persistHost(pendingHost, cacheStore);
+
+    AuthenticatedDirectConnection? connection;
+    try {
+      connection = await AuthenticatedDirectConnection.connect(
+        address: host.directAddress!,
+        port: host.directPort!,
+        pinnedHost: PinnedHostIdentity(
+          hostId: host.hostId,
+          publicKeyHex: host.pinnedHostKey,
+        ),
+        identity: identity,
+      );
+      final result = await connection.changeRuntimeAssignment(
+        commandId: operationId,
+        idempotencyKey: operationId,
+        runtimeId: target.runtimeId,
+        credentialProfileId: target.credentialProfileId,
+      );
+      final state =
+          result.state.value >= 0 &&
+              result.state.value < RemoteOpState.values.length
+          ? RemoteOpState.values[result.state.value]
+          : RemoteOpState.reconciliationRequired;
+      final resolved = (_hosts[host.hostId] ?? pendingHost).resolveOperation(
+        operationId,
+        state,
+      );
+      await _persistHost(resolved, cacheStore);
+      if (!result.success) {
+        return _BulkAssignmentOutcome.rejected;
+      }
+      return state == RemoteOpState.reconciliationRequired
+          ? _BulkAssignmentOutcome.unknown
+          : _BulkAssignmentOutcome.confirmed;
+    } on Object {
+      final current = _hosts[host.hostId] ?? pendingHost;
+      final unresolved = current.resolveOperation(
+        operationId,
+        RemoteOpState.reconciliationRequired,
+      );
+      await _persistHost(unresolved, cacheStore);
+      return _BulkAssignmentOutcome.unknown;
     } finally {
       await connection?.close();
     }
